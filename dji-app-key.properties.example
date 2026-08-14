@@ -1,0 +1,6 @@
+# Copy this file to dji-app-key.properties and fill in local-only values.
+# dji-app-key.properties is gitignored; never commit the real DJI app key.
+
+DJI_API_KEY=<your-dji-app-key>
+MEDIAMTX_LAN_IP=192.168.1.50
+STREAM_ID=agent-001-main

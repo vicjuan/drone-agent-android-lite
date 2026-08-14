@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+dji-app-key.properties
+*.iml
+.idea/
+.DS_Store
