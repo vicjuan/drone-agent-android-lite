@@ -20,11 +20,14 @@
             android:name="com.dji.sdk.API_KEY"
             android:value="${djiApiKey}" />
 
+        <!-- Fullscreen, no title bar: the camera image is the background of the
+             whole screen and system chrome would only cover video. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait">
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

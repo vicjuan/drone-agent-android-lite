@@ -16,8 +16,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
-/** The four body-frame axes a stick command can drive. */
-enum class StickAxis { FORWARD, RIGHT, UP, YAW }
+/** Which of the two Mode 2 sticks a sample came from. */
+enum class StickSide { LEFT, RIGHT }
 
 /** What the aircraft currently reports about virtual-stick control. */
 data class VirtualStickStatus(
@@ -32,7 +32,7 @@ data class VirtualStickStatus(
  * The aircraft treats virtual stick as a live control link: it expects a fresh
  * parameter frame at a steady cadence, and it stops honouring the link when the
  * frames stop arriving. Producing frames is therefore this class's job alone —
- * callers only move axes, and a released axis is a zero, never a missing frame.
+ * callers only move sticks, and a released stick is a zero, never a missing frame.
  *
  * Axis semantics (advanced mode, BODY frame) as measured on a Mini 4 Pro on
  * 2026-08-14: MSDK's `roll` drives the body X axis (forward/back) and `pitch`
@@ -121,12 +121,22 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
         )
     }
 
-    fun setAxis(axis: StickAxis, value: Double) {
-        when (axis) {
-            StickAxis.FORWARD -> forward = value
-            StickAxis.RIGHT -> right = value
-            StickAxis.UP -> up = value
-            StickAxis.YAW -> yawRate = value
+    /**
+     * Mode 2 sample from one stick, in normalised [-1, 1] with y positive up:
+     * left = (yaw, climb), right = (lateral, forward). The UI stays in stick
+     * units and this class owns the conversion to aircraft units, so the speed
+     * envelope has exactly one definition.
+     */
+    fun setStick(side: StickSide, x: Double, y: Double) {
+        when (side) {
+            StickSide.LEFT -> {
+                yawRate = x.coerceIn(-1.0, 1.0) * MAX_YAW_DEGREES_PER_SECOND
+                up = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
+            }
+            StickSide.RIGHT -> {
+                right = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                forward = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+            }
         }
     }
 
@@ -178,6 +188,12 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
     companion object {
         /** MSDK's documented virtual-stick cadence; the main project uses the same rate. */
         const val FRAME_RATE_HZ = 20L
+
+        /** Full-deflection speeds. Deliberately gentle: this app has no flight envelope guard. */
+        const val MAX_HORIZONTAL_MPS = 0.5
+        const val MAX_VERTICAL_MPS = 0.3
+        const val MAX_YAW_DEGREES_PER_SECOND = 20.0
+
         private const val TAG = "LiteVirtualStick"
     }
 }
