@@ -211,6 +211,7 @@ class BlackTapeDetector(
                 ),
                 confidence = winner.score.coerceIn(0.0, 1.0),
                 angleFromVerticalDegrees = winner.angleFromVerticalDegrees,
+                longSideFraction = winner.longSideFraction,
             )
         } finally {
             contours.forEach(MatOfPoint::release)
@@ -276,9 +277,10 @@ class BlackTapeDetector(
             return null
         }
         return Candidate(
-            bounds,
-            checkNotNull(TapeCandidatePolicy.score(metrics)),
-            longAxisDeviationFromVertical(orientedBounds),
+            bounds = bounds,
+            score = checkNotNull(TapeCandidatePolicy.score(metrics)),
+            angleFromVerticalDegrees = longAxisDeviationFromVertical(orientedBounds),
+            longSideFraction = metrics.longSideFraction,
         )
     }
 
@@ -374,6 +376,7 @@ class BlackTapeDetector(
         val bounds: Rect,
         val score: Double,
         val angleFromVerticalDegrees: Double,
+        val longSideFraction: Double,
     )
 
     private companion object {

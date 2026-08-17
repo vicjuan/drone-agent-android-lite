@@ -8,11 +8,13 @@ data class TapeDetection(
     val bounds: NormalizedRect,
     val confidence: Double,
     val angleFromVerticalDegrees: Double,
+    val longSideFraction: Double,
 ) {
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
         require(confidence in 0.0..1.0)
         require(angleFromVerticalDegrees in -90.0..90.0)
+        require(longSideFraction > 0.0 && longSideFraction.isFinite())
     }
 }
 

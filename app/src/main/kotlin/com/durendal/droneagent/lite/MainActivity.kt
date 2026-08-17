@@ -118,6 +118,8 @@ class MainActivity : Activity() {
     private var horizontalRawMinMm: Int? = null
     private var horizontalRawMaxMm: Int? = null
     private var horizontalDetectedCount = 0
+    private var horizontalGroundEchoCount = 0
+    private var horizontalGroundEchoSuppressed = false
     private var horizontalSampleCount = 0
     private var horizontalAngleIntervalDegrees = 0
     private var upwardObstacleMm: Int? = null
@@ -137,9 +139,10 @@ class MainActivity : Activity() {
     private var shuttleStep: ShuttleStep? = null
     private var shuttleAuthoritySeen = false
 
-    /** Battery percentage and low-cell flag, observed without autonomous actuation. */
+    /** Battery percentage and one-shot forced-landing policy. */
     private var batteryPercent: Int? = null
     private var lowCellVoltage = false
+    private val batteryLandingGate = BatteryLandingGate()
 
     /** Latest aircraft yaw and one operator-requested directed half-turn. */
     private var aircraftHeadingDegrees: Double? = null
@@ -156,6 +159,9 @@ class MainActivity : Activity() {
     private var tapeTrackingStartedAtNanos = 0L
     private var renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
     private var commandedTapeYawRate = 0.0
+    private var commandedTapeForwardSpeed = 0.0
+    private var tapeEndpointTurn = false
+    @Volatile private var tapeDetectionPaused = false
 
 
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
@@ -268,7 +274,9 @@ class MainActivity : Activity() {
         preview = CameraPreview(
             context = this,
             onRgbaFrame = { frameData, offset, length, width, height ->
-                tapeDetector?.submitRgba(frameData, offset, length, width, height)
+                if (!tapeDetectionPaused) {
+                    tapeDetector?.submitRgba(frameData, offset, length, width, height)
+                }
             },
             onFrameStreamStale = ::handleTapeFrameStreamStale,
         )
@@ -307,9 +315,13 @@ class MainActivity : Activity() {
     }
 
     private fun handleTapeDetection(detection: TapeDetection?) = runOnUiThread {
+        if (tapeDetectionPaused) return@runOnUiThread
         val now = System.nanoTime()
-        tapeTracking.observe(detection?.angleFromVerticalDegrees, now)
-        if (!::tapeOverlay.isInitialized) return@runOnUiThread
+        tapeTracking.observe(
+            angleFromVerticalDegrees = detection?.angleFromVerticalDegrees,
+            longSideFraction = detection?.longSideFraction,
+            nowNanos = now,
+        )
         if (detection == null) {
             consecutiveTapeMisses += 1
             if (consecutiveTapeMisses < TAPE_MISSES_TO_CLEAR) return@runOnUiThread
@@ -323,9 +335,10 @@ class MainActivity : Activity() {
             tapeLoggedAtNanos = now
             flightLog.write(
                 detection?.let {
-                    "black tape detected confidence=%.2f angle=%+.1f bounds=%s %s".format(
+                    "black tape detected confidence=%.2f angle=%+.1f length=%.3f bounds=%s %s".format(
                         it.confidence,
                         it.angleFromVerticalDegrees,
+                        it.longSideFraction,
                         it.bounds,
                         tapeDetector?.diagnosticsSummary().orEmpty(),
                     )
@@ -335,11 +348,14 @@ class MainActivity : Activity() {
     }
 
     private fun handleTapeFrameStreamStale() {
+        if (tapeDetectionPaused) return
         tapeDetector?.resetTracking()
-        tapeTracking.observe(null, System.nanoTime())
+        tapeTracking.observe(null, null, System.nanoTime())
         if (tapeTracking.enabled) {
             commandedTapeYawRate = 0.0
+            commandedTapeForwardSpeed = 0.0
             virtualStick.setYawRate(0.0)
+            virtualStick.setForwardOnly(0.0)
         }
         flightLog.write("RGBA frame stream stale; detector reset")
         runOnUiThread {
@@ -539,6 +555,8 @@ class MainActivity : Activity() {
                 stopTapeTracking("黑膠帶追蹤取消：$reason", release = false)
             },
         ) {
+            tapeDetectionPaused = false
+            tapeEndpointTurn = false
             val now = System.nanoTime()
             tapeTracking.start(now)
             tapeTrackingStartedAtNanos = now
@@ -546,6 +564,7 @@ class MainActivity : Activity() {
                 stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
             renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
             commandedTapeYawRate = 0.0
+            commandedTapeForwardSpeed = 0.0
             tapeTrackingButton.text = "停止黑膠帶追蹤"
             flightLog.write("tape tracking started")
             mainHandler.removeCallbacks(tapeTrackingTickRunnable)
@@ -567,6 +586,7 @@ class MainActivity : Activity() {
                 tapeTrackingAuthoritySeen = true
             } else {
                 virtualStick.setYawRate(0.0)
+                virtualStick.setForwardOnly(0.0)
                 if (
                     tapeTrackingAuthoritySeen ||
                     now - tapeTrackingStartedAtNanos >= AUTHORITY_HANDOVER_TIMEOUT_NANOS
@@ -582,20 +602,41 @@ class MainActivity : Activity() {
                 stopTapeTracking("搜尋 20 秒仍找不到黑膠帶，追蹤已停止", release = true)
                 return
             }
+            if (decision.endpointReached) {
+                beginTapeEndpointTurn()
+                return
+            }
             val yawRate = if (ownsAuthority) decision.yawRateDegreesPerSecond else 0.0
+            val requestedForwardSpeed =
+                if (ownsAuthority) decision.forwardSpeedMetersPerSecond else 0.0
+            if (requestedForwardSpeed > 0.0) {
+                tapeTrackingStopReason()?.let { reason ->
+                    stopTapeTracking(reason, release = true, centerCamera = true)
+                    return
+                }
+            }
             virtualStick.setYawRate(yawRate)
-            if (yawRate != commandedTapeYawRate) {
+            virtualStick.setForwardOnly(requestedForwardSpeed)
+            if (
+                yawRate != commandedTapeYawRate ||
+                requestedForwardSpeed != commandedTapeForwardSpeed
+            ) {
                 commandedTapeYawRate = yawRate
+                commandedTapeForwardSpeed = requestedForwardSpeed
                 flightLog.write(
-                    "tape tracking yaw=%+.1f phase=${decision.phase}".format(yawRate),
+                    "tape tracking yaw=%+.1f forward=%.2f phase=${decision.phase}".format(
+                        yawRate,
+                        requestedForwardSpeed,
+                    ),
                 )
             }
             if (decision.phase != renderedTapeTrackingPhase) {
                 renderedTapeTrackingPhase = decision.phase
                 val status = when (decision.phase) {
                     TapeTrackingPhase.RECENTERING -> "黑膠帶追蹤：攝影機復位中"
-                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（方向誤差容許 ±10°）"
-                    TapeTrackingPhase.SEARCHING -> "黑膠帶遺失：雲台左右搜尋中"
+                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（沿膠帶前進，方向容許 ±10°）"
+                    TapeTrackingPhase.SEARCHING -> "黑膠帶遺失：已停飛，雲台左右搜尋中"
+                    TapeTrackingPhase.TURNING -> "偵測到膠帶末端：停止辨識，向右旋轉 180°"
                     TapeTrackingPhase.DISABLED -> "黑膠帶追蹤已停止"
                 }
                 holdStatus = status
@@ -604,6 +645,31 @@ class MainActivity : Activity() {
             }
             mainHandler.postDelayed(this, TAPE_TRACKING_TICK_MS)
         }
+    }
+
+    private fun beginTapeEndpointTurn() {
+        val heading = aircraftHeadingDegrees
+        if (heading == null || aircraftHeadingAtNanos == 0L) {
+            stopTapeTracking(
+                "偵測到膠帶末端，但沒有機頭方向資料，追蹤已停止",
+                release = true,
+                centerCamera = true,
+            )
+            return
+        }
+        mainHandler.removeCallbacks(tapeTrackingTickRunnable)
+        virtualStick.setForwardOnly(0.0)
+        virtualStick.setYawRate(0.0)
+        commandedTapeForwardSpeed = 0.0
+        commandedTapeYawRate = 0.0
+        tapeDetectionPaused = true
+        tapeEndpointTurn = true
+        tapeDetector?.resetTracking()
+        tapeOverlay.showDetection(null)
+        flightLog.write("tape endpoint confirmed; detection paused; right 180 armed")
+        holdStatus = "偵測到膠帶末端：停止辨識，向右旋轉 180°"
+        render(holdStatus)
+        armHeadingTurn(TurnDirection.RIGHT, heading)
     }
 
     private fun applyTapeTrackingGimbalTarget(target: TrackingGimbalTarget) {
@@ -649,11 +715,21 @@ class MainActivity : Activity() {
     ) {
         val wasActive =
             tapeTracking.enabled || renderedTapeTrackingPhase != TapeTrackingPhase.DISABLED
+        if (tapeEndpointTurn) {
+            tapeEndpointTurn = false
+            tapeDetectionPaused = false
+            headingTurn = null
+            turnCommandStartedAtNanos = 0L
+            turnAuthoritySeen = false
+            mainHandler.removeCallbacks(headingTurnTickRunnable)
+        }
         tapeTracking.stop()
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
         gimbal.setInput(0.0, 0.0)
         virtualStick.setYawRate(0.0)
+        virtualStick.setForwardOnly(0.0)
         commandedTapeYawRate = 0.0
+        commandedTapeForwardSpeed = 0.0
         tapeTrackingAuthoritySeen = false
         tapeTrackingStartedAtNanos = 0L
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
@@ -844,6 +920,8 @@ class MainActivity : Activity() {
             append("\n視覺 raw(mm)：水平=")
             append(horizontalRawMinMm ?: "—").append("..").append(horizontalRawMaxMm ?: "—")
             append(" · 真值=").append(horizontalDetectedCount).append("/").append(horizontalSampleCount)
+            append(" · 地面回波=").append(horizontalGroundEchoCount)
+            append(if (horizontalGroundEchoSuppressed) "（已排除）" else "")
             append(" · 間隔=").append(horizontalAngleIntervalDegrees).append("°")
             append(" · age=").append(obstacleAgeMs?.let { "${it}ms" } ?: "—")
             append("\n視覺 raw(mm)：上=").append(upwardObstacleMm ?: "—")
@@ -1035,6 +1113,8 @@ class MainActivity : Activity() {
             horizontalRawMinMm = null
             horizontalRawMaxMm = null
             horizontalDetectedCount = 0
+            horizontalGroundEchoCount = 0
+            horizontalGroundEchoSuppressed = false
             horizontalSampleCount = 0
             horizontalAngleIntervalDegrees = 0
             upwardObstacleMm = null
@@ -1055,6 +1135,7 @@ class MainActivity : Activity() {
             runOnUiThread { preview.refresh() }
             releaseIfNotFlying()
             render(if (aircraftConnected) "飛機已連線，正在確認 BRAKE 與障礙距離…" else "飛機未連線")
+            if (aircraftConnected) evaluateBattery()
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyIsFlying),
@@ -1065,6 +1146,7 @@ class MainActivity : Activity() {
             if (!flying) landingRequested = false
             releaseIfNotFlying()
             render(if (flying) "飛行中（自動懸停）" else "在地面")
+            evaluateBattery()
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude),
@@ -1164,42 +1246,33 @@ class MainActivity : Activity() {
     }
 
     /**
-     * DJI uses 60,000 mm to mean "no obstacle detected", not a measured 60 m
-     * clearance. During the 2026-08-17 door impact every sector stayed at that
-     * sentinel. A sample therefore authorizes horizontal motion only after at
-     * least one sector has produced a real range; all-sentinel data fails closed.
+     * DJI uses 60,000 mm to mean "not detected", so an all-sentinel sample still
+     * fails closed. At roughly 0.5 m altitude the Mini 4 Pro reports the floor in
+     * almost every horizontal azimuth. A dense low-altitude ring with enough
+     * floor-height evidence is therefore removed. Sparse ranges and objects
+     * substantially closer than the floor remain stop conditions.
      */
     private fun observeObstacles() {
         if (obstacleDataListener != null) return
         val listener = ObstacleDataListener { data ->
             val horizontal = data.horizontalObstacleDistance
-            var rawMinMm = Int.MAX_VALUE
-            var rawMaxMm = Int.MIN_VALUE
-            var detectedMinMm = Int.MAX_VALUE
-            var detectedCount = 0
-            for (distanceMm in horizontal) {
-                if (distanceMm < rawMinMm) rawMinMm = distanceMm
-                if (distanceMm > rawMaxMm) rawMaxMm = distanceMm
-                if (isDetectedObstacleDistance(distanceMm)) {
-                    detectedCount += 1
-                    if (distanceMm < detectedMinMm) detectedMinMm = distanceMm
-                }
-            }
+            val downwardMm = data.downwardObstacleDistance
+            val summary = HorizontalObstacleFilter.summarize(horizontal, downwardMm)
             val hasHorizontalSamples = horizontal.isNotEmpty()
-            val nearestDetectedMm = detectedMinMm.takeIf { detectedCount > 0 }
-            val horizontalRawMin = rawMinMm.takeIf { hasHorizontalSamples }
-            val horizontalRawMax = rawMaxMm.takeIf { hasHorizontalSamples }
             val interval = data.horizontalAngleInterval
             val upwardMm = data.upwardObstacleDistance
-            val downwardMm = data.downwardObstacleDistance
             val now = System.nanoTime()
             runOnUiThread {
                 obstacleSampleReceived = interval > 0 && hasHorizontalSamples
-                obstacleSampleValid = obstacleSampleReceived && nearestDetectedMm != null
-                nearestHorizontalObstacleMm = nearestDetectedMm
-                horizontalRawMinMm = horizontalRawMin
-                horizontalRawMaxMm = horizontalRawMax
-                horizontalDetectedCount = detectedCount
+                obstacleSampleValid =
+                    obstacleSampleReceived &&
+                        (summary.nearestActionableMm != null || summary.groundEchoDominant)
+                nearestHorizontalObstacleMm = summary.nearestActionableMm
+                horizontalRawMinMm = summary.rawMinimumMm
+                horizontalRawMaxMm = summary.rawMaximumMm
+                horizontalDetectedCount = summary.detectedCount
+                horizontalGroundEchoCount = summary.groundEchoCount
+                horizontalGroundEchoSuppressed = summary.groundEchoDominant
                 horizontalSampleCount = horizontal.size
                 horizontalAngleIntervalDegrees = interval
                 upwardObstacleMm = upwardMm
@@ -1214,10 +1287,11 @@ class MainActivity : Activity() {
             if (now - obstacleLoggedAtNanos >= OBSTACLE_LOG_PERIOD_NANOS) {
                 obstacleLoggedAtNanos = now
                 flightLog.write(
-                    "obstacle detectedMinMm=${nearestDetectedMm ?: "none"} " +
-                        "detected=$detectedCount/${horizontal.size} intervalDeg=$interval " +
-                        "rawMinMm=${horizontalRawMin ?: "none"} rawMaxMm=${horizontalRawMax ?: "none"} " +
-                        "upMm=$upwardMm downMm=$downwardMm",
+                    "obstacle actionableMinMm=${summary.nearestActionableMm ?: "none"} " +
+                        "detected=${summary.detectedCount}/${horizontal.size} " +
+                        "groundEchoes=${summary.groundEchoCount} suppressed=${summary.groundEchoDominant} " +
+                        "intervalDeg=$interval rawMinMm=${summary.rawMinimumMm ?: "none"} " +
+                        "rawMaxMm=${summary.rawMaximumMm ?: "none"} upMm=$upwardMm downMm=$downwardMm",
                 )
             }
         }
@@ -1249,10 +1323,24 @@ class MainActivity : Activity() {
             return "水平避障不可用：障礙距離資料已中斷 ${ageMs}ms"
         }
         val nearest = nearestHorizontalObstacleMm
-            ?: return "水平避障不可用：沒有水平障礙距離"
+        if (nearest == null && horizontalGroundEchoSuppressed) return null
+        if (nearest == null) return "水平避障不可用：沒有水平障礙距離"
         if (nearest <= HORIZONTAL_CLEARANCE_MM) {
             return "水平控制停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
         }
+        return null
+    }
+
+    /**
+     * Tape following cannot use the Mini 4 Pro's 360° minimum range at 0.5 m:
+     * the aircraft reports the floor around the horizon and permanently blocks
+     * motion. The aircraft's confirmed BRAKE mode remains the runtime stop.
+     */
+    private fun tapeTrackingStopReason(): String? {
+        if (!avoidance.brakeConfirmed) {
+            return avoidance.warning ?: "黑膠帶追蹤停止：BRAKE 未確認"
+        }
+        if (activelyAvoiding) return "黑膠帶追蹤停止：飛機正在避障剎車"
         return null
     }
 
@@ -1559,6 +1647,28 @@ class MainActivity : Activity() {
         virtualStick.setYawRate(0.0)
         holdStatus = message
         flightLog.write(message)
+        if (tapeEndpointTurn) {
+            tapeEndpointTurn = false
+            tapeDetectionPaused = false
+            tapeDetector?.resetTracking()
+            if (succeeded && tapeTracking.enabled && flying && stickOwned) {
+                val now = System.nanoTime()
+                tapeTracking.resumeAfterTurn(now)
+                tapeTrackingStartedAtNanos = now
+                tapeTrackingAuthoritySeen =
+                    stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+                renderedTapeTrackingPhase = TapeTrackingPhase.TURNING
+                flightLog.write("tape endpoint turn complete; detection resumed")
+                mainHandler.post(tapeTrackingTickRunnable)
+                return
+            }
+            stopTapeTracking(
+                "$message，黑膠帶追蹤已停止",
+                release = release,
+                centerCamera = true,
+            )
+            return
+        }
         if (shuttleStep?.isForward == false) {
             if (succeeded) {
                 finishShuttleStep(message)
@@ -1607,8 +1717,11 @@ class MainActivity : Activity() {
      *    and a landing that is not descending is cleared with KeyStopAutoLanding
      *    and re-issued.
      */
-    private fun land() {
-        flightLog.write("press: land (connected=$aircraftConnected flying=$flying owned=$stickOwned hold=$holdingHeight authority=${stickStatus.authority})")
+    private fun land(trigger: String = "operator") {
+        flightLog.write(
+            "landing requested trigger=$trigger connected=$aircraftConnected flying=$flying " +
+                "owned=$stickOwned hold=$holdingHeight authority=${stickStatus.authority}",
+        )
         if (!aircraftConnected) {
             render("飛機未連線，無法降落")
             return
@@ -1905,21 +2018,32 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------- battery ----
 
     /**
-     * Battery information is warning-only. The previous unflown build would
-     * autonomously take the control link and issue a landing at an arbitrary
-     * 15% threshold. After the 2026-08-17 collision no unverified safety path is
-     * allowed to actuate the aircraft. DJI's own battery protection and the
-     * physical RC remain authoritative.
+     * At 13% the app requests the same verified landing sequence as the landing
+     * button. The gate emits once per flight; retries and low-altitude landing
+     * confirmation remain owned by the existing landing state machine.
      */
     private fun evaluateBattery() {
         val percent = batteryPercent
+        if (
+            batteryLandingGate.evaluate(
+                percent = percent,
+                flying = flying,
+                connected = aircraftConnected,
+                landingRequested = landingRequested,
+            )
+        ) {
+            flightLog.write("battery forced landing threshold reached percent=$percent")
+            render("電量 $percent%：強制啟動自動降落")
+            land(trigger = "battery=$percent%")
+            return
+        }
         when {
             lowCellVoltage ->
                 render("電芯電壓過低：請立即使用實體遙控器降落")
             percent != null && percent <= BATTERY_CRITICAL_PERCENT ->
-                render("電量 $percent%：請立即使用實體遙控器降落")
+                render("電量 $percent%：自動降落已啟動")
             percent != null && percent <= BATTERY_WARN_PERCENT ->
-                render("電量 $percent%：接近低電量，請準備使用實體遙控器降落")
+                render("電量 $percent%：接近低電量，請準備降落")
         }
     }
 
@@ -2251,7 +2375,7 @@ class MainActivity : Activity() {
          * manoeuvre; DJI's own battery protection remains authoritative.
          */
         const val BATTERY_WARN_PERCENT = 25
-        const val BATTERY_CRITICAL_PERCENT = 1
+        const val BATTERY_CRITICAL_PERCENT = BatteryLandingGate.FORCE_LANDING_PERCENT
 
         /** App horizontal control requires every reported sector to exceed 1.5 m. */
         const val HORIZONTAL_CLEARANCE_MM = 1_500
