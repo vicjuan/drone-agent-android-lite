@@ -24,6 +24,8 @@ data class NormalizedRect(
     val right: Double,
     val bottom: Double,
 ) {
+    val centerX: Double
+        get() = (left + right) / 2.0
     init {
         require(left in 0.0..1.0 && right in 0.0..1.0 && left < right)
         require(top in 0.0..1.0 && bottom in 0.0..1.0 && top < bottom)
@@ -118,7 +120,7 @@ internal object TapeCandidatePolicy {
     private const val MIN_AREA_FRACTION = 0.0008
     private const val MAX_AREA_FRACTION = 0.18
     private const val MIN_ASPECT_RATIO = 2.2
-    private const val MAX_SHORT_SIDE_FRACTION = 0.14
+    private const val MAX_SHORT_SIDE_FRACTION = 0.20
     private const val MIN_LONG_SIDE_FRACTION = 0.25
     private const val MIN_ORIENTED_FILL = 0.30
     private const val MIN_SURROUNDING_BROWN = 0.22

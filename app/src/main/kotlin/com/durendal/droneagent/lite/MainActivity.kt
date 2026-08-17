@@ -162,8 +162,8 @@ class MainActivity : Activity() {
     private var renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
     private var commandedTapeYawRate = 0.0
     private var commandedTapeForwardSpeed = 0.0
+    private var commandedTapeRightSpeed = 0.0
     private var tapeEndpointTurn = false
-    @Volatile private var tapeDetectionPaused = false
 
 
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
@@ -279,9 +279,7 @@ class MainActivity : Activity() {
         preview = CameraPreview(
             context = this,
             onRgbaFrame = { frameData, offset, length, width, height ->
-                if (!tapeDetectionPaused) {
-                    tapeDetector?.submitRgba(frameData, offset, length, width, height)
-                }
+                tapeDetector?.submitRgba(frameData, offset, length, width, height)
             },
             onFrameStreamStale = ::handleTapeFrameStreamStale,
         )
@@ -320,10 +318,11 @@ class MainActivity : Activity() {
     }
 
     private fun handleTapeDetection(detection: TapeDetection?) = runOnUiThread {
-        if (tapeDetectionPaused) return@runOnUiThread
+        if (tapeEndpointTurn) return@runOnUiThread
         val now = System.nanoTime()
         tapeTracking.observe(
             angleFromVerticalDegrees = detection?.angleFromVerticalDegrees,
+            horizontalOffsetFraction = detection?.bounds?.centerX?.minus(0.5),
             longSideFraction = detection?.longSideFraction,
             nowNanos = now,
         )
@@ -340,9 +339,10 @@ class MainActivity : Activity() {
             tapeLoggedAtNanos = now
             flightLog.write(
                 detection?.let {
-                    "black tape detected confidence=%.2f angle=%+.1f length=%.3f bounds=%s %s".format(
+                    "black tape detected confidence=%.2f angle=%+.1f offset=%+.3f length=%.3f bounds=%s %s".format(
                         it.confidence,
                         it.angleFromVerticalDegrees,
+                        it.bounds.centerX - 0.5,
                         it.longSideFraction,
                         it.bounds,
                         tapeDetector?.diagnosticsSummary().orEmpty(),
@@ -353,12 +353,12 @@ class MainActivity : Activity() {
     }
 
     private fun handleTapeFrameStreamStale() {
-        if (tapeDetectionPaused) return
         tapeDetector?.resetTracking()
         tapeTracking.observe(null, null, System.nanoTime())
         if (tapeTracking.enabled) {
             commandedTapeYawRate = 0.0
             commandedTapeForwardSpeed = 0.0
+            commandedTapeRightSpeed = 0.0
             virtualStick.setYawRate(0.0)
             virtualStick.setForwardOnly(0.0)
         }
@@ -584,7 +584,6 @@ class MainActivity : Activity() {
                             stopTapeTracking("黑膠帶追蹤取消：$reason", release = false)
                         },
                     ) {
-                        tapeDetectionPaused = false
                         tapeEndpointTurn = false
                         val now = System.nanoTime()
                         tapeTracking.start(now)
@@ -594,6 +593,7 @@ class MainActivity : Activity() {
                         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
                         commandedTapeYawRate = 0.0
                         commandedTapeForwardSpeed = 0.0
+                        commandedTapeRightSpeed = 0.0
                         tapeTrackingButton.text = "停止黑膠帶追蹤"
                         flightLog.write("tape tracking started avoidance=CLOSE")
                         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
@@ -637,24 +637,29 @@ class MainActivity : Activity() {
             val yawRate = if (ownsAuthority) decision.yawRateDegreesPerSecond else 0.0
             val requestedForwardSpeed =
                 if (ownsAuthority) decision.forwardSpeedMetersPerSecond else 0.0
-            if (requestedForwardSpeed > 0.0) {
+            val requestedRightSpeed =
+                if (ownsAuthority) decision.rightSpeedMetersPerSecond else 0.0
+            if (requestedForwardSpeed != 0.0 || requestedRightSpeed != 0.0) {
                 tapeTrackingStopReason()?.let { reason ->
                     stopTapeTracking(reason, release = true, centerCamera = true)
                     return
                 }
             }
             virtualStick.setYawRate(yawRate)
-            virtualStick.setForwardOnly(requestedForwardSpeed)
+            virtualStick.setHorizontalVelocity(requestedForwardSpeed, requestedRightSpeed)
             if (
                 yawRate != commandedTapeYawRate ||
-                requestedForwardSpeed != commandedTapeForwardSpeed
+                requestedForwardSpeed != commandedTapeForwardSpeed ||
+                requestedRightSpeed != commandedTapeRightSpeed
             ) {
                 commandedTapeYawRate = yawRate
                 commandedTapeForwardSpeed = requestedForwardSpeed
+                commandedTapeRightSpeed = requestedRightSpeed
                 flightLog.write(
-                    "tape tracking yaw=%+.1f forward=%.2f phase=${decision.phase}".format(
+                    "tape tracking yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
                         yawRate,
                         requestedForwardSpeed,
+                        requestedRightSpeed,
                     ),
                 )
             }
@@ -662,8 +667,10 @@ class MainActivity : Activity() {
                 renderedTapeTrackingPhase = decision.phase
                 val status = when (decision.phase) {
                     TapeTrackingPhase.RECENTERING -> "黑膠帶追蹤：攝影機復位中"
-                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（沿膠帶前進，方向容許 ±10°）"
-                    TapeTrackingPhase.TURNING -> "膠帶遺失或抵達末端：向右旋轉 180°"
+                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（方向 ±10°、橫向置中 ±8%）"
+                    TapeTrackingPhase.VERIFYING_ENDPOINT ->
+                        "疑似膠帶末端：低速前進確認中"
+                    TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"
                     TapeTrackingPhase.DISABLED -> "黑膠帶追蹤已停止"
                 }
                 holdStatus = status
@@ -678,7 +685,7 @@ class MainActivity : Activity() {
         val heading = aircraftHeadingDegrees
         if (heading == null || aircraftHeadingAtNanos == 0L) {
             stopTapeTracking(
-                "膠帶遺失或抵達末端，但沒有機頭方向資料，追蹤已停止",
+                "已確認膠帶末端，但沒有機頭方向資料，追蹤已停止",
                 release = true,
                 centerCamera = true,
             )
@@ -689,12 +696,12 @@ class MainActivity : Activity() {
         virtualStick.setYawRate(0.0)
         commandedTapeForwardSpeed = 0.0
         commandedTapeYawRate = 0.0
-        tapeDetectionPaused = true
+        commandedTapeRightSpeed = 0.0
         tapeEndpointTurn = true
         tapeDetector?.resetTracking()
         tapeOverlay.showDetection(null)
-        flightLog.write("tape endpoint or loss confirmed; detection paused; right 180 armed")
-        holdStatus = "膠帶遺失或抵達末端：停止辨識，向右旋轉 180°"
+        flightLog.write("tape endpoint confirmed; detector remains active; right 180 armed")
+        holdStatus = "確認膠帶末端：向右旋轉 180°"
         render(holdStatus)
         armHeadingTurn(TurnDirection.RIGHT, heading)
     }
@@ -731,7 +738,6 @@ class MainActivity : Activity() {
                 avoidance.closedConfirmed
         if (tapeEndpointTurn) {
             tapeEndpointTurn = false
-            tapeDetectionPaused = false
             headingTurn = null
             turnCommandStartedAtNanos = 0L
             turnAuthoritySeen = false
@@ -745,6 +751,7 @@ class MainActivity : Activity() {
         virtualStick.setForwardOnly(0.0)
         commandedTapeYawRate = 0.0
         commandedTapeForwardSpeed = 0.0
+        commandedTapeRightSpeed = 0.0
         tapeTrackingAuthoritySeen = false
         tapeTrackingStartedAtNanos = 0L
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
@@ -1690,7 +1697,6 @@ class MainActivity : Activity() {
         flightLog.write(message)
         if (tapeEndpointTurn) {
             tapeEndpointTurn = false
-            tapeDetectionPaused = false
             tapeDetector?.resetTracking()
             if (succeeded && tapeTracking.enabled && flying && stickOwned) {
                 val now = System.nanoTime()

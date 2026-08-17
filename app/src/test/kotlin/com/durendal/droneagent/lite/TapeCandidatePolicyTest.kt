@@ -83,6 +83,22 @@ class TapeCandidatePolicyTest {
     }
 
     @Test
+    fun `nearby tape remains accepted when its apparent width increases`() {
+        val score = TapeCandidatePolicy.score(
+            TapeCandidateMetrics(
+                areaFraction = 0.12,
+                aspectRatio = 5.5,
+                shortSideFraction = 0.18,
+                longSideFraction = 1.0,
+                orientedFill = 0.80,
+                surroundingBrown = 0.60,
+            ),
+        )
+
+        assertNotNull(score)
+    }
+
+    @Test
     fun `broad dark edge is rejected even when surrounded by brown`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(

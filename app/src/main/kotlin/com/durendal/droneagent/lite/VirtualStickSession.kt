@@ -186,6 +186,15 @@ class VirtualStickSession(
         right = 0.0
     }
 
+    /** Body-frame horizontal velocity for autonomous tracking. */
+    fun setHorizontalVelocity(
+        forwardMetersPerSecond: Double,
+        rightMetersPerSecond: Double,
+    ) {
+        forward = forwardMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        right = rightMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+    }
+
 
     fun close() {
         stopSending()
