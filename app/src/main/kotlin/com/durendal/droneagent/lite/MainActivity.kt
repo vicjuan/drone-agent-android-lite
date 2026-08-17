@@ -15,14 +15,19 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import dji.sdk.keyvalue.key.DJIKey
+import dji.sdk.keyvalue.key.BatteryKey
+import dji.sdk.keyvalue.key.FlightAssistantKey
 import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.value.common.Attitude
 import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
 import dji.v5.manager.KeyManager
 import dji.v5.manager.SDKManager
+import dji.v5.manager.aircraft.perception.PerceptionManager
+import dji.v5.manager.aircraft.perception.listener.ObstacleDataListener
 import dji.v5.manager.interfaces.SDKManagerCallback
 import kotlin.math.abs
 
@@ -62,8 +67,12 @@ class MainActivity : Activity() {
     private lateinit var landButton: PillButton
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
+    private lateinit var forwardButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
+    private lateinit var gimbalPad: StickPadView
+    private lateinit var turnLeftButton: PillButton
+    private lateinit var turnRightButton: PillButton
 
     private var registered = false
     private var registerAttempts = 0
@@ -87,6 +96,52 @@ class MainActivity : Activity() {
     private var altitudeAtNanos = 0L
     private var heightSource = HeightSource.NONE
 
+    private var obstacleLoggedAtNanos = 0L
+    private var obstacleTelemetryRenderedAtNanos = 0L
+
+    /** Aircraft's own avoidance configuration, read once the aircraft is linked. */
+    private val avoidanceCheck = AvoidanceCheck()
+    private var avoidance = AvoidanceCheck.Status()
+
+    /** True while the aircraft reports it is braking for an obstacle. */
+    private var activelyAvoiding = false
+
+    /** Latest 360-degree horizontal obstacle range sample, in documented mm. */
+    private var nearestHorizontalObstacleMm: Int? = null
+    private var horizontalRawMinMm: Int? = null
+    private var horizontalRawMaxMm: Int? = null
+    private var horizontalDetectedCount = 0
+    private var horizontalSampleCount = 0
+    private var horizontalAngleIntervalDegrees = 0
+    private var upwardObstacleMm: Int? = null
+    private var downwardObstacleMm: Int? = null
+    private var obstacleSampleReceived = false
+    private var obstacleSampleAtNanos = 0L
+    private var obstacleSampleValid = false
+    private var horizontalSafetyReady = false
+    private var obstacleDataListener: ObstacleDataListener? = null
+
+    /** One timed forward pulse; any fresh close range still stops it. */
+    private var nudging = false
+    private var nudgeRequestedAtNanos = 0L
+    private var nudgeCommandStartedAtNanos = 0L
+
+    /** Battery percentage and low-cell flag, observed without autonomous actuation. */
+    private var batteryPercent: Int? = null
+    private var lowCellVoltage = false
+
+    /** Latest aircraft yaw and one operator-requested directed half-turn. */
+    private var aircraftHeadingDegrees: Double? = null
+    private var aircraftHeadingAtNanos = 0L
+    private var headingTurn: HeadingTurn? = null
+    private var turnStartedAtNanos = 0L
+    private var turnCommandStartedAtNanos = 0L
+    private var turnAuthoritySeen = false
+
+    /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
+    private var gimbalActive = false
+
+
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
     private var ultrasonicRaw: Int? = null
 
@@ -97,6 +152,7 @@ class MainActivity : Activity() {
 
     /** True once the aircraft named MSDK as authority owner during this manoeuvre. */
     private var holdAuthoritySeen = false
+
 
     /** Whether a finger is currently deflecting each stick. */
     private var leftStickActive = false
@@ -117,6 +173,12 @@ class MainActivity : Activity() {
         },
         onFrameSummary = { summary -> flightLog.write(summary) },
     )
+    private val gimbal = GimbalSession(
+        onFailure = { error ->
+            flightLog.write("gimbal command refused: $error")
+            render("攝影機角度控制被拒絕：$error")
+        },
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,6 +187,7 @@ class MainActivity : Activity() {
         flightLog.write("app start; log=${flightLog.path}")
         render("啟動 MSDK…")
         startSdk()
+        mainHandler.post(horizontalSafetyWatchdog)
     }
 
     override fun onDestroy() {
@@ -134,7 +197,12 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacksAndMessages(null)
         if (stickOwned) virtualStick.disable {}
         virtualStick.close()
+        gimbal.close()
         preview.release()
+        obstacleDataListener?.let { listener ->
+            runCatching { PerceptionManager.getInstance().removeObstacleDataListener(listener) }
+        }
+        obstacleDataListener = null
         runCatching { KeyManager.getInstance().cancelListen(this) }
         flightLog.write("app destroy")
         flightLog.close()
@@ -184,6 +252,7 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
+        forwardButton = PillButton("前進 1 秒", StickPadView.GREEN) { startForwardNudge() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
             registerAttempts = 0
             requestRegistration("操作者手動")
@@ -191,6 +260,7 @@ class MainActivity : Activity() {
         addView(registerButton, actionParams(marginEnd = dp(10)))
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
+        addView(forwardButton, actionParams(marginEnd = dp(10)))
         addView(
             buildStatusPanel(),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
@@ -238,14 +308,24 @@ class MainActivity : Activity() {
             StickSide.RIGHT,
             StickAxisLabels(up = "前進", down = "後退", left = "左移", right = "右移"),
         )
+        gimbalPad = StickPadView(this).apply {
+            isEnabled = false
+            axisLabels = StickAxisLabels(up = "抬高", down = "低頭", left = "左看", right = "右看")
+            onPosition = ::onGimbalMoved
+        }
+        turnLeftButton = PillButton("左旋 180°", StickPadView.CYAN) {
+            startHeadingTurn(TurnDirection.LEFT)
+        }
+        turnRightButton = PillButton("右旋 180°", StickPadView.CYAN) {
+            startHeadingTurn(TurnDirection.RIGHT)
+        }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
             addView(padColumn(leftPad, "左桿 • 旋轉 / 升降"))
-            addView(
-                View(this@MainActivity),
-                LinearLayout.LayoutParams(0, 1, 1f),
-            )
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(gimbalColumn())
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
             addView(padColumn(rightPad, "右桿 • 平移"))
         }
     }
@@ -262,7 +342,58 @@ class MainActivity : Activity() {
         onPosition = { x, y -> onStickMoved(side, x, y) }
     }
 
+    private fun gimbalColumn(): ViewGroup =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(gimbalPad)
+            addView(
+                label(9f, StickPadView.TEXT, bold = true).apply {
+                    text = "攝影機 • 方向"
+                    gravity = Gravity.CENTER
+                },
+            )
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(turnLeftButton, actionParams(marginEnd = dp(6)))
+                    addView(turnRightButton, actionParams())
+                },
+            )
+        }
+
+    private fun onGimbalMoved(x: Double, y: Double) {
+        val active = x != 0.0 || y != 0.0
+        if (active != gimbalActive) {
+            gimbalActive = active
+            flightLog.write(
+                "gimbal ${if (active) "engaged" else "released"} x=%.2f y=%.2f".format(x, y),
+            )
+            render(if (active) "攝影機角度控制中" else "攝影機角度已停止")
+        }
+        gimbal.setInput(x, y)
+    }
+
     private fun onStickMoved(side: StickSide, x: Double, y: Double) {
+        val horizontalStopReason =
+            if (side == StickSide.RIGHT && (x != 0.0 || y != 0.0)) {
+                horizontalActuationStopReason()
+            } else {
+                null
+            }
+        if (horizontalStopReason != null) {
+            rightStickActive = false
+            virtualStick.setStick(StickSide.RIGHT, 0.0, 0.0)
+            flightLog.write("horizontal stick refused: $horizontalStopReason")
+            render(horizontalStopReason)
+            return
+        }
+        if (side == StickSide.RIGHT && (x != 0.0 || y != 0.0) && nudging) {
+            nudging = false
+            mainHandler.removeCallbacks(nudgeTickRunnable)
+            virtualStick.setStick(StickSide.RIGHT, 0.0, 0.0)
+            flightLog.write("forward pulse cancelled by right stick")
+        }
         val wasActive = leftStickActive || rightStickActive
         when (side) {
             StickSide.LEFT -> leftStickActive = x != 0.0 || y != 0.0
@@ -281,6 +412,9 @@ class MainActivity : Activity() {
             flightLog.write("descent cancelled by operator stick input")
             finishHeightHold("操作者接管升降，定高已取消", release = false)
         }
+        if (side == StickSide.LEFT && (x != 0.0 || y != 0.0) && headingTurn != null) {
+            finishHeadingTurn("操作者接管旋轉，180° 旋轉已取消", release = false)
+        }
         virtualStick.setStick(side, x, y)
         if (leftStickActive || rightStickActive) {
             mainHandler.removeCallbacks(idleReleaseRunnable)
@@ -298,7 +432,7 @@ class MainActivity : Activity() {
     }
 
     private val idleReleaseRunnable = Runnable {
-        if (leftStickActive || rightStickActive || holdingHeight || !stickOwned) return@Runnable
+        if (leftStickActive || rightStickActive || holdingHeight || headingTurn != null || !stickOwned) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
         }
@@ -321,9 +455,13 @@ class MainActivity : Activity() {
     private fun render(message: String) = runOnUiThread {
         val ready = registered && aircraftConnected
         val (headline, headlineColor) = when {
+            lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true) ->
+                "LOCAL FLIGHT • BATTERY CRITICAL" to StickPadView.RED
             !registered -> "LOCAL FLIGHT • REGISTERING" to StickPadView.AMBER
             !aircraftConnected -> "LOCAL FLIGHT • NO AIRCRAFT" to StickPadView.RED
             confirmationNeeded -> "LOCAL FLIGHT • LANDING CONFIRM" to StickPadView.AMBER
+            stickStatus.enabled && !horizontalSafetyReady ->
+                "LOCAL FLIGHT • MANUAL • NO OA" to StickPadView.AMBER
             stickStatus.enabled -> "LOCAL FLIGHT • MANUAL" to StickPadView.GREEN
             flying -> "LOCAL FLIGHT • AIRBORNE" to StickPadView.GREEN
             else -> "LOCAL FLIGHT • READY" to StickPadView.CYAN
@@ -333,6 +471,31 @@ class MainActivity : Activity() {
         detailView.text = message
         holdView.text = holdStatus
         holdView.visibility = if (holdStatus.isEmpty()) View.GONE else View.VISIBLE
+        updateTelemetryText()
+
+        // The escape hatch only exists while it can do something: once registered
+        // it would be a button that cannot help.
+        registerButton.visibility = if (registered) View.GONE else View.VISIBLE
+        registerButton.available = !registered
+        takeoffButton.available = ready && !flying
+        landButton.available = ready && flying
+        val turning = headingTurn != null
+        holdButton.available = ready && flying && !holdingHeight && !turning
+        forwardButton.available = ready && flying && !nudging && !turning
+        turnLeftButton.available = ready && flying && !turning && !holdingHeight && !nudging
+        turnRightButton.available = ready && flying && !turning && !holdingHeight && !nudging
+        // Mini 4 Pro does not provide reliable horizontal ranges in this MSDK
+        // path. Manual control stays available; a real, fresh close range or
+        // active DJI braking still stops horizontal output immediately.
+        leftPad.isEnabled = ready && flying && !turning
+        rightPad.isEnabled = ready && flying && !turning
+        gimbalPad.isEnabled = ready
+    }
+
+    private fun updateTelemetryText() {
+        val obstacleAgeMs = obstacleSampleAtNanos.takeIf { it != 0L }?.let {
+            ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L)
+        }
         telemetryView.text = buildString {
             append("registered=").append(registered)
             append(" · aircraft=").append(if (aircraftConnected) "connected" else "disconnected")
@@ -344,20 +507,25 @@ class MainActivity : Activity() {
             append(" advanced=").append(stickStatus.advancedMode)
             append(" authority=").append(stickStatus.authority)
             append(" · hold=").append(if (holdingHeight) "50cm" else "off")
+            append(" · heading=").append(aircraftHeadingDegrees?.let { "%.1f°".format(it) } ?: "—")
+            append(" · turn=").append(headingTurn?.let { "%.0f/180°".format(it.progressDegrees) } ?: "off")
             append(" · landingConfirmNeeded=").append(confirmationNeeded)
+            append("\nbattery=").append(batteryPercent?.let { "$it%" } ?: "—")
+            append(if (lowCellVoltage) " lowCell" else "")
+            append(" · ").append(avoidance.summary)
+            append(if (activelyAvoiding) " · AVOIDING" else "")
+            append(" · vision=").append(if (horizontalSafetyReady) "RANGE OK" else "NO RANGE")
+            append(" · horizontal=MANUAL")
+            append("\n視覺 raw(mm)：水平=")
+            append(horizontalRawMinMm ?: "—").append("..").append(horizontalRawMaxMm ?: "—")
+            append(" · 真值=").append(horizontalDetectedCount).append("/").append(horizontalSampleCount)
+            append(" · 間隔=").append(horizontalAngleIntervalDegrees).append("°")
+            append(" · age=").append(obstacleAgeMs?.let { "${it}ms" } ?: "—")
+            append("\n視覺 raw(mm)：上=").append(upwardObstacleMm ?: "—")
+            append(" · 下=").append(downwardObstacleMm ?: "—")
+            append(" · 最近真值=").append(nearestHorizontalObstacleMm ?: "—")
+            append("\n撞擊後停槳：只用實體 RC 執行 CSC 並持續 2 秒")
         }
-
-        // The escape hatch only exists while it can do something: once registered
-        // it would be a button that cannot help.
-        registerButton.visibility = if (registered) View.GONE else View.VISIBLE
-        registerButton.available = !registered
-        takeoffButton.available = ready && !flying
-        landButton.available = ready && flying
-        holdButton.available = ready && flying && !holdingHeight
-        // The pads are live whenever the aircraft is airborne: touching one is
-        // what asks for the control link, so they must not be gated on owning it.
-        leftPad.isEnabled = ready && flying
-        rightPad.isEnabled = ready && flying
     }
 
     // ------------------------------------------------------- UI plumbing ----
@@ -448,7 +616,12 @@ class MainActivity : Activity() {
     private val registrationRetryRunnable = Runnable { requestRegistration("自動重試") }
 
     private fun startSdk() {
-        SDKManager.getInstance().init(
+        val sdkManager = SDKManager.getInstance()
+        if (sdkManager.isRegistered) {
+            activateRegisteredSdk("restored after Activity restart")
+            return
+        }
+        sdkManager.init(
             applicationContext,
             object : SDKManagerCallback {
                 override fun onInitProcess(event: DJISDKInitEvent, totalProcess: Int) {
@@ -460,14 +633,7 @@ class MainActivity : Activity() {
                 }
 
                 override fun onRegisterSuccess() {
-                    registered = true
-                    registerAttempts = 0
-                    mainHandler.removeCallbacks(registrationRetryRunnable)
-                    flightLog.write("registration succeeded")
-                    render("app key 註冊成功，等待飛機連線…")
-                    listenAircraftState()
-                    virtualStick.start()
-                    runOnUiThread { preview.refresh() }
+                    activateRegisteredSdk("registration succeeded")
                 }
 
                 /**
@@ -510,6 +676,18 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun activateRegisteredSdk(logMessage: String) {
+        if (registered) return
+        registered = true
+        registerAttempts = 0
+        mainHandler.removeCallbacks(registrationRetryRunnable)
+        flightLog.write(logMessage)
+        render("app key 註冊成功，等待飛機連線…")
+        listenAircraftState()
+        virtualStick.start()
+        runOnUiThread { preview.refresh() }
+    }
+
     /**
      * KeyConnection on the *flight controller* means the aircraft itself is
      * reachable. ProductKey.KeyConnection would already be true with only the RC
@@ -523,11 +701,30 @@ class MainActivity : Activity() {
             true,
         ) { _, connected ->
             aircraftConnected = connected == true
+            aircraftHeadingDegrees = null
+            aircraftHeadingAtNanos = 0L
+            obstacleSampleReceived = false
+            obstacleSampleValid = false
+            obstacleSampleAtNanos = 0L
+            nearestHorizontalObstacleMm = null
+            horizontalRawMinMm = null
+            horizontalRawMaxMm = null
+            horizontalDetectedCount = 0
+            horizontalSampleCount = 0
+            horizontalAngleIntervalDegrees = 0
+            upwardObstacleMm = null
+            downwardObstacleMm = null
+            if (aircraftConnected) {
+                readAvoidanceConfiguration()
+            } else {
+                avoidance = AvoidanceCheck.Status()
+                refreshHorizontalSafety("aircraft disconnected")
+            }
             // The camera stream only exists while the aircraft is linked, and the
             // Surface usually exists first, so the link is what triggers attach.
             runOnUiThread { preview.refresh() }
             releaseIfNotFlying()
-            render(if (aircraftConnected) "飛機已連線，可以起飛" else "飛機未連線")
+            render(if (aircraftConnected) "飛機已連線，正在確認 BRAKE 與障礙距離…" else "飛機未連線")
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyIsFlying),
@@ -538,6 +735,13 @@ class MainActivity : Activity() {
             if (!flying) landingRequested = false
             releaseIfNotFlying()
             render(if (flying) "飛行中（自動懸停）" else "在地面")
+        }
+        keyManager.listen(
+            KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude),
+            this,
+            true,
+        ) { _, attitude ->
+            publishAircraftAttitude(attitude)
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyIsLandingConfirmationNeeded),
@@ -585,10 +789,214 @@ class MainActivity : Activity() {
         ) { _, raw ->
             ultrasonicRaw = raw
         }
+        // Boolean, so there is no unit to get wrong: the aircraft telling us it is
+        // braking for an obstacle is the earliest trustworthy stop signal we have.
+        keyManager.listen(
+            KeyTools.createKey(FlightAssistantKey.KeyIsActivelyAvoidingObstacle),
+            this,
+            true,
+        ) { _, avoiding ->
+            val active = avoiding == true
+            if (active != activelyAvoiding) flightLog.write("actively avoiding obstacle=$active")
+            activelyAvoiding = active
+            refreshHorizontalSafety("active avoidance changed")
+        }
+        keyManager.listen(
+            KeyTools.createKey(BatteryKey.KeyChargeRemainingInPercent),
+            this,
+            true,
+        ) { _, percent ->
+            val previous = batteryPercent
+            batteryPercent = percent
+            if (previous != percent) flightLog.write("battery percent=$percent")
+            evaluateBattery()
+        }
+        keyManager.listen(
+            KeyTools.createKey(BatteryKey.KeyIsLowCellVoltageDetected),
+            this,
+            true,
+        ) { _, detected ->
+            lowCellVoltage = detected == true
+            if (lowCellVoltage) flightLog.write("low cell voltage detected")
+            evaluateBattery()
+        }
+        observeObstacles()
+    }
+
+    private fun readAvoidanceConfiguration() {
+        avoidanceCheck.ensureBrake { status ->
+            runOnUiThread {
+                avoidance = status
+                flightLog.write("avoidance config ${status.summary} detail=${status.detail}")
+                refreshHorizontalSafety("BRAKE read-back")
+            }
+        }
+    }
+
+    /**
+     * DJI uses 60,000 mm to mean "no obstacle detected", not a measured 60 m
+     * clearance. During the 2026-08-17 door impact every sector stayed at that
+     * sentinel. A sample therefore authorizes horizontal motion only after at
+     * least one sector has produced a real range; all-sentinel data fails closed.
+     */
+    private fun observeObstacles() {
+        if (obstacleDataListener != null) return
+        val listener = ObstacleDataListener { data ->
+            val horizontal = data.horizontalObstacleDistance
+            var rawMinMm = Int.MAX_VALUE
+            var rawMaxMm = Int.MIN_VALUE
+            var detectedMinMm = Int.MAX_VALUE
+            var detectedCount = 0
+            for (distanceMm in horizontal) {
+                if (distanceMm < rawMinMm) rawMinMm = distanceMm
+                if (distanceMm > rawMaxMm) rawMaxMm = distanceMm
+                if (isDetectedObstacleDistance(distanceMm)) {
+                    detectedCount += 1
+                    if (distanceMm < detectedMinMm) detectedMinMm = distanceMm
+                }
+            }
+            val hasHorizontalSamples = horizontal.isNotEmpty()
+            val nearestDetectedMm = detectedMinMm.takeIf { detectedCount > 0 }
+            val horizontalRawMin = rawMinMm.takeIf { hasHorizontalSamples }
+            val horizontalRawMax = rawMaxMm.takeIf { hasHorizontalSamples }
+            val interval = data.horizontalAngleInterval
+            val upwardMm = data.upwardObstacleDistance
+            val downwardMm = data.downwardObstacleDistance
+            val now = System.nanoTime()
+            runOnUiThread {
+                obstacleSampleReceived = interval > 0 && hasHorizontalSamples
+                obstacleSampleValid = obstacleSampleReceived && nearestDetectedMm != null
+                nearestHorizontalObstacleMm = nearestDetectedMm
+                horizontalRawMinMm = horizontalRawMin
+                horizontalRawMaxMm = horizontalRawMax
+                horizontalDetectedCount = detectedCount
+                horizontalSampleCount = horizontal.size
+                horizontalAngleIntervalDegrees = interval
+                upwardObstacleMm = upwardMm
+                downwardObstacleMm = downwardMm
+                obstacleSampleAtNanos = if (obstacleSampleReceived) now else 0L
+                refreshHorizontalSafety("obstacle sample")
+                if (now - obstacleTelemetryRenderedAtNanos >= OBSTACLE_TELEMETRY_PERIOD_NANOS) {
+                    obstacleTelemetryRenderedAtNanos = now
+                    updateTelemetryText()
+                }
+            }
+            if (now - obstacleLoggedAtNanos >= OBSTACLE_LOG_PERIOD_NANOS) {
+                obstacleLoggedAtNanos = now
+                flightLog.write(
+                    "obstacle detectedMinMm=${nearestDetectedMm ?: "none"} " +
+                        "detected=$detectedCount/${horizontal.size} intervalDeg=$interval " +
+                        "rawMinMm=${horizontalRawMin ?: "none"} rawMaxMm=${horizontalRawMax ?: "none"} " +
+                        "upMm=$upwardMm downMm=$downwardMm",
+                )
+            }
+        }
+        obstacleDataListener = listener
+        runCatching {
+            PerceptionManager.getInstance().apply {
+                init()
+                addObstacleDataListener(listener)
+            }
+            flightLog.write("obstacle listener registered")
+        }.onFailure {
+            obstacleDataListener = null
+            flightLog.write("obstacle listener unavailable: $it")
+        }
+    }
+
+    private fun horizontalSafetyFailure(nowNanos: Long = System.nanoTime()): String? {
+        if (!aircraftConnected) return "水平避障不可用：飛機未連線"
+        if (!avoidance.brakeConfirmed) return avoidance.warning ?: "水平避障不可用：BRAKE 未確認"
+        if (activelyAvoiding) return "水平控制停止：飛機正在避障剎車"
+        if (!obstacleSampleReceived || obstacleSampleAtNanos == 0L) {
+            return "水平避障不可用：沒有障礙距離資料"
+        }
+        if (!obstacleSampleValid) {
+            return "水平避障不可用：360° 感測器未看見任何門牆"
+        }
+        val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
+        if (ageMs > MAX_OBSTACLE_SAMPLE_AGE_MS) {
+            return "水平避障不可用：障礙距離資料已中斷 ${ageMs}ms"
+        }
+        val nearest = nearestHorizontalObstacleMm
+            ?: return "水平避障不可用：沒有水平障礙距離"
+        if (nearest <= HORIZONTAL_CLEARANCE_MM) {
+            return "水平控制停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
+        }
+        return null
+    }
+
+    /**
+     * Missing horizontal vision does not block operator-requested control on the
+     * Mini 4 Pro. A real close range, DJI braking, disconnect, or landing still
+     * zeros horizontal output immediately.
+     */
+    private fun horizontalActuationStopReason(nowNanos: Long = System.nanoTime()): String? {
+        if (!aircraftConnected) return "水平控制停止：飛機未連線"
+        if (!flying) return "水平控制停止：飛機不在空中"
+        if (activelyAvoiding) return "水平控制停止：飛機正在避障剎車"
+        val nearest = nearestHorizontalObstacleMm ?: return null
+        if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) return null
+        val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
+        if (ageMs > MAX_OBSTACLE_SAMPLE_AGE_MS) return null
+        return if (nearest <= HORIZONTAL_CLEARANCE_MM) {
+            "水平控制停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
+        } else {
+            null
+        }
+    }
+
+    private fun refreshHorizontalSafety(trigger: String) {
+        val failure = horizontalSafetyFailure()
+        val ready = failure == null
+        val changed = ready != horizontalSafetyReady
+        horizontalSafetyReady = ready
+        if (changed) {
+            flightLog.write(
+                "horizontal safety ready=$ready trigger=$trigger nearestMm=$nearestHorizontalObstacleMm " +
+                    "reason=${failure ?: "clear"}",
+            )
+        }
+        horizontalActuationStopReason()?.let { reason ->
+            if (rightStickActive || nudging) stopHorizontalActuation(reason)
+        }
+        if (changed || trigger == "BRAKE read-back") {
+            render(failure ?: "BRAKE 已確認，水平避障資料可用")
+        }
+    }
+
+    private fun stopHorizontalActuation(reason: String) {
+        val wasActive = rightStickActive || nudging
+        rightStickActive = false
+        nudging = false
+        mainHandler.removeCallbacks(nudgeTickRunnable)
+        virtualStick.setForwardOnly(0.0)
+        if (!wasActive) return
+        holdStatus = reason
+        flightLog.write("horizontal actuation stopped: $reason")
+        if (stickOwned && !leftStickActive && !holdingHeight) {
+            mainHandler.removeCallbacks(idleReleaseRunnable)
+            mainHandler.post(idleReleaseRunnable)
+        }
+    }
+
+    private val horizontalSafetyWatchdog = object : Runnable {
+        override fun run() {
+            refreshHorizontalSafety("watchdog")
+            mainHandler.postDelayed(this, HORIZONTAL_WATCHDOG_MS)
+        }
     }
 
     /** Which key the current height came from; a better source may replace a worse one. */
     private enum class HeightSource { NONE, LOCATION_3D, ALTITUDE }
+
+    private fun publishAircraftAttitude(attitude: Attitude?) {
+        val heading = attitude?.yaw?.takeIf(Double::isFinite) ?: return
+        aircraftHeadingDegrees = heading
+        aircraftHeadingAtNanos = System.nanoTime()
+        headingTurn?.update(heading)
+        driveHeadingTurn()
+    }
 
     private fun publishHeight(meters: Double?, source: HeightSource = HeightSource.ALTITUDE) {
         if (meters == null) {
@@ -607,8 +1015,128 @@ class MainActivity : Activity() {
 
     // -------------------------------------------------------- actuation ----
 
+    private fun startHeadingTurn(direction: TurnDirection) {
+        val heading = aircraftHeadingDegrees
+        flightLog.write(
+            "press: ${direction.label}180 flying=$flying heading=$heading owned=$stickOwned " +
+                "authority=${stickStatus.authority}",
+        )
+        if (!flying) {
+            render("飛機不在空中，無法旋轉")
+            return
+        }
+        if (heading == null || aircraftHeadingAtNanos == 0L) {
+            render("沒有機頭方向資料，無法旋轉 180°")
+            return
+        }
+        if (headingTurn != null || holdingHeight || nudging || leftStickActive || rightStickActive) {
+            render("另一個飛行控制正在使用中")
+            return
+        }
+        render("取得控制權後${direction.label} 180°…")
+        acquireControlLink {
+            if (!flying || headingTurn != null) return@acquireControlLink
+            val currentHeading = aircraftHeadingDegrees
+            if (currentHeading == null) {
+                render("機頭方向資料中斷，旋轉取消")
+                return@acquireControlLink
+            }
+            headingTurn = HeadingTurn(direction, currentHeading)
+            turnStartedAtNanos = System.nanoTime()
+            turnCommandStartedAtNanos = 0L
+            turnAuthoritySeen = false
+            virtualStick.setYawRate(0.0)
+            flightLog.write("${direction.label}180 armed heading=$currentHeading")
+            mainHandler.post(headingTurnTickRunnable)
+        }
+    }
+
+    private val headingTurnTickRunnable = object : Runnable {
+        override fun run() {
+            if (headingTurn == null) return
+            driveHeadingTurn()
+            if (headingTurn != null) mainHandler.postDelayed(this, TURN_TICK_MS)
+        }
+    }
+
+    private fun driveHeadingTurn() {
+        val turn = headingTurn ?: return
+        if (!stickOwned) {
+            finishHeadingTurn("${turn.direction.label} 180° 失去控制權，已停止", release = false)
+            return
+        }
+        val ownsAuthority = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+        if (ownsAuthority) {
+            turnAuthoritySeen = true
+        } else if (turnAuthoritySeen) {
+            finishHeadingTurn("遙控器已接管，${turn.direction.label} 180° 已停止", release = false)
+            return
+        } else {
+            virtualStick.setYawRate(0.0)
+            val waitedMs = (System.nanoTime() - turnStartedAtNanos) / 1_000_000L
+            if (waitedMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
+                finishHeadingTurn("未取得控制權，${turn.direction.label} 180° 已取消")
+            } else {
+                holdStatus = "等待控制權移交後${turn.direction.label} 180°…"
+                render(holdStatus)
+            }
+            return
+        }
+        val now = System.nanoTime()
+        if (turnCommandStartedAtNanos == 0L) turnCommandStartedAtNanos = now
+        if (
+            now - turnCommandStartedAtNanos > MAX_MOVING_HEADING_AGE_NANOS &&
+            now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+        ) {
+            finishHeadingTurn("機頭方向資料停止更新，旋轉已停止")
+            return
+        }
+        if (now - turnStartedAtNanos > TURN_TIMEOUT_NANOS) {
+            finishHeadingTurn(
+                "${turn.direction.label} 180° 逾時，已轉 %.0f°".format(turn.progressDegrees),
+            )
+            return
+        }
+        val remaining = (HeadingTurn.TARGET_DEGREES - turn.progressDegrees).coerceAtLeast(0.0)
+        if (remaining <= TURN_TOLERANCE_DEGREES) {
+            finishHeadingTurn(
+                "${turn.direction.label} 180° 完成（%.0f°）".format(turn.progressDegrees),
+            )
+            return
+        }
+        val speed = if (remaining <= TURN_SLOWDOWN_DEGREES) TURN_SLOW_SPEED_DPS else TURN_SPEED_DPS
+        virtualStick.setYawRate(turn.direction.commandSign * speed)
+        holdStatus = "${turn.direction.label} 180°：已轉 %.0f°，剩 %.0f°".format(
+            turn.progressDegrees,
+            remaining,
+        )
+        render(holdStatus)
+    }
+
+    private fun finishHeadingTurn(message: String, release: Boolean = true) {
+        if (headingTurn == null) return
+        headingTurn = null
+        turnCommandStartedAtNanos = 0L
+        turnAuthoritySeen = false
+        mainHandler.removeCallbacks(headingTurnTickRunnable)
+        virtualStick.setYawRate(0.0)
+        holdStatus = message
+        flightLog.write(message)
+        if (release && stickOwned && !leftStickActive && !rightStickActive && !holdingHeight && !nudging) {
+            releaseControlLink { error ->
+                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
+            }
+        } else {
+            render(message)
+        }
+    }
+
     private fun takeoff() {
         flightLog.write("press: takeoff (registered=$registered connected=$aircraftConnected flying=$flying)")
+        if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
+            render("電量狀態危急，禁止起飛；請檢查或更換電池")
+            return
+        }
         if (!registered || !aircraftConnected) {
             render("尚未註冊或飛機未連線，無法起飛")
             return
@@ -641,6 +1169,7 @@ class MainActivity : Activity() {
             return
         }
         holdingHeight = false
+        if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
         holdStatus = ""
         if (!stickOwned) {
             awaitRemoteAuthority { sendLandingCommand() }
@@ -775,8 +1304,9 @@ class MainActivity : Activity() {
      * and the aircraft's own authority report can stop the frames at any time.
      */
     private fun releaseIfNotFlying() {
-        if (!stickOwned || stickTransitionPending) return
         if (registered && aircraftConnected && flying) return
+        if (headingTurn != null) finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
+        if (!stickOwned || stickTransitionPending) return
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "已釋放控制權，交回遙控器")
         }
@@ -790,6 +1320,13 @@ class MainActivity : Activity() {
         beginTransition("release")
         holdingHeight = false
         holdStatus = ""
+        if (headingTurn != null) {
+            headingTurn = null
+            turnAuthoritySeen = false
+            turnCommandStartedAtNanos = 0L
+            mainHandler.removeCallbacks(headingTurnTickRunnable)
+            virtualStick.setYawRate(0.0)
+        }
         virtualStick.disable { error ->
             endTransition()
             stickOwned = false
@@ -864,6 +1401,126 @@ class MainActivity : Activity() {
         render("控制權切換無回應，已解除鎖定，可再試一次")
     }
 
+    // ------------------------------------------------------------- battery ----
+
+    /**
+     * Battery information is warning-only. The previous unflown build would
+     * autonomously take the control link and issue a landing at an arbitrary
+     * 15% threshold. After the 2026-08-17 collision no unverified safety path is
+     * allowed to actuate the aircraft. DJI's own battery protection and the
+     * physical RC remain authoritative.
+     */
+    private fun evaluateBattery() {
+        val percent = batteryPercent
+        when {
+            lowCellVoltage ->
+                render("電芯電壓過低：請立即使用實體遙控器降落")
+            percent != null && percent <= BATTERY_CRITICAL_PERCENT ->
+                render("電量 $percent%：請立即使用實體遙控器降落")
+            percent != null && percent <= BATTERY_WARN_PERCENT ->
+                render("電量 $percent%：接近低電量，請準備使用實體遙控器降落")
+        }
+    }
+
+
+    private fun startForwardNudge() {
+        flightLog.write(
+            "press: forward flying=$flying visionReady=$horizontalSafetyReady " +
+                "nearestMm=$nearestHorizontalObstacleMm nudging=$nudging",
+        )
+        if (!flying) {
+            render("飛機不在空中，無法前進")
+            return
+        }
+        if (headingTurn != null) {
+            render("180° 旋轉進行中，無法同時前進")
+            return
+        }
+        horizontalActuationStopReason()?.let {
+            render(it)
+            return
+        }
+        if (nudging || rightStickActive) {
+            render("水平控制正在使用中")
+            return
+        }
+        if (holdingHeight) finishHeightHold("前進操作取消定高", release = false)
+        render(
+            if (horizontalSafetyReady) {
+                "水平距離可用，取得控制權後前進 1 秒…"
+            } else {
+                "水平視覺未偵測，無避障前進 1 秒…"
+            },
+        )
+        acquireControlLink {
+            horizontalActuationStopReason()?.let {
+                stopHorizontalActuation(it)
+                render(it)
+                return@acquireControlLink
+            }
+            nudging = true
+            nudgeRequestedAtNanos = System.nanoTime()
+            nudgeCommandStartedAtNanos = 0L
+            flightLog.write(
+                "forward armed speed=$NUDGE_SPEED_MPS visionReady=$horizontalSafetyReady " +
+                    "clearanceMm=$nearestHorizontalObstacleMm",
+            )
+            mainHandler.post(nudgeTickRunnable)
+        }
+    }
+
+    private val nudgeTickRunnable = object : Runnable {
+        override fun run() {
+            if (!nudging) return
+            horizontalActuationStopReason()?.let {
+                stopHorizontalActuation(it)
+                render(it)
+                return
+            }
+            if (!stickOwned || stickStatus.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER) {
+                virtualStick.setForwardOnly(0.0)
+                val waitedMs = (System.nanoTime() - nudgeRequestedAtNanos) / 1_000_000L
+                if (waitedMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
+                    finishForwardNudge("未取得控制權，前進取消")
+                } else {
+                    mainHandler.postDelayed(this, NUDGE_TICK_MS)
+                }
+                return
+            }
+            if (nudgeCommandStartedAtNanos == 0L) {
+                nudgeCommandStartedAtNanos = System.nanoTime()
+            }
+            val elapsedMs = (System.nanoTime() - nudgeCommandStartedAtNanos) / 1_000_000L
+            if (elapsedMs >= NUDGE_DURATION_MS) {
+                finishForwardNudge("前進 1 秒完成")
+                return
+            }
+            virtualStick.setForwardOnly(NUDGE_SPEED_MPS)
+            val obstacleText = nearestHorizontalObstacleMm?.let { "$it mm" } ?: "未偵測"
+            holdStatus = "前進中… %.1f 秒，最近障礙 %s".format(
+                elapsedMs / 1000.0,
+                obstacleText,
+            )
+            render(holdStatus)
+            mainHandler.postDelayed(this, NUDGE_TICK_MS)
+        }
+    }
+
+    private fun finishForwardNudge(message: String) {
+        nudging = false
+        mainHandler.removeCallbacks(nudgeTickRunnable)
+        virtualStick.setForwardOnly(0.0)
+        holdStatus = message
+        flightLog.write("$message nearestMm=$nearestHorizontalObstacleMm")
+        if (stickOwned && !leftStickActive && !rightStickActive && !holdingHeight) {
+            releaseControlLink { error ->
+                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
+            }
+        } else {
+            render(message)
+        }
+    }
+
     /**
      * The one operator action that hands control to this app: pressing it takes
      * the control link (retrying through the auto-takeoff window) and only then
@@ -876,6 +1533,10 @@ class MainActivity : Activity() {
         )
         if (!flying) {
             render("飛機不在空中，無法定高")
+            return
+        }
+        if (headingTurn != null) {
+            render("180° 旋轉進行中，無法同時定高")
             return
         }
         if (usableHeightMeters() == null) {
@@ -1077,6 +1738,15 @@ class MainActivity : Activity() {
         /** A descent that has not converged by now is abandoned, not prolonged. */
         const val HOLD_TIMEOUT_NANOS = 20_000_000_000L
 
+        /** Gentle closed-loop half-turn, slowed near the target to limit overshoot. */
+        const val TURN_SPEED_DPS = 20.0
+        const val TURN_SLOW_SPEED_DPS = 8.0
+        const val TURN_SLOWDOWN_DEGREES = 25.0
+        const val TURN_TOLERANCE_DEGREES = 2.0
+        const val TURN_TICK_MS = 50L
+        const val TURN_TIMEOUT_NANOS = 15_000_000_000L
+        const val MAX_MOVING_HEADING_AGE_NANOS = 1_000_000_000L
+
         /** Grace period before centred sticks hand the aircraft back to the RC. */
         const val STICK_IDLE_RELEASE_MS = 3_000L
 
@@ -1093,6 +1763,33 @@ class MainActivity : Activity() {
          * bound is generous because waiting costs nothing but a zero command.
          */
         const val AUTHORITY_HANDOVER_TIMEOUT_MS = 1_500L
+
+        /**
+         * Display and takeoff-lockout thresholds only. They never initiate a
+         * manoeuvre; DJI's own battery protection remains authoritative.
+         */
+        const val BATTERY_WARN_PERCENT = 25
+        const val BATTERY_CRITICAL_PERCENT = 1
+
+        /** App horizontal control requires every reported sector to exceed 1.5 m. */
+        const val HORIZONTAL_CLEARANCE_MM = 1_500
+
+
+        /** Stale ranging data cannot authorize motion. */
+        const val MAX_OBSTACLE_SAMPLE_AGE_MS = 500L
+        const val HORIZONTAL_WATCHDOG_MS = 100L
+
+        /** One deliberately slow, obstacle-gated forward pulse. */
+        const val NUDGE_DURATION_MS = 1_000L
+        const val NUDGE_SPEED_MPS = 0.3
+        const val NUDGE_TICK_MS = 50L
+
+
+        /** Obstacle distances are recorded at most this often. */
+        const val OBSTACLE_LOG_PERIOD_NANOS = 1_000_000_000L
+
+        /** Live sensor numbers are readable at 4 Hz without redrawing every callback. */
+        const val OBSTACLE_TELEMETRY_PERIOD_NANOS = 250_000_000L
 
         /** Registration retries before the operator has to press the button. */
         const val MAX_REGISTER_ATTEMPTS = 10

@@ -148,9 +148,9 @@ class VirtualStickSession(
 
     /**
      * Mode 2 sample from one stick, in normalised [-1, 1] with y positive up:
-     * left = (yaw, climb), right = (lateral, forward). The UI stays in stick
-     * units and this class owns the conversion to aircraft units, so the speed
-     * envelope has exactly one definition.
+     * left = (yaw, climb), right = (lateral, forward). MainActivity is the
+     * fail-closed obstacle gate; this class only converts accepted input to
+     * aircraft units.
      */
     fun setStick(side: StickSide, x: Double, y: Double) {
         when (side) {
@@ -174,6 +174,18 @@ class VirtualStickSession(
     fun setClimbRate(metersPerSecond: Double) {
         up = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
     }
+
+    /** Yaw-only command for a closed-loop turn; positive is clockwise. */
+    fun setYawRate(degreesPerSecond: Double) {
+        yawRate = degreesPerSecond.coerceIn(-MAX_YAW_DEGREES_PER_SECOND, MAX_YAW_DEGREES_PER_SECOND)
+    }
+
+    /** Fixed body-forward speed used only by the obstacle-gated pulse. */
+    fun setForwardOnly(metersPerSecond: Double) {
+        forward = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        right = 0.0
+    }
+
 
     fun close() {
         stopSending()
@@ -252,7 +264,7 @@ class VirtualStickSession(
         /** Authority owner name that means this app's frames are the ones being flown. */
         const val MSDK_AUTHORITY_OWNER = "MSDK"
 
-        /** Full-deflection speeds. Deliberately gentle: this app has no flight envelope guard. */
+        /** Deliberately gentle limits for indoor control. */
         const val MAX_HORIZONTAL_MPS = 0.5
         const val MAX_VERTICAL_MPS = 0.3
         const val MAX_YAW_DEGREES_PER_SECOND = 20.0

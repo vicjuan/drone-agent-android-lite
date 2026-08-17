@@ -79,4 +79,5 @@ dependencies {
     compileOnly("com.dji:dji-sdk-v5-aircraft-provided:$djiMsdkVersion")
     // Registration talks to DJI servers through this implementation.
     runtimeOnly("com.dji:dji-sdk-v5-networkImp:$djiMsdkVersion")
+    testImplementation("junit:junit:4.13.2")
 }
