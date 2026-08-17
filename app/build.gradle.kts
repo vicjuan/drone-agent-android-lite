@@ -74,6 +74,7 @@ dependencies {
     // init crashes with NoClassDefFoundError before INITIALIZE_COMPLETE.
     // Version matches the main drone-agent-android app.
     implementation("androidx.core:core:1.13.1")
+    implementation("org.opencv:opencv:4.14.0")
     // "-provided" holds the API stubs only; it MUST stay compileOnly or the
     // runtime classes get shadowed and registration crashes.
     compileOnly("com.dji:dji-sdk-v5-aircraft-provided:$djiMsdkVersion")

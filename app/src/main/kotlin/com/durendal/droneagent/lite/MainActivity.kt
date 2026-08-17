@@ -58,6 +58,11 @@ import kotlin.math.abs
 class MainActivity : Activity() {
 
     private lateinit var preview: CameraPreview
+    private lateinit var tapeOverlay: TapeOverlayView
+    private var tapeDetector: BlackTapeDetector? = null
+    private var tapeDetected = false
+    private var tapeLoggedAtNanos = 0L
+    private var consecutiveTapeMisses = 0
     private lateinit var flightLog: FlightLog
     private lateinit var headlineView: TextView
     private lateinit var detailView: TextView
@@ -67,7 +72,6 @@ class MainActivity : Activity() {
     private lateinit var landButton: PillButton
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
-    private lateinit var forwardButton: PillButton
     private lateinit var sequenceButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
@@ -197,6 +201,16 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         flightLog = FlightLog(this)
+        tapeDetector = runCatching {
+            BlackTapeDetector(
+                onResult = ::handleTapeDetection,
+                onError = { error ->
+                    runOnUiThread { flightLog.write("OpenCV detection failed: $error") }
+                },
+            )
+        }.onFailure { error ->
+            flightLog.write("OpenCV initialization failed: $error")
+        }.getOrNull()
         setContentView(buildUi())
         flightLog.write("app start; log=${flightLog.path}")
         render("啟動 MSDK…")
@@ -213,6 +227,8 @@ class MainActivity : Activity() {
         virtualStick.close()
         gimbal.close()
         preview.release()
+        tapeDetector?.close()
+        tapeDetector = null
         obstacleDataListener?.let { listener ->
             runCatching { PerceptionManager.getInstance().removeObstacleDataListener(listener) }
         }
@@ -228,9 +244,23 @@ class MainActivity : Activity() {
     private fun buildUi(): ViewGroup {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-        preview = CameraPreview(this)
+        preview = CameraPreview(
+            context = this,
+            onRgbaFrame = { frameData, offset, length, width, height ->
+                tapeDetector?.submitRgba(frameData, offset, length, width, height)
+            },
+            onFrameStreamStale = ::handleTapeFrameStreamStale,
+        )
         root.addView(
             preview.view,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        tapeOverlay = TapeOverlayView(this)
+        root.addView(
+            tapeOverlay,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -255,6 +285,43 @@ class MainActivity : Activity() {
         return root
     }
 
+    private fun handleTapeDetection(detection: TapeDetection?) = runOnUiThread {
+        if (!::tapeOverlay.isInitialized) return@runOnUiThread
+        if (detection == null) {
+            consecutiveTapeMisses += 1
+            if (consecutiveTapeMisses < TAPE_MISSES_TO_CLEAR) return@runOnUiThread
+        } else {
+            consecutiveTapeMisses = 0
+        }
+        tapeOverlay.showDetection(detection)
+        val detected = detection != null
+        val now = System.nanoTime()
+        if (detected != tapeDetected || now - tapeLoggedAtNanos >= TAPE_LOG_PERIOD_NANOS) {
+            tapeDetected = detected
+            tapeLoggedAtNanos = now
+            flightLog.write(
+                detection?.let {
+                    "black tape detected confidence=%.2f bounds=%s %s".format(
+                        it.confidence,
+                        it.bounds,
+                        tapeDetector?.diagnosticsSummary().orEmpty(),
+                    )
+                } ?: "black tape not detected ${tapeDetector?.diagnosticsSummary().orEmpty()}",
+            )
+        }
+    }
+
+    private fun handleTapeFrameStreamStale() {
+        tapeDetector?.resetTracking()
+        flightLog.write("RGBA frame stream stale; detector reset")
+        runOnUiThread {
+            if (!::tapeOverlay.isInitialized) return@runOnUiThread
+            consecutiveTapeMisses = 0
+            tapeDetected = false
+            tapeOverlay.showDetection(null)
+        }
+    }
+
     /**
      * One row: takeoff on the left, status in the middle, landing on the right.
      * The panel takes the leftover width, so a long status line can never slide
@@ -266,7 +333,6 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
-        forwardButton = PillButton("前進 3 秒", StickPadView.GREEN) { startForwardNudge() }
         sequenceButton = PillButton("持續來回", StickPadView.GREEN) { startShuttle() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
             registerAttempts = 0
@@ -275,7 +341,6 @@ class MainActivity : Activity() {
         addView(registerButton, actionParams(marginEnd = dp(10)))
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
-        addView(forwardButton, actionParams(marginEnd = dp(10)))
         addView(sequenceButton, actionParams(marginEnd = dp(10)))
         addView(
             buildStatusPanel(),
@@ -498,7 +563,6 @@ class MainActivity : Activity() {
         val turning = headingTurn != null
         val sequencing = shuttleStep != null
         holdButton.available = ready && flying && !holdingHeight && !turning && !sequencing
-        forwardButton.available = ready && flying && !nudging && !turning && !sequencing
         sequenceButton.available =
             ready && flying && !nudging && !turning && !holdingHeight && !sequencing
         // Sticks stay live during the shuttle: any deflection is an explicit
@@ -736,9 +800,14 @@ class MainActivity : Activity() {
             } else {
                 avoidance = AvoidanceCheck.Status()
                 refreshHorizontalSafety("aircraft disconnected")
+                runOnUiThread {
+                    consecutiveTapeMisses = 0
+                    tapeDetected = false
+                    tapeOverlay.showDetection(null)
+                }
             }
-            // The camera stream only exists while the aircraft is linked, and the
-            // Surface usually exists first, so the link is what triggers attach.
+            // Re-assert both preview and RGBA listener across link transitions;
+            // MSDK can restore the Surface before the flight-controller key.
             runOnUiThread { preview.refresh() }
             releaseIfNotFlying()
             render(if (aircraftConnected) "飛機已連線，正在確認 BRAKE 與障礙距離…" else "飛機未連線")
@@ -1601,44 +1670,6 @@ class MainActivity : Activity() {
     }
 
 
-    private fun startForwardNudge() {
-        flightLog.write(
-            "press: forward flying=$flying visionReady=$horizontalSafetyReady " +
-                "nearestMm=$nearestHorizontalObstacleMm nudging=$nudging",
-        )
-        if (!flying) {
-            render("飛機不在空中，無法前進")
-            return
-        }
-        if (shuttleStep != null || headingTurn != null) {
-            render("另一個飛行控制正在使用中")
-            return
-        }
-        horizontalActuationStopReason()?.let {
-            render(it)
-            return
-        }
-        if (nudging || rightStickActive) {
-            render("水平控制正在使用中")
-            return
-        }
-        if (holdingHeight) finishHeightHold("前進操作取消定高", release = false)
-        render(
-            if (horizontalSafetyReady) {
-                "水平距離可用，取得控制權後前進 $FORWARD_DURATION_SECONDS 秒…"
-            } else {
-                "水平視覺未偵測，無避障前進 $FORWARD_DURATION_SECONDS 秒…"
-            },
-        )
-        acquireControlLink {
-            horizontalActuationStopReason()?.let {
-                stopHorizontalActuation(it)
-                render(it)
-                return@acquireControlLink
-            }
-            armForwardNudge()
-        }
-    }
 
     private fun armForwardNudge() {
         nudging = true
@@ -1984,6 +2015,12 @@ class MainActivity : Activity() {
 
         /** Live sensor numbers are readable at 4 Hz without redrawing every callback. */
         const val OBSTACLE_TELEMETRY_PERIOD_NANOS = 250_000_000L
+
+        /** Detector state is logged at one hertz; the overlay still updates at frame cadence. */
+        const val TAPE_LOG_PERIOD_NANOS = 1_000_000_000L
+
+        /** Three misses prevent a single noisy frame from flashing the box off. */
+        const val TAPE_MISSES_TO_CLEAR = 3
 
         /** Registration retries before the operator has to press the button. */
         const val MAX_REGISTER_ATTEMPTS = 10
