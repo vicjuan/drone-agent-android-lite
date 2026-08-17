@@ -51,17 +51,18 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `three shortened detections stop motion and request endpoint turn`() {
+    fun `aligned shortened tape must persist before endpoint turn`() {
         val controller = trackingController()
         controller.observe(0.0, 0.8, seconds(2))
         assertEquals(0.3, controller.tick(seconds(2)).forwardSpeedMetersPerSecond, 0.0)
 
         controller.observe(0.0, 0.35, seconds(3))
         assertEquals(0.0, controller.tick(seconds(3)).forwardSpeedMetersPerSecond, 0.0)
-        controller.observe(0.0, 0.35, seconds(3) + 100L)
-        controller.observe(0.0, 0.35, seconds(3) + 200L)
+        controller.observe(0.0, 0.35, seconds(3) + 400_000_000L)
+        assertFalse(controller.tick(seconds(3) + 400_000_000L).endpointReached)
+        controller.observe(0.0, 0.35, seconds(3) + 800_000_000L)
 
-        val endpoint = controller.tick(seconds(3) + 200L)
+        val endpoint = controller.tick(seconds(3) + 800_000_000L)
         assertTrue(endpoint.endpointReached)
         assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
         assertEquals(0.0, endpoint.forwardSpeedMetersPerSecond, 0.0)
@@ -69,13 +70,42 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `confirmed short tape remains an endpoint when it leaves the frame`() {
+        val controller = trackingController()
+        controller.observe(0.0, 1.0, seconds(2))
+        controller.observe(3.2, 0.27, seconds(3))
+        controller.observe(3.2, 0.27, seconds(3) + 50_000_000L)
+        controller.observe(3.2, 0.27, seconds(3) + 100_000_000L)
+        controller.observe(null, null, seconds(3) + 200_000_000L)
+
+        val endpoint = controller.tick(seconds(3) + 800_000_000L)
+        assertTrue(endpoint.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
+    }
+
+    @Test
+    fun `short diagonal tape after search is not an endpoint`() {
+        val controller = trackingController()
+        controller.observe(0.0, 1.0, seconds(2))
+
+        controller.observe(-69.9, 0.251, seconds(3))
+        controller.observe(-57.4, 0.478, seconds(4))
+        controller.observe(-46.7, 0.275, seconds(5))
+
+        val decision = controller.tick(seconds(5))
+        assertFalse(decision.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(-20.0, decision.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
     fun `turn completion resets endpoint baseline and recenters camera`() {
         val controller = trackingController()
         controller.observe(0.0, 0.8, seconds(2))
-        repeat(3) { index ->
-            controller.observe(0.0, 0.35, seconds(3) + index)
-        }
-        controller.tick(seconds(3) + 2L)
+        controller.observe(0.0, 0.35, seconds(3))
+        controller.observe(0.0, 0.35, seconds(3) + 400_000_000L)
+        controller.observe(0.0, 0.35, seconds(3) + 800_000_000L)
+        controller.tick(seconds(3) + 800_000_000L)
 
         controller.observe(0.0, 0.1, seconds(4))
         controller.resumeAfterTurn(seconds(4))
@@ -88,41 +118,17 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `five seconds without tape starts alternating gimbal search`() {
+    fun `five seconds without tape requests endpoint turn`() {
         val controller = trackingController()
 
-        val searchStart = controller.tick(seconds(7))
-        assertEquals(TapeTrackingPhase.SEARCHING, searchStart.phase)
-        assertEquals(TrackingGimbalTarget.SEARCH_LEFT, searchStart.gimbalTarget)
-        assertEquals(TrackingGimbalTarget.SEARCH_RIGHT, controller.tick(seconds(10)).gimbalTarget)
-        assertEquals(TrackingGimbalTarget.SEARCH_LEFT, controller.tick(seconds(13)).gimbalTarget)
-    }
+        val loss = controller.tick(seconds(7))
 
-    @Test
-    fun `three detections during search recenter before tracking resumes`() {
-        val controller = trackingController()
-        controller.tick(seconds(7))
-
-        controller.observe(20.0, 0.8, seconds(8))
-        controller.observe(21.0, 0.8, seconds(8) + 100L)
-        controller.observe(19.0, 0.8, seconds(8) + 200L)
-        val recenter = controller.tick(seconds(8) + 200L)
-        assertEquals(TapeTrackingPhase.RECENTERING, recenter.phase)
-        assertEquals(TrackingGimbalTarget.DOWN_CENTER, recenter.gimbalTarget)
-        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(10) + 200L).phase)
-    }
-
-    @Test
-    fun `twenty second search timeout stops tracking and centers camera`() {
-        val controller = trackingController()
-        controller.tick(seconds(7))
-
-        val timeout = controller.tick(seconds(27))
-        assertTrue(timeout.searchTimedOut)
-        assertEquals(TrackingGimbalTarget.DOWN_CENTER, timeout.gimbalTarget)
-        assertEquals(0.0, timeout.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, timeout.forwardSpeedMetersPerSecond, 0.0)
-        assertFalse(controller.enabled)
+        assertTrue(loss.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, loss.phase)
+        assertEquals(0.0, loss.yawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, loss.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(null, loss.gimbalTarget)
+        assertTrue(controller.enabled)
     }
 
     private fun trackingController(): TapeTrackingController = TapeTrackingController().also {

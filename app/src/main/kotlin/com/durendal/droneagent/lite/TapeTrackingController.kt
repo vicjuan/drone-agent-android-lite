@@ -7,14 +7,11 @@ internal enum class TapeTrackingPhase {
     DISABLED,
     RECENTERING,
     TRACKING,
-    SEARCHING,
     TURNING,
 }
 
 internal enum class TrackingGimbalTarget {
     DOWN_CENTER,
-    SEARCH_LEFT,
-    SEARCH_RIGHT,
 }
 
 internal data class TapeTrackingDecision(
@@ -23,7 +20,6 @@ internal data class TapeTrackingDecision(
     val forwardSpeedMetersPerSecond: Double = 0.0,
     val gimbalTarget: TrackingGimbalTarget? = null,
     val endpointReached: Boolean = false,
-    val searchTimedOut: Boolean = false,
 )
 
 /**
@@ -39,14 +35,11 @@ internal class TapeTrackingController {
 
     private var lastDetectionAtNanos = 0L
     private var latestAngleDegrees: Double? = null
-    private var searchStartedAtNanos = 0L
-    private var nextSweepAtNanos = 0L
     private var recenterUntilNanos = 0L
-    private var consecutiveSearchDetections = 0
     private var consecutiveEndpointDetections = 0
+    private var endpointCandidateSinceNanos = 0L
     private var longestObservedTapeFraction = 0.0
     private var endpointPending = false
-    private var nextSearchTarget = TrackingGimbalTarget.SEARCH_RIGHT
     private var pendingGimbalTarget: TrackingGimbalTarget? = null
 
     fun start(nowNanos: Long) {
@@ -59,8 +52,8 @@ internal class TapeTrackingController {
         enabled = false
         phase = TapeTrackingPhase.DISABLED
         latestAngleDegrees = null
-        consecutiveSearchDetections = 0
         consecutiveEndpointDetections = 0
+        endpointCandidateSinceNanos = 0L
         endpointPending = false
         pendingGimbalTarget = null
     }
@@ -79,8 +72,6 @@ internal class TapeTrackingController {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
         if (angleFromVerticalDegrees == null || longSideFraction == null) {
             latestAngleDegrees = null
-            consecutiveEndpointDetections = 0
-            if (phase == TapeTrackingPhase.SEARCHING) consecutiveSearchDetections = 0
             return
         }
         require(angleFromVerticalDegrees in -90.0..90.0)
@@ -92,26 +83,21 @@ internal class TapeTrackingController {
                 longestObservedTapeFraction =
                     maxOf(longestObservedTapeFraction, longSideFraction)
                 val endpointCandidate =
-                    longestObservedTapeFraction >= ENDPOINT_REFERENCE_MIN_FRACTION &&
+                    abs(angleFromVerticalDegrees) <= ALIGNMENT_TOLERANCE_DEGREES &&
+                        longestObservedTapeFraction >= ENDPOINT_REFERENCE_MIN_FRACTION &&
                         longSideFraction <= longestObservedTapeFraction * ENDPOINT_LENGTH_RATIO
-                consecutiveEndpointDetections =
-                    if (endpointCandidate) consecutiveEndpointDetections + 1 else 0
-                if (consecutiveEndpointDetections >= ENDPOINT_CONFIRMATION_COUNT) {
-                    phase = TapeTrackingPhase.TURNING
-                    latestAngleDegrees = null
-                    endpointPending = true
+                if (endpointCandidate) {
+                    if (endpointCandidateSinceNanos == 0L) {
+                        endpointCandidateSinceNanos = nowNanos
+                    }
+                    consecutiveEndpointDetections += 1
+                } else {
+                    endpointCandidateSinceNanos = 0L
+                    consecutiveEndpointDetections = 0
                 }
+                confirmEndpointIfReady(nowNanos)
             }
 
-            TapeTrackingPhase.SEARCHING -> {
-                consecutiveSearchDetections += 1
-                if (consecutiveSearchDetections >= REACQUIRE_DETECTION_COUNT) {
-                    latestAngleDegrees = null
-                    lastDetectionAtNanos = nowNanos
-                    consecutiveEndpointDetections = 0
-                    beginRecentering(nowNanos)
-                }
-            }
 
             TapeTrackingPhase.DISABLED,
             TapeTrackingPhase.RECENTERING,
@@ -122,6 +108,7 @@ internal class TapeTrackingController {
 
     fun tick(nowNanos: Long): TapeTrackingDecision {
         if (!enabled) return TapeTrackingDecision(TapeTrackingPhase.DISABLED, 0.0)
+        confirmEndpointIfReady(nowNanos)
         if (endpointPending) {
             endpointPending = false
             return TapeTrackingDecision(
@@ -143,35 +130,15 @@ internal class TapeTrackingController {
             phase == TapeTrackingPhase.TRACKING &&
             nowNanos - lastDetectionAtNanos >= DETECTION_LOST_NANOS
         ) {
-            phase = TapeTrackingPhase.SEARCHING
-            searchStartedAtNanos = nowNanos
-            consecutiveSearchDetections = 0
+            phase = TapeTrackingPhase.TURNING
+            latestAngleDegrees = null
             consecutiveEndpointDetections = 0
-            pendingGimbalTarget = TrackingGimbalTarget.SEARCH_LEFT
-            nextSearchTarget = TrackingGimbalTarget.SEARCH_RIGHT
-            nextSweepAtNanos = nowNanos + SEARCH_SWEEP_DURATION_NANOS
-        }
-        if (phase == TapeTrackingPhase.SEARCHING) {
-            if (nowNanos - searchStartedAtNanos >= SEARCH_TIMEOUT_NANOS) {
-                enabled = false
-                phase = TapeTrackingPhase.DISABLED
-                pendingGimbalTarget = null
-                return TapeTrackingDecision(
-                    phase = TapeTrackingPhase.DISABLED,
-                    yawRateDegreesPerSecond = 0.0,
-                    gimbalTarget = TrackingGimbalTarget.DOWN_CENTER,
-                    searchTimedOut = true,
-                )
-            }
-            if (nowNanos >= nextSweepAtNanos) {
-                pendingGimbalTarget = nextSearchTarget
-                nextSearchTarget = when (nextSearchTarget) {
-                    TrackingGimbalTarget.SEARCH_LEFT -> TrackingGimbalTarget.SEARCH_RIGHT
-                    TrackingGimbalTarget.SEARCH_RIGHT -> TrackingGimbalTarget.SEARCH_LEFT
-                    TrackingGimbalTarget.DOWN_CENTER -> TrackingGimbalTarget.SEARCH_LEFT
-                }
-                nextSweepAtNanos = nowNanos + SEARCH_SWEEP_DURATION_NANOS
-            }
+            endpointCandidateSinceNanos = 0L
+            return TapeTrackingDecision(
+                phase = TapeTrackingPhase.TURNING,
+                yawRateDegreesPerSecond = 0.0,
+                endpointReached = true,
+            )
         }
 
         val target = pendingGimbalTarget
@@ -183,20 +150,32 @@ internal class TapeTrackingController {
             gimbalTarget = target,
         )
     }
+    private fun confirmEndpointIfReady(nowNanos: Long) {
+        if (
+            phase != TapeTrackingPhase.TRACKING ||
+            endpointCandidateSinceNanos == 0L ||
+            consecutiveEndpointDetections < ENDPOINT_CONFIRMATION_COUNT ||
+            nowNanos - endpointCandidateSinceNanos < ENDPOINT_CONFIRMATION_NANOS
+        ) {
+            return
+        }
+        phase = TapeTrackingPhase.TURNING
+        latestAngleDegrees = null
+        endpointPending = true
+    }
+
 
     private fun beginRecentering(nowNanos: Long) {
         phase = TapeTrackingPhase.RECENTERING
         latestAngleDegrees = null
-        consecutiveSearchDetections = 0
         pendingGimbalTarget = TrackingGimbalTarget.DOWN_CENTER
         recenterUntilNanos = nowNanos + RECENTER_DURATION_NANOS
     }
 
     private fun resetLeg() {
         lastDetectionAtNanos = 0L
-        searchStartedAtNanos = 0L
-        nextSweepAtNanos = 0L
         consecutiveEndpointDetections = 0
+        endpointCandidateSinceNanos = 0L
         longestObservedTapeFraction = 0.0
         endpointPending = false
     }
@@ -227,11 +206,9 @@ internal class TapeTrackingController {
         const val ENDPOINT_REFERENCE_MIN_FRACTION = 0.60
         const val ENDPOINT_LENGTH_RATIO = 0.45
         const val ENDPOINT_CONFIRMATION_COUNT = 3
-        const val REACQUIRE_DETECTION_COUNT = 3
+        const val ENDPOINT_CONFIRMATION_NANOS = 750_000_000L
         const val RECENTER_DURATION_NANOS = 2_000_000_000L
         const val DETECTION_COMMAND_STALE_NANOS = 1_000_000_000L
         const val DETECTION_LOST_NANOS = 5_000_000_000L
-        const val SEARCH_SWEEP_DURATION_NANOS = 3_000_000_000L
-        const val SEARCH_TIMEOUT_NANOS = 20_000_000_000L
     }
 }
