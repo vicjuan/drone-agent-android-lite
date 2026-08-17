@@ -5,6 +5,7 @@ import org.opencv.core.Core
 import org.opencv.core.Mat
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
@@ -209,6 +210,7 @@ class BlackTapeDetector(
                     bottom = (rect.y + rect.height).toDouble() / analysis.rows(),
                 ),
                 confidence = winner.score.coerceIn(0.0, 1.0),
+                angleFromVerticalDegrees = winner.angleFromVerticalDegrees,
             )
         } finally {
             contours.forEach(MatOfPoint::release)
@@ -266,13 +268,39 @@ class BlackTapeDetector(
             touchesHorizontalFrameEdge =
                 bounds.x <= HORIZONTAL_EDGE_MARGIN ||
                     bounds.x + bounds.width >= brownMask.cols() - HORIZONTAL_EDGE_MARGIN,
+            overlapsPreviousDetection = overlapsPrevious(bounds),
         )
         val rejection = TapeCandidatePolicy.rejectionReason(metrics)
         if (rejection != null) {
             rejectionCounts[rejection.ordinal] += 1
             return null
         }
-        return Candidate(bounds, checkNotNull(TapeCandidatePolicy.score(metrics)))
+        return Candidate(
+            bounds,
+            checkNotNull(TapeCandidatePolicy.score(metrics)),
+            longAxisDeviationFromVertical(orientedBounds),
+        )
+    }
+
+    private fun longAxisDeviationFromVertical(bounds: org.opencv.core.RotatedRect): Double {
+        val corners = Array(4) { Point() }
+        bounds.points(corners)
+        var longestSquared = Double.NEGATIVE_INFINITY
+        var longestDeltaX = 0.0
+        var longestDeltaY = 0.0
+        for (index in corners.indices) {
+            val start = corners[index]
+            val end = corners[(index + 1) % corners.size]
+            val deltaX = end.x - start.x
+            val deltaY = end.y - start.y
+            val lengthSquared = deltaX * deltaX + deltaY * deltaY
+            if (lengthSquared > longestSquared) {
+                longestSquared = lengthSquared
+                longestDeltaX = deltaX
+                longestDeltaY = deltaY
+            }
+        }
+        return TapeOrientation.deviationFromVerticalDegrees(longestDeltaX, longestDeltaY)
     }
 
     private fun surroundingBrownFraction(brownMask: Mat, bounds: Rect): Double {
@@ -342,7 +370,11 @@ class BlackTapeDetector(
         }
     }
 
-    private data class Candidate(val bounds: Rect, val score: Double)
+    private data class Candidate(
+        val bounds: Rect,
+        val score: Double,
+        val angleFromVerticalDegrees: Double,
+    )
 
     private companion object {
         const val RGBA_CHANNELS = 4L

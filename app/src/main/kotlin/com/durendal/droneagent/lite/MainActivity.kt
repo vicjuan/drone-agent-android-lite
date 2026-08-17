@@ -73,6 +73,8 @@ class MainActivity : Activity() {
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var sequenceButton: PillButton
+    private lateinit var cameraDownButton: PillButton
+    private lateinit var tapeTrackingButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
     private lateinit var gimbalPad: StickPadView
@@ -149,6 +151,11 @@ class MainActivity : Activity() {
 
     /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
     private var gimbalActive = false
+    private val tapeTracking = TapeTrackingController()
+    private var tapeTrackingAuthoritySeen = false
+    private var tapeTrackingStartedAtNanos = 0L
+    private var renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
+    private var commandedTapeYawRate = 0.0
 
 
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
@@ -189,12 +196,25 @@ class MainActivity : Activity() {
                 abortShuttle("實體遙控器已接管，持續來回已停止")
             }
         }
+        if (tapeTracking.enabled) {
+            if (status.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER) {
+                tapeTrackingAuthoritySeen = true
+            } else if (tapeTrackingAuthoritySeen) {
+                stopTapeTracking("實體遙控器已接管，黑膠帶追蹤已停止", release = false)
+            }
+        }
         render("控制權=${status.authority}")
     }
     private val gimbal = GimbalSession(
         onFailure = { error ->
-            flightLog.write("gimbal command refused: $error")
-            render("攝影機角度控制被拒絕：$error")
+            runOnUiThread {
+                flightLog.write("gimbal command refused: $error")
+                if (tapeTracking.enabled) {
+                    stopTapeTracking("雲台控制失敗，黑膠帶追蹤已停止：$error", release = true)
+                } else {
+                    render("攝影機角度控制被拒絕：$error")
+                }
+            }
         },
     )
 
@@ -223,6 +243,7 @@ class MainActivity : Activity() {
         // would deliver key updates to a dead view hierarchy. The stick link is
         // released too, so a killed UI can never leave a live control link.
         mainHandler.removeCallbacksAndMessages(null)
+        tapeTracking.stop()
         if (stickOwned) virtualStick.disable {}
         virtualStick.close()
         gimbal.close()
@@ -286,6 +307,8 @@ class MainActivity : Activity() {
     }
 
     private fun handleTapeDetection(detection: TapeDetection?) = runOnUiThread {
+        val now = System.nanoTime()
+        tapeTracking.observe(detection?.angleFromVerticalDegrees, now)
         if (!::tapeOverlay.isInitialized) return@runOnUiThread
         if (detection == null) {
             consecutiveTapeMisses += 1
@@ -295,14 +318,14 @@ class MainActivity : Activity() {
         }
         tapeOverlay.showDetection(detection)
         val detected = detection != null
-        val now = System.nanoTime()
         if (detected != tapeDetected || now - tapeLoggedAtNanos >= TAPE_LOG_PERIOD_NANOS) {
             tapeDetected = detected
             tapeLoggedAtNanos = now
             flightLog.write(
                 detection?.let {
-                    "black tape detected confidence=%.2f bounds=%s %s".format(
+                    "black tape detected confidence=%.2f angle=%+.1f bounds=%s %s".format(
                         it.confidence,
+                        it.angleFromVerticalDegrees,
                         it.bounds,
                         tapeDetector?.diagnosticsSummary().orEmpty(),
                     )
@@ -313,6 +336,11 @@ class MainActivity : Activity() {
 
     private fun handleTapeFrameStreamStale() {
         tapeDetector?.resetTracking()
+        tapeTracking.observe(null, System.nanoTime())
+        if (tapeTracking.enabled) {
+            commandedTapeYawRate = 0.0
+            virtualStick.setYawRate(0.0)
+        }
         flightLog.write("RGBA frame stream stale; detector reset")
         runOnUiThread {
             if (!::tapeOverlay.isInitialized) return@runOnUiThread
@@ -334,6 +362,8 @@ class MainActivity : Activity() {
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
         sequenceButton = PillButton("持續來回", StickPadView.GREEN) { startShuttle() }
+        cameraDownButton = PillButton("攝影機向下", StickPadView.CYAN) { moveCameraDown() }
+        tapeTrackingButton = PillButton("黑膠帶追蹤", StickPadView.GREEN) { toggleTapeTracking() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
             registerAttempts = 0
             requestRegistration("操作者手動")
@@ -342,6 +372,8 @@ class MainActivity : Activity() {
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
         addView(sequenceButton, actionParams(marginEnd = dp(10)))
+        addView(cameraDownButton, actionParams(marginEnd = dp(10)))
+        addView(tapeTrackingButton, actionParams(marginEnd = dp(10)))
         addView(
             buildStatusPanel(),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
@@ -435,6 +467,9 @@ class MainActivity : Activity() {
         if (active && shuttleStep != null) {
             abortShuttle("攝影機搖桿已接管，持續來回已停止")
         }
+        if (active && tapeTracking.enabled) {
+            stopTapeTracking("攝影機搖桿已接管，黑膠帶追蹤已停止", release = true)
+        }
         if (active != gimbalActive) {
             gimbalActive = active
             flightLog.write(
@@ -445,8 +480,211 @@ class MainActivity : Activity() {
         gimbal.setInput(x, y)
     }
 
+    private fun moveCameraDown() {
+        flightLog.write("press: camera down registered=$registered connected=$aircraftConnected")
+        if (!registered || !aircraftConnected) {
+            render("飛機未連線，無法控制攝影機")
+            return
+        }
+        if (tapeTracking.enabled) {
+            stopTapeTracking("攝影機手動向下，黑膠帶追蹤已停止", release = true)
+        }
+        render("攝影機轉向下方…")
+        gimbal.rotateTo(
+            CAMERA_DOWN_PITCH_DEGREES,
+            0.0,
+            CAMERA_RECENTER_DURATION_SECONDS,
+        ) { error ->
+            runOnUiThread {
+                if (error == null) {
+                    flightLog.write("camera down accepted")
+                    render("攝影機已盡量朝下")
+                }
+            }
+        }
+    }
+
+    private fun toggleTapeTracking() {
+        if (tapeTracking.enabled) {
+            stopTapeTracking("黑膠帶追蹤已由操作者停止", release = true, centerCamera = true)
+        } else {
+            startTapeTracking()
+        }
+    }
+
+    private fun startTapeTracking() {
+        flightLog.write(
+            "press: tape tracking registered=$registered connected=$aircraftConnected " +
+                "flying=$flying owned=$stickOwned",
+        )
+        if (!registered || !aircraftConnected || !flying) {
+            render("飛機未在空中，無法啟動黑膠帶追蹤")
+            return
+        }
+        if (tapeDetector == null) {
+            render("OpenCV 未啟動，無法追蹤黑膠帶")
+            return
+        }
+        if (
+            shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
+            leftStickActive || rightStickActive
+        ) {
+            render("另一個飛行控制正在使用中")
+            return
+        }
+        mainHandler.removeCallbacks(idleReleaseRunnable)
+        render("黑膠帶追蹤：取得控制權…")
+        acquireControlLink(
+            onFailure = { reason ->
+                stopTapeTracking("黑膠帶追蹤取消：$reason", release = false)
+            },
+        ) {
+            val now = System.nanoTime()
+            tapeTracking.start(now)
+            tapeTrackingStartedAtNanos = now
+            tapeTrackingAuthoritySeen =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
+            commandedTapeYawRate = 0.0
+            tapeTrackingButton.text = "停止黑膠帶追蹤"
+            flightLog.write("tape tracking started")
+            mainHandler.removeCallbacks(tapeTrackingTickRunnable)
+            mainHandler.post(tapeTrackingTickRunnable)
+        }
+    }
+
+    private val tapeTrackingTickRunnable = object : Runnable {
+        override fun run() {
+            if (!tapeTracking.enabled) return
+            if (!registered || !aircraftConnected || !flying || !stickOwned) {
+                stopTapeTracking("飛行或控制權狀態失效，黑膠帶追蹤已停止", release = false)
+                return
+            }
+            val now = System.nanoTime()
+            val ownsAuthority =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            if (ownsAuthority) {
+                tapeTrackingAuthoritySeen = true
+            } else {
+                virtualStick.setYawRate(0.0)
+                if (
+                    tapeTrackingAuthoritySeen ||
+                    now - tapeTrackingStartedAtNanos >= AUTHORITY_HANDOVER_TIMEOUT_NANOS
+                ) {
+                    stopTapeTracking("未取得或已失去控制權，黑膠帶追蹤已停止", release = false)
+                    return
+                }
+            }
+
+            val decision = tapeTracking.tick(now)
+            decision.gimbalTarget?.let(::applyTapeTrackingGimbalTarget)
+            if (decision.searchTimedOut) {
+                stopTapeTracking("搜尋 20 秒仍找不到黑膠帶，追蹤已停止", release = true)
+                return
+            }
+            val yawRate = if (ownsAuthority) decision.yawRateDegreesPerSecond else 0.0
+            virtualStick.setYawRate(yawRate)
+            if (yawRate != commandedTapeYawRate) {
+                commandedTapeYawRate = yawRate
+                flightLog.write(
+                    "tape tracking yaw=%+.1f phase=${decision.phase}".format(yawRate),
+                )
+            }
+            if (decision.phase != renderedTapeTrackingPhase) {
+                renderedTapeTrackingPhase = decision.phase
+                val status = when (decision.phase) {
+                    TapeTrackingPhase.RECENTERING -> "黑膠帶追蹤：攝影機復位中"
+                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（方向誤差容許 ±10°）"
+                    TapeTrackingPhase.SEARCHING -> "黑膠帶遺失：雲台左右搜尋中"
+                    TapeTrackingPhase.DISABLED -> "黑膠帶追蹤已停止"
+                }
+                holdStatus = status
+                flightLog.write("tape tracking phase=${decision.phase}")
+                render(status)
+            }
+            mainHandler.postDelayed(this, TAPE_TRACKING_TICK_MS)
+        }
+    }
+
+    private fun applyTapeTrackingGimbalTarget(target: TrackingGimbalTarget) {
+        when (target) {
+            TrackingGimbalTarget.DOWN_CENTER -> {
+                flightLog.write("tape tracking gimbal=DOWN_CENTER")
+                gimbal.rotateTo(
+                    CAMERA_DOWN_PITCH_DEGREES,
+                    0.0,
+                    CAMERA_RECENTER_DURATION_SECONDS,
+                ) { error ->
+                    if (error != null) {
+                        runOnUiThread {
+                            if (tapeTracking.enabled) {
+                                stopTapeTracking(
+                                    "雲台復位失敗，黑膠帶追蹤已停止：$error",
+                                    release = true,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            TrackingGimbalTarget.SEARCH_LEFT,
+            TrackingGimbalTarget.SEARCH_RIGHT,
+            -> {
+                val yawInput = if (target == TrackingGimbalTarget.SEARCH_LEFT) {
+                    -GIMBAL_SEARCH_YAW_INPUT
+                } else {
+                    GIMBAL_SEARCH_YAW_INPUT
+                }
+                flightLog.write("tape tracking gimbal=${target.name} yawInput=$yawInput")
+                gimbal.setInput(yawInput, 0.0)
+            }
+        }
+    }
+
+    private fun stopTapeTracking(
+        message: String,
+        release: Boolean,
+        centerCamera: Boolean = false,
+    ) {
+        val wasActive =
+            tapeTracking.enabled || renderedTapeTrackingPhase != TapeTrackingPhase.DISABLED
+        tapeTracking.stop()
+        mainHandler.removeCallbacks(tapeTrackingTickRunnable)
+        gimbal.setInput(0.0, 0.0)
+        virtualStick.setYawRate(0.0)
+        commandedTapeYawRate = 0.0
+        tapeTrackingAuthoritySeen = false
+        tapeTrackingStartedAtNanos = 0L
+        renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
+        if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "黑膠帶追蹤"
+        if (centerCamera && registered && aircraftConnected) {
+            applyTapeTrackingGimbalTarget(TrackingGimbalTarget.DOWN_CENTER)
+        }
+        if (!wasActive) {
+            render(message)
+            return
+        }
+        holdStatus = ""
+        flightLog.write(message)
+        if (
+            release && stickOwned && !stickTransitionPending &&
+            !leftStickActive && !rightStickActive && !holdingHeight &&
+            shuttleStep == null && headingTurn == null && !nudging
+        ) {
+            releaseControlLink { error ->
+                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
+            }
+        } else {
+            render(message)
+        }
+    }
+
     private fun onStickMoved(side: StickSide, x: Double, y: Double) {
         val isDeflected = x != 0.0 || y != 0.0
+        if (isDeflected && tapeTracking.enabled) {
+            stopTapeTracking("畫面搖桿已接管，黑膠帶追蹤已停止", release = false)
+        }
         val horizontalStopReason =
             if (side == StickSide.RIGHT && isDeflected) {
                 horizontalActuationStopReason()
@@ -512,7 +750,7 @@ class MainActivity : Activity() {
     private val idleReleaseRunnable = Runnable {
         if (
             leftStickActive || rightStickActive || holdingHeight || headingTurn != null ||
-            shuttleStep != null || !stickOwned
+            shuttleStep != null || tapeTracking.enabled || !stickOwned
         ) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
@@ -562,9 +800,15 @@ class MainActivity : Activity() {
         landButton.available = ready && flying
         val turning = headingTurn != null
         val sequencing = shuttleStep != null
-        holdButton.available = ready && flying && !holdingHeight && !turning && !sequencing
+        holdButton.available =
+            ready && flying && !holdingHeight && !turning && !sequencing && !tapeTracking.enabled
         sequenceButton.available =
-            ready && flying && !nudging && !turning && !holdingHeight && !sequencing
+            ready && flying && !nudging && !turning && !holdingHeight && !sequencing &&
+                !tapeTracking.enabled
+        cameraDownButton.available = ready
+        tapeTrackingButton.available =
+            tapeTracking.enabled ||
+                (ready && flying && !nudging && !turning && !holdingHeight && !sequencing)
         // Sticks stay live during the shuttle: any deflection is an explicit
         // operator takeover and cancels automation before applying that input.
         leftPad.isEnabled = ready && flying
@@ -1114,8 +1358,9 @@ class MainActivity : Activity() {
             render("沒有機頭方向資料，無法持續來回")
             return
         }
-        if (shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
-            leftStickActive || rightStickActive
+        if (
+            shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
+            tapeTracking.enabled || leftStickActive || rightStickActive
         ) {
             render("另一個飛行控制正在使用中")
             return
@@ -1211,7 +1456,7 @@ class MainActivity : Activity() {
         }
         if (
             shuttleStep != null || headingTurn != null || holdingHeight || nudging ||
-            leftStickActive || rightStickActive
+            tapeTracking.enabled || leftStickActive || rightStickActive
         ) {
             render("另一個飛行控制正在使用中")
             return
@@ -1373,6 +1618,9 @@ class MainActivity : Activity() {
             abortShuttle("降落操作取消持續來回", release = false)
         }
         if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
+        if (tapeTracking.enabled) {
+            stopTapeTracking("降落操作取消黑膠帶追蹤", release = false, centerCamera = true)
+        }
         holdStatus = ""
         if (!stickOwned) {
             awaitRemoteAuthority { sendLandingCommand() }
@@ -1513,6 +1761,9 @@ class MainActivity : Activity() {
         } else if (headingTurn != null) {
             finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
         }
+        if (tapeTracking.enabled) {
+            stopTapeTracking("飛行狀態結束，黑膠帶追蹤已停止", release = false)
+        }
         if (!stickOwned || stickTransitionPending) return
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "已釋放控制權，交回遙控器")
@@ -1523,6 +1774,9 @@ class MainActivity : Activity() {
         if (stickTransitionPending) {
             onDone("控制權切換進行中")
             return
+        }
+        if (tapeTracking.enabled) {
+            stopTapeTracking("控制權釋放，黑膠帶追蹤已停止", release = false)
         }
         val generation = beginTransition("release") {
             onDone("釋放控制權無回應")
@@ -1761,6 +2015,10 @@ class MainActivity : Activity() {
             render("180° 旋轉進行中，無法同時定高")
             return
         }
+        if (tapeTracking.enabled) {
+            render("黑膠帶追蹤進行中，無法同時定高")
+            return
+        }
         if (usableHeightMeters() == null) {
             flightLog.write("descent refused: no usable height last=$altitudeMeters src=$heightSource connected=$aircraftConnected ageMs=${heightAgeMillis()}")
             render("沒有高度資料，無法定高")
@@ -1985,6 +2243,8 @@ class MainActivity : Activity() {
          * bound is generous because waiting costs nothing but a zero command.
          */
         const val AUTHORITY_HANDOVER_TIMEOUT_MS = 1_500L
+        const val AUTHORITY_HANDOVER_TIMEOUT_NANOS =
+            AUTHORITY_HANDOVER_TIMEOUT_MS * 1_000_000L
 
         /**
          * Display and takeoff-lockout thresholds only. They never initiate a
@@ -2021,6 +2281,10 @@ class MainActivity : Activity() {
 
         /** Three misses prevent a single noisy frame from flashing the box off. */
         const val TAPE_MISSES_TO_CLEAR = 3
+        const val TAPE_TRACKING_TICK_MS = 100L
+        const val CAMERA_DOWN_PITCH_DEGREES = -90.0
+        const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
+        const val GIMBAL_SEARCH_YAW_INPUT = 0.35
 
         /** Registration retries before the operator has to press the button. */
         const val MAX_REGISTER_ATTEMPTS = 10

@@ -4,6 +4,8 @@ import dji.sdk.keyvalue.key.GimbalKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.sdk.keyvalue.value.gimbal.CtrlInfo
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.sdk.keyvalue.value.gimbal.GimbalSpeedRotation
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
@@ -42,6 +44,49 @@ class GimbalSession(
             stopPending = true
             startSending()
         }
+    }
+
+    /**
+     * Moves the gimbal to an aircraft-relative pose. Pitch is negative downward;
+     * yaw is positive right. Any manual speed command is stopped first.
+     */
+    fun rotateTo(
+        pitchDegrees: Double,
+        yawDegrees: Double,
+        durationSeconds: Double,
+        onDone: (String?) -> Unit,
+    ) {
+        pitchRate = 0.0
+        yawRate = 0.0
+        stopPending = false
+        val rotation = GimbalAngleRotation().apply {
+            mode = GimbalAngleRotationMode.ABSOLUTE_ANGLE
+            pitch = pitchDegrees
+            roll = 0.0
+            yaw = yawDegrees
+            pitchIgnored = false
+            rollIgnored = true
+            yawIgnored = false
+            duration = durationSeconds
+            jointReferenceUsed = false
+            timeout = ((durationSeconds + COMMAND_TIMEOUT_MARGIN_SECONDS) * 1_000).toInt()
+        }
+        KeyManager.getInstance().performAction(
+            KeyTools.createKey(GimbalKey.KeyRotateByAngle),
+            rotation,
+            object : CommonCallbacks.CompletionCallbackWithParam<EmptyMsg> {
+                override fun onSuccess(result: EmptyMsg) {
+                    failureReported.set(false)
+                    onDone(null)
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    val detail = error.description() ?: error.toString()
+                    if (failureReported.compareAndSet(false, true)) onFailure(detail)
+                    onDone(detail)
+                }
+            },
+        )
     }
 
     fun close() {
@@ -115,5 +160,6 @@ class GimbalSession(
     companion object {
         const val MAX_RATE_DEGREES_PER_SECOND = 30.0
         const val FRAME_RATE_HZ = 10L
+        private const val COMMAND_TIMEOUT_MARGIN_SECONDS = 1.0
     }
 }

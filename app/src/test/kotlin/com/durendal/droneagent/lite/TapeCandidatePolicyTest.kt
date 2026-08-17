@@ -131,7 +131,7 @@ class TapeCandidatePolicyTest {
     }
 
     @Test
-    fun `candidate touching horizontal frame edge is rejected`() {
+    fun `untracked candidate touching horizontal frame edge is rejected`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(
                 areaFraction = 0.03,
@@ -145,5 +145,23 @@ class TapeCandidatePolicyTest {
         )
 
         assertNull(score)
+    }
+
+    @Test
+    fun `tracked tape remains detectable as it reaches horizontal frame edge`() {
+        val score = TapeCandidatePolicy.score(
+            TapeCandidateMetrics(
+                areaFraction = 0.03,
+                aspectRatio = 8.0,
+                shortSideFraction = 0.05,
+                longSideFraction = 0.70,
+                orientedFill = 0.90,
+                surroundingBrown = 0.70,
+                touchesHorizontalFrameEdge = true,
+                overlapsPreviousDetection = true,
+            ),
+        )
+
+        assertNotNull(score)
     }
 }

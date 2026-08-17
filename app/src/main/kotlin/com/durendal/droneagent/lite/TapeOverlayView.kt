@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.view.View
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Draws the latest detector result over the CENTER_INSIDE DJI preview. */
 class TapeOverlayView(context: Context) : View(context) {
@@ -57,7 +58,10 @@ class TapeOverlayView(context: Context) : View(context) {
         )
         canvas.drawRoundRect(bounds, density(6f), density(6f), boxPaint)
 
-        val label = "BLACK TAPE ${(result.confidence * 100).toInt()}%"
+        val label = formatTapeDetectionLabel(
+            confidence = result.confidence,
+            angleFromVerticalDegrees = result.angleFromVerticalDegrees,
+        )
         val padding = density(6f)
         val textWidth = labelPaint.measureText(label)
         val textHeight = labelPaint.fontMetrics.run { bottom - top }
@@ -104,4 +108,13 @@ class TapeOverlayView(context: Context) : View(context) {
     private companion object {
         val DETECTED_COLOR = Color.rgb(0, 230, 118)
     }
+}
+
+internal fun formatTapeDetectionLabel(
+    confidence: Double,
+    angleFromVerticalDegrees: Double,
+): String {
+    val roundedAngle = angleFromVerticalDegrees.roundToInt()
+    val signedAngle = if (roundedAngle > 0) "+$roundedAngle" else roundedAngle.toString()
+    return "BLACK TAPE ${(confidence * 100).toInt()}%  $signedAngle°"
 }

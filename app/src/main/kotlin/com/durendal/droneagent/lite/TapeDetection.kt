@@ -1,15 +1,18 @@
 package com.durendal.droneagent.lite
 
+import kotlin.math.atan2
 /** A black-tape candidate expressed in source-frame proportions. */
 data class TapeDetection(
     val sourceWidth: Int,
     val sourceHeight: Int,
     val bounds: NormalizedRect,
     val confidence: Double,
+    val angleFromVerticalDegrees: Double,
 ) {
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
         require(confidence in 0.0..1.0)
+        require(angleFromVerticalDegrees in -90.0..90.0)
     }
 }
 
@@ -25,6 +28,21 @@ data class NormalizedRect(
     }
 }
 
+
+internal object TapeOrientation {
+    /**
+     * Returns the signed angle from image-up to an undirected line. Positive
+     * means the line leans toward image-right as it extends forward.
+     */
+    fun deviationFromVerticalDegrees(deltaX: Double, deltaY: Double): Double {
+        require(deltaX.isFinite() && deltaY.isFinite())
+        require(deltaX != 0.0 || deltaY != 0.0)
+        val pointsUp = deltaY < 0.0 || (deltaY == 0.0 && deltaX >= 0.0)
+        val upwardX = if (pointsUp) deltaX else -deltaX
+        val upwardY = if (pointsUp) deltaY else -deltaY
+        return Math.toDegrees(atan2(upwardX, -upwardY)).coerceIn(-90.0, 90.0)
+    }
+}
 internal data class TapeCandidateMetrics(
     val areaFraction: Double,
     val aspectRatio: Double,
@@ -33,6 +51,7 @@ internal data class TapeCandidateMetrics(
     val orientedFill: Double,
     val surroundingBrown: Double,
     val touchesHorizontalFrameEdge: Boolean = false,
+    val overlapsPreviousDetection: Boolean = false,
 )
 
 internal enum class TapeCandidateRejection {
@@ -72,7 +91,7 @@ internal object TapeCandidatePolicy {
         ) {
             return TapeCandidateRejection.SHAPE
         }
-        if (metrics.touchesHorizontalFrameEdge) {
+        if (metrics.touchesHorizontalFrameEdge && !metrics.overlapsPreviousDetection) {
             return TapeCandidateRejection.HORIZONTAL_FRAME_EDGE
         }
         if (metrics.orientedFill < MIN_ORIENTED_FILL) {
