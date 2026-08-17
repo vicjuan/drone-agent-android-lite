@@ -68,11 +68,10 @@ class MainActivity : Activity() {
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var forwardButton: PillButton
+    private lateinit var sequenceButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
     private lateinit var gimbalPad: StickPadView
-    private lateinit var turnLeftButton: PillButton
-    private lateinit var turnRightButton: PillButton
 
     private var registered = false
     private var registerAttempts = 0
@@ -90,6 +89,8 @@ class MainActivity : Activity() {
     private var stickOwned = false
     private var stickTransitionPending = false
     private var acquireAttempts = 0
+    private var transitionTimeoutAction: (() -> Unit)? = null
+    private var transitionGeneration = 0L
 
     /** Ground-relative height and when it was observed; null until the first sample. */
     private var altitudeMeters: Double? = null
@@ -125,6 +126,10 @@ class MainActivity : Activity() {
     private var nudging = false
     private var nudgeRequestedAtNanos = 0L
     private var nudgeCommandStartedAtNanos = 0L
+
+    /** Repeating forward/half-turn path; non-null until an explicit stop condition wins. */
+    private var shuttleStep: ShuttleStep? = null
+    private var shuttleAuthoritySeen = false
 
     /** Battery percentage and low-cell flag, observed without autonomous actuation. */
     private var batteryPercent: Int? = null
@@ -163,16 +168,25 @@ class MainActivity : Activity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val virtualStick = VirtualStickSession(
-        onStatus = { status ->
-            val previous = stickStatus
-            stickStatus = status
-            if (previous.enabled != status.enabled || previous.authority != status.authority) {
-                flightLog.write("stick state enabled=${status.enabled} authority=${status.authority}")
-            }
-            render("控制權=${status.authority}")
-        },
+        onStatus = ::handleVirtualStickStatus,
         onFrameSummary = { summary -> flightLog.write(summary) },
     )
+
+    private fun handleVirtualStickStatus(status: VirtualStickStatus) = runOnUiThread {
+        val previous = stickStatus
+        stickStatus = status
+        if (previous.enabled != status.enabled || previous.authority != status.authority) {
+            flightLog.write("stick state enabled=${status.enabled} authority=${status.authority}")
+        }
+        if (shuttleStep != null) {
+            if (status.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER) {
+                shuttleAuthoritySeen = true
+            } else if (shuttleAuthoritySeen) {
+                abortShuttle("實體遙控器已接管，持續來回已停止")
+            }
+        }
+        render("控制權=${status.authority}")
+    }
     private val gimbal = GimbalSession(
         onFailure = { error ->
             flightLog.write("gimbal command refused: $error")
@@ -252,7 +266,8 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
-        forwardButton = PillButton("前進 1 秒", StickPadView.GREEN) { startForwardNudge() }
+        forwardButton = PillButton("前進 3 秒", StickPadView.GREEN) { startForwardNudge() }
+        sequenceButton = PillButton("持續來回", StickPadView.GREEN) { startShuttle() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
             registerAttempts = 0
             requestRegistration("操作者手動")
@@ -261,6 +276,7 @@ class MainActivity : Activity() {
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
         addView(forwardButton, actionParams(marginEnd = dp(10)))
+        addView(sequenceButton, actionParams(marginEnd = dp(10)))
         addView(
             buildStatusPanel(),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
@@ -313,12 +329,6 @@ class MainActivity : Activity() {
             axisLabels = StickAxisLabels(up = "抬高", down = "低頭", left = "左看", right = "右看")
             onPosition = ::onGimbalMoved
         }
-        turnLeftButton = PillButton("左旋 180°", StickPadView.CYAN) {
-            startHeadingTurn(TurnDirection.LEFT)
-        }
-        turnRightButton = PillButton("右旋 180°", StickPadView.CYAN) {
-            startHeadingTurn(TurnDirection.RIGHT)
-        }
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
@@ -353,17 +363,13 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER
                 },
             )
-            addView(
-                LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(turnLeftButton, actionParams(marginEnd = dp(6)))
-                    addView(turnRightButton, actionParams())
-                },
-            )
         }
 
     private fun onGimbalMoved(x: Double, y: Double) {
         val active = x != 0.0 || y != 0.0
+        if (active && shuttleStep != null) {
+            abortShuttle("攝影機搖桿已接管，持續來回已停止")
+        }
         if (active != gimbalActive) {
             gimbalActive = active
             flightLog.write(
@@ -375,12 +381,19 @@ class MainActivity : Activity() {
     }
 
     private fun onStickMoved(side: StickSide, x: Double, y: Double) {
+        val isDeflected = x != 0.0 || y != 0.0
         val horizontalStopReason =
-            if (side == StickSide.RIGHT && (x != 0.0 || y != 0.0)) {
+            if (side == StickSide.RIGHT && isDeflected) {
                 horizontalActuationStopReason()
             } else {
                 null
             }
+        if (isDeflected && shuttleStep != null) {
+            abortShuttle(
+                "畫面搖桿已接管，持續來回已停止",
+                release = horizontalStopReason != null,
+            )
+        }
         if (horizontalStopReason != null) {
             rightStickActive = false
             virtualStick.setStick(StickSide.RIGHT, 0.0, 0.0)
@@ -432,7 +445,10 @@ class MainActivity : Activity() {
     }
 
     private val idleReleaseRunnable = Runnable {
-        if (leftStickActive || rightStickActive || holdingHeight || headingTurn != null || !stickOwned) return@Runnable
+        if (
+            leftStickActive || rightStickActive || holdingHeight || headingTurn != null ||
+            shuttleStep != null || !stickOwned
+        ) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
         }
@@ -480,15 +496,15 @@ class MainActivity : Activity() {
         takeoffButton.available = ready && !flying
         landButton.available = ready && flying
         val turning = headingTurn != null
-        holdButton.available = ready && flying && !holdingHeight && !turning
-        forwardButton.available = ready && flying && !nudging && !turning
-        turnLeftButton.available = ready && flying && !turning && !holdingHeight && !nudging
-        turnRightButton.available = ready && flying && !turning && !holdingHeight && !nudging
-        // Mini 4 Pro does not provide reliable horizontal ranges in this MSDK
-        // path. Manual control stays available; a real, fresh close range or
-        // active DJI braking still stops horizontal output immediately.
-        leftPad.isEnabled = ready && flying && !turning
-        rightPad.isEnabled = ready && flying && !turning
+        val sequencing = shuttleStep != null
+        holdButton.available = ready && flying && !holdingHeight && !turning && !sequencing
+        forwardButton.available = ready && flying && !nudging && !turning && !sequencing
+        sequenceButton.available =
+            ready && flying && !nudging && !turning && !holdingHeight && !sequencing
+        // Sticks stay live during the shuttle: any deflection is an explicit
+        // operator takeover and cancels automation before applying that input.
+        leftPad.isEnabled = ready && flying
+        rightPad.isEnabled = ready && flying
         gimbalPad.isEnabled = ready
     }
 
@@ -509,6 +525,7 @@ class MainActivity : Activity() {
             append(" · hold=").append(if (holdingHeight) "50cm" else "off")
             append(" · heading=").append(aircraftHeadingDegrees?.let { "%.1f°".format(it) } ?: "—")
             append(" · turn=").append(headingTurn?.let { "%.0f/180°".format(it.progressDegrees) } ?: "off")
+            append(" · sequence=").append(shuttleStep?.name ?: "off")
             append(" · landingConfirmNeeded=").append(confirmationNeeded)
             append("\nbattery=").append(batteryPercent?.let { "$it%" } ?: "—")
             append(if (lowCellVoltage) " lowCell" else "")
@@ -966,12 +983,13 @@ class MainActivity : Activity() {
     }
 
     private fun stopHorizontalActuation(reason: String) {
-        val wasActive = rightStickActive || nudging
         rightStickActive = false
-        nudging = false
-        mainHandler.removeCallbacks(nudgeTickRunnable)
+        if (nudging) {
+            flightLog.write("horizontal actuation stopped: $reason")
+            finishForwardNudge(reason, succeeded = false)
+            return
+        }
         virtualStick.setForwardOnly(0.0)
-        if (!wasActive) return
         holdStatus = reason
         flightLog.write("horizontal actuation stopped: $reason")
         if (stickOwned && !leftStickActive && !holdingHeight) {
@@ -1015,6 +1033,99 @@ class MainActivity : Activity() {
 
     // -------------------------------------------------------- actuation ----
 
+    private fun startShuttle() {
+        flightLog.write(
+            "press: shuttle flying=$flying heading=$aircraftHeadingDegrees owned=$stickOwned",
+        )
+        if (!flying) {
+            render("飛機不在空中，無法持續來回")
+            return
+        }
+        if (aircraftHeadingDegrees == null || aircraftHeadingAtNanos == 0L) {
+            render("沒有機頭方向資料，無法持續來回")
+            return
+        }
+        if (shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
+            leftStickActive || rightStickActive
+        ) {
+            render("另一個飛行控制正在使用中")
+            return
+        }
+        horizontalActuationStopReason()?.let {
+            render(it)
+            return
+        }
+        mainHandler.removeCallbacks(idleReleaseRunnable)
+        shuttleStep = ShuttleStep.FORWARD
+        shuttleAuthoritySeen = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+        holdStatus = "持續來回：取得控制權…"
+        render(holdStatus)
+        acquireControlLink(
+            onFailure = { reason -> abortShuttle("持續來回取消：$reason", release = false) },
+        ) {
+            runShuttleStep()
+        }
+    }
+
+    private fun runShuttleStep() {
+        val step = shuttleStep ?: return
+        if (!flying || !aircraftConnected || !stickOwned) {
+            abortShuttle("持續來回停止：飛行或控制權狀態失效")
+            return
+        }
+        holdStatus = "持續來回：${step.label}"
+        flightLog.write("shuttle start step=${step.name}")
+        render(holdStatus)
+        if (step.isForward) {
+            horizontalActuationStopReason()?.let {
+                abortShuttle("持續來回停止：$it")
+                return
+            }
+            armForwardNudge()
+        } else {
+            val heading = aircraftHeadingDegrees
+            if (heading == null) {
+                abortShuttle("持續來回停止：機頭方向資料中斷")
+                return
+            }
+            armHeadingTurn(TurnDirection.RIGHT, heading)
+        }
+    }
+
+    private fun finishShuttleStep(message: String) {
+        val completed = shuttleStep ?: return
+        val next = completed.next()
+        shuttleStep = next
+        holdStatus = "$message；準備${next.label}"
+        flightLog.write("shuttle complete step=${completed.name}; next=${next.name}")
+        render(holdStatus)
+        mainHandler.postDelayed(::runShuttleStep, SEQUENCE_SETTLE_MS)
+    }
+
+    private fun abortShuttle(message: String, release: Boolean = true) {
+        if (shuttleStep == null) return
+        shuttleStep = null
+        shuttleAuthoritySeen = false
+        nudging = false
+        headingTurn = null
+        turnCommandStartedAtNanos = 0L
+        turnAuthoritySeen = false
+        mainHandler.removeCallbacks(nudgeTickRunnable)
+        mainHandler.removeCallbacks(headingTurnTickRunnable)
+        virtualStick.setForwardOnly(0.0)
+        virtualStick.setYawRate(0.0)
+        holdStatus = message
+        flightLog.write(message)
+        if (release && stickOwned && !leftStickActive && !rightStickActive && !holdingHeight) {
+            releaseControlLink { error ->
+                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
+            }
+        } else {
+            render(message)
+        }
+    }
+
+
     private fun startHeadingTurn(direction: TurnDirection) {
         val heading = aircraftHeadingDegrees
         flightLog.write(
@@ -1029,7 +1140,10 @@ class MainActivity : Activity() {
             render("沒有機頭方向資料，無法旋轉 180°")
             return
         }
-        if (headingTurn != null || holdingHeight || nudging || leftStickActive || rightStickActive) {
+        if (
+            shuttleStep != null || headingTurn != null || holdingHeight || nudging ||
+            leftStickActive || rightStickActive
+        ) {
             render("另一個飛行控制正在使用中")
             return
         }
@@ -1041,14 +1155,18 @@ class MainActivity : Activity() {
                 render("機頭方向資料中斷，旋轉取消")
                 return@acquireControlLink
             }
-            headingTurn = HeadingTurn(direction, currentHeading)
-            turnStartedAtNanos = System.nanoTime()
-            turnCommandStartedAtNanos = 0L
-            turnAuthoritySeen = false
-            virtualStick.setYawRate(0.0)
-            flightLog.write("${direction.label}180 armed heading=$currentHeading")
-            mainHandler.post(headingTurnTickRunnable)
+            armHeadingTurn(direction, currentHeading)
         }
+    }
+
+    private fun armHeadingTurn(direction: TurnDirection, currentHeading: Double) {
+        headingTurn = HeadingTurn(direction, currentHeading)
+        turnStartedAtNanos = System.nanoTime()
+        turnCommandStartedAtNanos = 0L
+        turnAuthoritySeen = false
+        virtualStick.setYawRate(0.0)
+        flightLog.write("${direction.label}180 armed heading=$currentHeading")
+        mainHandler.post(headingTurnTickRunnable)
     }
 
     private val headingTurnTickRunnable = object : Runnable {
@@ -1101,6 +1219,7 @@ class MainActivity : Activity() {
         if (remaining <= TURN_TOLERANCE_DEGREES) {
             finishHeadingTurn(
                 "${turn.direction.label} 180° 完成（%.0f°）".format(turn.progressDegrees),
+                succeeded = true,
             )
             return
         }
@@ -1113,7 +1232,11 @@ class MainActivity : Activity() {
         render(holdStatus)
     }
 
-    private fun finishHeadingTurn(message: String, release: Boolean = true) {
+    private fun finishHeadingTurn(
+        message: String,
+        succeeded: Boolean = false,
+        release: Boolean = true,
+    ) {
         if (headingTurn == null) return
         headingTurn = null
         turnCommandStartedAtNanos = 0L
@@ -1122,6 +1245,14 @@ class MainActivity : Activity() {
         virtualStick.setYawRate(0.0)
         holdStatus = message
         flightLog.write(message)
+        if (shuttleStep?.isForward == false) {
+            if (succeeded) {
+                finishShuttleStep(message)
+            } else {
+                abortShuttle(message, release)
+            }
+            return
+        }
         if (release && stickOwned && !leftStickActive && !rightStickActive && !holdingHeight && !nudging) {
             releaseControlLink { error ->
                 render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
@@ -1169,6 +1300,9 @@ class MainActivity : Activity() {
             return
         }
         holdingHeight = false
+        if (shuttleStep != null) {
+            abortShuttle("降落操作取消持續來回", release = false)
+        }
         if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
         holdStatus = ""
         if (!stickOwned) {
@@ -1305,7 +1439,11 @@ class MainActivity : Activity() {
      */
     private fun releaseIfNotFlying() {
         if (registered && aircraftConnected && flying) return
-        if (headingTurn != null) finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
+        if (shuttleStep != null) {
+            abortShuttle("飛行狀態結束，持續來回已停止", release = false)
+        } else if (headingTurn != null) {
+            finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
+        }
         if (!stickOwned || stickTransitionPending) return
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "已釋放控制權，交回遙控器")
@@ -1317,7 +1455,9 @@ class MainActivity : Activity() {
             onDone("控制權切換進行中")
             return
         }
-        beginTransition("release")
+        val generation = beginTransition("release") {
+            onDone("釋放控制權無回應")
+        }
         holdingHeight = false
         holdStatus = ""
         if (headingTurn != null) {
@@ -1328,7 +1468,11 @@ class MainActivity : Activity() {
             virtualStick.setYawRate(0.0)
         }
         virtualStick.disable { error ->
-            endTransition()
+            if (!endTransition(generation)) {
+                if (error == null) stickOwned = false
+                flightLog.write("late release callback ignored generation=$generation error=$error")
+                return@disable
+            }
             stickOwned = false
             flightLog.write("release done error=$error")
             onDone(error)
@@ -1341,38 +1485,63 @@ class MainActivity : Activity() {
      * virtual stick with CONTROL_AUTH_TAKING_OFF (observed on the Mini 4 Pro,
      * 2026-08-17). A single attempt loses the link for the whole flight.
      */
-    private fun acquireControlLink(onOwned: () -> Unit) {
+    private fun acquireControlLink(
+        onFailure: ((String) -> Unit)? = null,
+        onOwned: () -> Unit,
+    ) {
         if (stickOwned) {
             onOwned()
             return
         }
         if (!registered || !aircraftConnected || !flying) {
+            val reason = "飛機未在空中，不取得控制權"
             flightLog.write("acquire refused: registered=$registered connected=$aircraftConnected flying=$flying")
-            render("飛機未在空中，不取得控制權")
+            render(reason)
+            onFailure?.invoke(reason)
             return
         }
         if (stickTransitionPending) {
             // Never silent: a swallowed press is indistinguishable from a dead
             // button, which is exactly how this looked to the operator.
+            val reason = "控制權切換進行中，請稍候再試"
             flightLog.write("acquire ignored: transition already pending")
-            render("控制權切換進行中，請稍候再試")
+            render(reason)
+            onFailure?.invoke(reason)
             return
         }
-        beginTransition("acquire")
+        val generation = beginTransition("acquire") {
+            acquireAttempts = 0
+            onFailure?.invoke("控制權切換無回應")
+        }
         landingRequested = false
         acquireAttempts += 1
         val attempt = acquireAttempts
         virtualStick.enable { error ->
-            endTransition()
+            if (!endTransition(generation)) {
+                flightLog.write("late acquire callback ignored generation=$generation error=$error")
+                if (error == null) virtualStick.disable {}
+                return@enable
+            }
             stickOwned = error == null
             flightLog.write("acquire attempt=$attempt owned=$stickOwned error=$error")
             when {
-                stickOwned -> onOwned()
+                stickOwned -> {
+                    acquireAttempts = 0
+                    onOwned()
+                }
                 attempt < MAX_ACQUIRE_ATTEMPTS && flying -> {
                     render("等待起飛完成才能取得控制權（第 $attempt 次）：$error")
-                    mainHandler.postDelayed({ acquireControlLink(onOwned) }, ACQUIRE_RETRY_MS)
+                    mainHandler.postDelayed(
+                        { acquireControlLink(onFailure, onOwned) },
+                        ACQUIRE_RETRY_MS,
+                    )
                 }
-                else -> render("取得控制權失敗 $attempt 次，請用遙控器操作：$error")
+                else -> {
+                    val reason = "取得控制權失敗 $attempt 次，請用遙控器操作：$error"
+                    acquireAttempts = 0
+                    render(reason)
+                    onFailure?.invoke(reason)
+                }
             }
         }
     }
@@ -1383,22 +1552,31 @@ class MainActivity : Activity() {
      * dead while takeoff and landing still worked, because those do not need the
      * link. The latch therefore has a deadline.
      */
-    private fun beginTransition(what: String) {
+    private fun beginTransition(what: String, onTimeout: (() -> Unit)? = null): Long {
         stickTransitionPending = true
-        flightLog.write("transition begin: $what")
+        transitionTimeoutAction = onTimeout
+        transitionGeneration += 1
+        flightLog.write("transition begin: $what generation=$transitionGeneration")
         mainHandler.postDelayed(transitionTimeoutRunnable, TRANSITION_TIMEOUT_MS)
+        return transitionGeneration
     }
 
-    private fun endTransition() {
+    private fun endTransition(generation: Long): Boolean {
+        if (!stickTransitionPending || generation != transitionGeneration) return false
         stickTransitionPending = false
+        transitionTimeoutAction = null
         mainHandler.removeCallbacks(transitionTimeoutRunnable)
+        return true
     }
 
     private val transitionTimeoutRunnable = Runnable {
         if (!stickTransitionPending) return@Runnable
         stickTransitionPending = false
+        val onTimeout = transitionTimeoutAction
+        transitionTimeoutAction = null
         flightLog.write("transition timed out; latch cleared")
         render("控制權切換無回應，已解除鎖定，可再試一次")
+        onTimeout?.invoke()
     }
 
     // ------------------------------------------------------------- battery ----
@@ -1432,8 +1610,8 @@ class MainActivity : Activity() {
             render("飛機不在空中，無法前進")
             return
         }
-        if (headingTurn != null) {
-            render("180° 旋轉進行中，無法同時前進")
+        if (shuttleStep != null || headingTurn != null) {
+            render("另一個飛行控制正在使用中")
             return
         }
         horizontalActuationStopReason()?.let {
@@ -1447,9 +1625,9 @@ class MainActivity : Activity() {
         if (holdingHeight) finishHeightHold("前進操作取消定高", release = false)
         render(
             if (horizontalSafetyReady) {
-                "水平距離可用，取得控制權後前進 1 秒…"
+                "水平距離可用，取得控制權後前進 $FORWARD_DURATION_SECONDS 秒…"
             } else {
-                "水平視覺未偵測，無避障前進 1 秒…"
+                "水平視覺未偵測，無避障前進 $FORWARD_DURATION_SECONDS 秒…"
             },
         )
         acquireControlLink {
@@ -1458,15 +1636,19 @@ class MainActivity : Activity() {
                 render(it)
                 return@acquireControlLink
             }
-            nudging = true
-            nudgeRequestedAtNanos = System.nanoTime()
-            nudgeCommandStartedAtNanos = 0L
-            flightLog.write(
-                "forward armed speed=$NUDGE_SPEED_MPS visionReady=$horizontalSafetyReady " +
-                    "clearanceMm=$nearestHorizontalObstacleMm",
-            )
-            mainHandler.post(nudgeTickRunnable)
+            armForwardNudge()
         }
+    }
+
+    private fun armForwardNudge() {
+        nudging = true
+        nudgeRequestedAtNanos = System.nanoTime()
+        nudgeCommandStartedAtNanos = 0L
+        flightLog.write(
+            "forward armed speed=$NUDGE_SPEED_MPS visionReady=$horizontalSafetyReady " +
+                "clearanceMm=$nearestHorizontalObstacleMm",
+        )
+        mainHandler.post(nudgeTickRunnable)
     }
 
     private val nudgeTickRunnable = object : Runnable {
@@ -1492,12 +1674,13 @@ class MainActivity : Activity() {
             }
             val elapsedMs = (System.nanoTime() - nudgeCommandStartedAtNanos) / 1_000_000L
             if (elapsedMs >= NUDGE_DURATION_MS) {
-                finishForwardNudge("前進 1 秒完成")
+                finishForwardNudge("前進 $FORWARD_DURATION_SECONDS 秒完成", succeeded = true)
                 return
             }
             virtualStick.setForwardOnly(NUDGE_SPEED_MPS)
             val obstacleText = nearestHorizontalObstacleMm?.let { "$it mm" } ?: "未偵測"
-            holdStatus = "前進中… %.1f 秒，最近障礙 %s".format(
+            val prefix = shuttleStep?.label?.let { "持續來回 $it" } ?: "前進"
+            holdStatus = "$prefix… %.1f 秒，最近障礙 %s".format(
                 elapsedMs / 1000.0,
                 obstacleText,
             )
@@ -1506,12 +1689,20 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun finishForwardNudge(message: String) {
+    private fun finishForwardNudge(message: String, succeeded: Boolean = false) {
         nudging = false
         mainHandler.removeCallbacks(nudgeTickRunnable)
         virtualStick.setForwardOnly(0.0)
         holdStatus = message
         flightLog.write("$message nearestMm=$nearestHorizontalObstacleMm")
+        if (shuttleStep?.isForward == true) {
+            if (succeeded) {
+                finishShuttleStep(message)
+            } else {
+                abortShuttle(message)
+            }
+            return
+        }
         if (stickOwned && !leftStickActive && !rightStickActive && !holdingHeight) {
             releaseControlLink { error ->
                 render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
@@ -1779,10 +1970,13 @@ class MainActivity : Activity() {
         const val MAX_OBSTACLE_SAMPLE_AGE_MS = 500L
         const val HORIZONTAL_WATCHDOG_MS = 100L
 
-        /** One deliberately slow, obstacle-gated forward pulse. */
-        const val NUDGE_DURATION_MS = 1_000L
+        /** Duration shared by a manual forward pulse and each shuttle leg. */
+        const val FORWARD_DURATION_SECONDS = 3
+        const val NUDGE_DURATION_MS = FORWARD_DURATION_SECONDS * 1_000L
         const val NUDGE_SPEED_MPS = 0.3
         const val NUDGE_TICK_MS = 50L
+        /** Zero-command pause between path stages before starting the next command. */
+        const val SEQUENCE_SETTLE_MS = 500L
 
 
         /** Obstacle distances are recorded at most this often. */
