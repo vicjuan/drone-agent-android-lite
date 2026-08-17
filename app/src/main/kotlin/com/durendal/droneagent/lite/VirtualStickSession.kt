@@ -43,7 +43,10 @@ data class VirtualStickStatus(
  *   roll = forward m/s        pitch = right m/s
  *   verticalThrottle = up m/s yaw   = clockwise deg/s
  */
-class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
+class VirtualStickSession(
+    private val onStatus: (VirtualStickStatus) -> Unit,
+    private val onFrameSummary: (String) -> Unit = {},
+) {
 
     private val manager = VirtualStickManager.getInstance()
     private val sender = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -56,13 +59,35 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
     @Volatile private var yawRate = 0.0
     private var sendTask: ScheduledFuture<*>? = null
 
+    /** Frames the aircraft accepted since the stream started, and failures. */
+    @Volatile private var frameCount = 0L
+    @Volatile private var frameFailures = 0L
+
     private val stateListener = object : VirtualStickStateListener {
         override fun onVirtualStickStateUpdate(state: VirtualStickState) {
+            val owner = state.currentFlightControlAuthorityOwner?.name ?: "UNKNOWN"
+            // Frames follow authority, in both directions. Only the owner's frames
+            // mean anything, so this app goes quiet the moment the aircraft names
+            // someone else — and resumes as soon as it names MSDK again.
+            //
+            // The resume half is not optional: enableVirtualStick returns before the
+            // aircraft has finished handing authority over, so the first state update
+            // still says RC. A one-way stop there killed the frame stream for the
+            // whole flight (2026-08-17): the sticks and the height loop produced
+            // commands that were never sent, while takeoff and landing kept working
+            // because those are action keys, not frames.
+            if (state.isVirtualStickEnable) {
+                if (owner == MSDK_AUTHORITY_OWNER) {
+                    if (startSending()) Log.i(TAG, "authority is MSDK; frames running")
+                } else if (stopSending()) {
+                    Log.w(TAG, "authority owner is $owner; frames paused")
+                }
+            }
             onStatus(
                 VirtualStickStatus(
                     enabled = state.isVirtualStickEnable,
                     advancedMode = state.isVirtualStickAdvancedModeEnabled,
-                    authority = state.currentFlightControlAuthorityOwner?.name ?: "UNKNOWN",
+                    authority = owner,
                 ),
             )
         }
@@ -140,6 +165,16 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
         }
     }
 
+    /**
+     * Vertical command in m/s, for a closed loop that holds a height instead of
+     * a human pushing the stick. It writes the same axis the left stick writes,
+     * so exactly one of the two may be in charge at any moment — the caller
+     * decides which, and the aircraft never receives two vertical intents.
+     */
+    fun setClimbRate(metersPerSecond: Double) {
+        up = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
+    }
+
     fun close() {
         stopSending()
         sender.shutdownNow()
@@ -147,23 +182,48 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
         runCatching { manager.destroy() }
     }
 
-    private fun startSending() {
-        if (sendTask != null) return
+    /** Starts the frame stream; returns true when this call is what started it. */
+    @Synchronized
+    private fun startSending(): Boolean {
+        if (sendTask != null) return false
         val periodMs = 1_000L / FRAME_RATE_HZ
+        frameCount = 0
+        frameFailures = 0
         sendTask = sender.scheduleAtFixedRate(
             {
                 runCatching { manager.sendVirtualStickAdvancedParam(currentParam()) }
-                    .onFailure { Log.w(TAG, "frame send failed", it) }
+                    .onSuccess { frameCount += 1 }
+                    .onFailure {
+                        frameFailures += 1
+                        Log.w(TAG, "frame send failed", it)
+                    }
+                // One line per second, and only while something is actually being
+                // commanded: enough to prove the stream is alive and what it
+                // carries, without the flood that destroyed earlier evidence.
+                if (frameCount % FRAME_RATE_HZ == 0L) {
+                    val moving = forward != 0.0 || right != 0.0 || up != 0.0 || yawRate != 0.0
+                    if (moving || frameFailures > 0) {
+                        onFrameSummary(
+                            "frames=$frameCount fails=$frameFailures " +
+                                "fwd=%.2f right=%.2f up=%.2f yaw=%.1f".format(forward, right, up, yawRate),
+                        )
+                    }
+                }
             },
             0L,
             periodMs,
             TimeUnit.MILLISECONDS,
         )
+        return true
     }
 
-    private fun stopSending() {
-        sendTask?.cancel(false)
+    /** Stops the frame stream; returns true when this call is what stopped it. */
+    @Synchronized
+    private fun stopSending(): Boolean {
+        val task = sendTask ?: return false
+        task.cancel(false)
         sendTask = null
+        return true
     }
 
     private fun zeroAxes() {
@@ -188,6 +248,9 @@ class VirtualStickSession(private val onStatus: (VirtualStickStatus) -> Unit) {
     companion object {
         /** MSDK's documented virtual-stick cadence; the main project uses the same rate. */
         const val FRAME_RATE_HZ = 20L
+
+        /** Authority owner name that means this app's frames are the ones being flown. */
+        const val MSDK_AUTHORITY_OWNER = "MSDK"
 
         /** Full-deflection speeds. Deliberately gentle: this app has no flight envelope guard. */
         const val MAX_HORIZONTAL_MPS = 0.5
