@@ -1,6 +1,11 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.atan2
+internal enum class TapeDetectionMode {
+    STRAIGHT,
+    CURVED,
+}
+
 /** A black-tape candidate expressed in source-frame proportions. */
 data class TapeDetection(
     val sourceWidth: Int,
@@ -9,12 +14,14 @@ data class TapeDetection(
     val confidence: Double,
     val angleFromVerticalDegrees: Double,
     val longSideFraction: Double,
+    val nearFieldOffsetFraction: Double,
 ) {
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
         require(confidence in 0.0..1.0)
         require(angleFromVerticalDegrees in -90.0..90.0)
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
+        require(nearFieldOffsetFraction in -0.5..0.5)
     }
 }
 

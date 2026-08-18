@@ -34,6 +34,7 @@ class BlackTapeDetector(
     private val closed = AtomicBoolean(false)
     private val lastAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
+    @Volatile private var detectionMode = TapeDetectionMode.STRAIGHT
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
     @Volatile private var lastEffectiveThreshold = 0.0
@@ -41,6 +42,10 @@ class BlackTapeDetector(
     @Volatile private var lastContourCount = 0
     private val rejectionCounts = IntArray(TapeCandidateRejection.entries.size)
     private var luminanceBytes = ByteArray(0)
+    @Volatile private var lastDetectionMode = TapeDetectionMode.STRAIGHT
+    @Volatile private var lastPathSampleCount = 0
+    private val pathDirectionEstimator = TapePathDirectionEstimator()
+    private var candidateMaskBytes = ByteArray(0)
 
     init {
         check(OpenCVLoader.initLocal()) { "OpenCV native runtime failed to initialize" }
@@ -80,6 +85,11 @@ class BlackTapeDetector(
         }
     }
 
+    internal fun setDetectionMode(mode: TapeDetectionMode) {
+        detectionMode = mode
+        resetTracking()
+    }
+
     fun resetTracking() {
         if (closed.get()) return
         try {
@@ -94,9 +104,11 @@ class BlackTapeDetector(
 
     fun diagnosticsSummary(): String =
         (
-            "otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
+            "mode=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
                 "rejects=invalid:%d area:%d aspect:%d length:%d width:%d edge:%d fill:%d brown:%d"
             ).format(
+            lastDetectionMode,
+            lastPathSampleCount,
             lastOtsuThreshold,
             lastEffectiveThreshold,
             lastClassSeparation,
@@ -126,18 +138,28 @@ class BlackTapeDetector(
         val bridgedBlackMask = Mat()
         val brownMask = Mat()
         val cleanedBlackMask = Mat()
+        val candidateMask = Mat()
         val hierarchy = Mat()
         // Fluorescent glare creates short bright gaps inside the black tape. Close only
         // along its axis so those fragments reconnect without merging nearby objects.
+        val mode = detectionMode
+        lastDetectionMode = mode
+        lastPathSampleCount = 0
         val closeKernel = Imgproc.getStructuringElement(
-            Imgproc.MORPH_RECT,
-            Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT),
+            if (mode == TapeDetectionMode.CURVED) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
+            if (mode == TapeDetectionMode.CURVED) {
+                Size(CURVED_CLOSE_KERNEL_SIZE, CURVED_CLOSE_KERNEL_SIZE)
+            } else {
+                Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT)
+            },
         )
-        // Run opening after closing: the continuous vertical strip survives while thin
-        // horizontal cardboard seams are removed from the joined mask.
         val openKernel = Imgproc.getStructuringElement(
-            Imgproc.MORPH_RECT,
-            Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_OPEN_KERNEL_HEIGHT),
+            if (mode == TapeDetectionMode.CURVED) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
+            if (mode == TapeDetectionMode.CURVED) {
+                Size(CURVED_OPEN_KERNEL_SIZE, CURVED_OPEN_KERNEL_SIZE)
+            } else {
+                Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_OPEN_KERNEL_HEIGHT)
+            },
         )
         val contours = mutableListOf<MatOfPoint>()
         try {
@@ -197,10 +219,19 @@ class BlackTapeDetector(
             val frameShortSide = min(analysis.cols(), analysis.rows()).toDouble()
             var best: Candidate? = null
             var bestSelectionScore = Double.NEGATIVE_INFINITY
-            for (contour in contours) {
+            for ((contourIndex, contour) in contours.withIndex()) {
                 val candidate =
-                    scoreCandidate(contour, brownMask, frameArea, frameShortSide)
-                        ?: continue
+                    scoreCandidate(
+                        contour,
+                        contourIndex,
+                        contours,
+                        cleanedBlackMask,
+                        candidateMask,
+                        brownMask,
+                        frameArea,
+                        frameShortSide,
+                        mode,
+                    ) ?: continue
                 val continuityBonus =
                     if (overlapsPrevious(candidate.bounds)) PREVIOUS_OVERLAP_BONUS else 1.0
                 val selectionScore = candidate.score * continuityBonus
@@ -217,6 +248,7 @@ class BlackTapeDetector(
             consecutiveDetectionMisses = 0
             val rect = winner.bounds
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
+            lastPathSampleCount = winner.pathSampleCount
             return TapeDetection(
                 sourceWidth = width,
                 sourceHeight = height,
@@ -229,8 +261,10 @@ class BlackTapeDetector(
                 confidence = winner.score.coerceIn(0.0, 1.0),
                 angleFromVerticalDegrees = winner.angleFromVerticalDegrees,
                 longSideFraction = winner.longSideFraction,
+                nearFieldOffsetFraction = winner.nearFieldOffsetFraction,
             )
         } finally {
+            candidateMask.release()
             contours.forEach(MatOfPoint::release)
             hierarchy.release()
             closeKernel.release()
@@ -250,11 +284,35 @@ class BlackTapeDetector(
 
     private fun scoreCandidate(
         contour: MatOfPoint,
+        contourIndex: Int,
+        contours: List<MatOfPoint>,
+        blackMask: Mat,
+        candidateMask: Mat,
         brownMask: Mat,
         frameArea: Double,
         frameShortSide: Double,
+        mode: TapeDetectionMode,
     ): Candidate? {
         val contourArea = Imgproc.contourArea(contour)
+        val bounds = Imgproc.boundingRect(contour)
+        if (bounds.width <= 0 || bounds.height <= 0) {
+            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
+            return null
+        }
+        if (mode == TapeDetectionMode.CURVED) {
+            return scoreCurvedCandidate(
+                contourIndex,
+                contours,
+                blackMask,
+                candidateMask,
+                brownMask,
+                contourArea,
+                bounds,
+                frameArea,
+                frameShortSide,
+            )
+        }
+
         val contourPoints = MatOfPoint2f(*contour.toArray())
         val orientedBounds = try {
             Imgproc.minAreaRect(contourPoints)
@@ -271,11 +329,6 @@ class BlackTapeDetector(
         val shortSide = min(orientedWidth, orientedHeight)
         val longSide = max(orientedWidth, orientedHeight)
         val orientedArea = orientedWidth * orientedHeight
-        val bounds = Imgproc.boundingRect(contour)
-        if (bounds.width <= 0 || bounds.height <= 0) {
-            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
-            return null
-        }
         val metrics = TapeCandidateMetrics(
             areaFraction = contourArea / frameArea,
             aspectRatio = longSide / shortSide,
@@ -293,20 +346,107 @@ class BlackTapeDetector(
             rejectionCounts[rejection.ordinal] += 1
             return null
         }
+        val axis = tapeAxis(orientedBounds)
         return Candidate(
             bounds = bounds,
             score = checkNotNull(TapeCandidatePolicy.score(metrics)),
-            angleFromVerticalDegrees = longAxisDeviationFromVertical(orientedBounds),
+            angleFromVerticalDegrees = axis.angleFromVerticalDegrees,
             longSideFraction = metrics.longSideFraction,
+            nearFieldOffsetFraction =
+                (axis.nearFieldCenterX / brownMask.cols() - 0.5).coerceIn(-0.5, 0.5),
         )
     }
 
-    private fun longAxisDeviationFromVertical(bounds: org.opencv.core.RotatedRect): Double {
+    private fun scoreCurvedCandidate(
+        contourIndex: Int,
+        contours: List<MatOfPoint>,
+        blackMask: Mat,
+        candidateMask: Mat,
+        brownMask: Mat,
+        contourArea: Double,
+        bounds: Rect,
+        frameArea: Double,
+        frameShortSide: Double,
+    ): Candidate? {
+        val areaFraction = contourArea / frameArea
+        if (areaFraction !in MIN_CURVED_AREA_FRACTION..MAX_CURVED_AREA_FRACTION) {
+            rejectionCounts[TapeCandidateRejection.AREA.ordinal] += 1
+            return null
+        }
+        val overlapsPrevious = overlapsPrevious(bounds)
+        if (
+            !overlapsPrevious &&
+            (bounds.x <= HORIZONTAL_EDGE_MARGIN ||
+                bounds.x + bounds.width >= brownMask.cols() - HORIZONTAL_EDGE_MARGIN)
+        ) {
+            rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
+            return null
+        }
+        val surroundingBrown = surroundingBrownFraction(brownMask, bounds)
+        if (surroundingBrown < MIN_CURVED_SURROUNDING_BROWN) {
+            rejectionCounts[TapeCandidateRejection.BROWN_CONTEXT.ordinal] += 1
+            return null
+        }
+
+        if (candidateMask.empty() || candidateMask.size() != blackMask.size()) {
+            candidateMask.create(blackMask.rows(), blackMask.cols(), org.opencv.core.CvType.CV_8UC1)
+        }
+        candidateMask.setTo(Scalar(0.0))
+        Imgproc.drawContours(candidateMask, contours, contourIndex, Scalar(255.0), Imgproc.FILLED)
+        val pixelCount = candidateMask.total().toInt()
+        if (candidateMaskBytes.size != pixelCount) candidateMaskBytes = ByteArray(pixelCount)
+        candidateMask.get(0, 0, candidateMaskBytes)
+        val path = pathDirectionEstimator.estimate(
+            mask = candidateMaskBytes,
+            frameWidth = candidateMask.cols(),
+            frameHeight = candidateMask.rows(),
+            left = bounds.x,
+            top = bounds.y,
+            right = bounds.x + bounds.width,
+            bottom = bounds.y + bounds.height,
+        )
+        if (path == null) {
+            rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
+            return null
+        }
+        val minimumPathFraction =
+            if (overlapsPrevious) MIN_TRACKED_CURVED_PATH_FRACTION else MIN_CURVED_PATH_FRACTION
+        if (path.arcLengthFraction < minimumPathFraction) {
+            rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
+            return null
+        }
+        val pathConfidence =
+            (path.arcLengthFraction / IDEAL_CURVED_PATH_FRACTION).coerceIn(0.0, 1.0)
+        val continuityConfidence = if (overlapsPrevious) 1.0 else 0.5
+        val score = (
+            surroundingBrown * 0.35 +
+                path.widthConsistency * 0.30 +
+                pathConfidence * 0.25 +
+                continuityConfidence * 0.10
+            ).coerceIn(0.0, 1.0)
+        return Candidate(
+            bounds = bounds,
+            score = score,
+            angleFromVerticalDegrees = path.lookaheadAngleFromVerticalDegrees,
+            longSideFraction = path.arcLengthFraction,
+            nearFieldOffsetFraction =
+                (path.nearFieldCenterX / brownMask.cols() - 0.5).coerceIn(-0.5, 0.5),
+            pathSampleCount = path.sampleCount,
+        )
+    }
+
+    private fun tapeAxis(bounds: org.opencv.core.RotatedRect): TapeAxis {
         val corners = Array(4) { Point() }
         bounds.points(corners)
         var longestSquared = Double.NEGATIVE_INFINITY
         var longestDeltaX = 0.0
         var longestDeltaY = 0.0
+        var nearest = corners[0]
+        var secondNearest = corners[1]
+        if (secondNearest.y > nearest.y) {
+            nearest = corners[1]
+            secondNearest = corners[0]
+        }
         for (index in corners.indices) {
             val start = corners[index]
             val end = corners[(index + 1) % corners.size]
@@ -318,8 +458,20 @@ class BlackTapeDetector(
                 longestDeltaX = deltaX
                 longestDeltaY = deltaY
             }
+            if (index < 2) continue
+            when {
+                start.y > nearest.y -> {
+                    secondNearest = nearest
+                    nearest = start
+                }
+                start.y > secondNearest.y -> secondNearest = start
+            }
         }
-        return TapeOrientation.deviationFromVerticalDegrees(longestDeltaX, longestDeltaY)
+        return TapeAxis(
+            angleFromVerticalDegrees =
+                TapeOrientation.deviationFromVerticalDegrees(longestDeltaX, longestDeltaY),
+            nearFieldCenterX = (nearest.x + secondNearest.x) / 2.0,
+        )
     }
 
     private fun surroundingBrownFraction(brownMask: Mat, bounds: Rect): Double {
@@ -394,6 +546,13 @@ class BlackTapeDetector(
         val score: Double,
         val angleFromVerticalDegrees: Double,
         val longSideFraction: Double,
+        val nearFieldOffsetFraction: Double,
+        val pathSampleCount: Int = 0,
+    )
+
+    private data class TapeAxis(
+        val angleFromVerticalDegrees: Double,
+        val nearFieldCenterX: Double,
     )
 
     private companion object {
@@ -407,6 +566,14 @@ class BlackTapeDetector(
         const val TAPE_MASK_KERNEL_WIDTH = 3.0
         const val VERTICAL_OPEN_KERNEL_HEIGHT = 31.0
         const val VERTICAL_CLOSE_KERNEL_HEIGHT = 25.0
+        const val CURVED_CLOSE_KERNEL_SIZE = 5.0
+        const val CURVED_OPEN_KERNEL_SIZE = 3.0
+        const val MIN_CURVED_AREA_FRACTION = 0.0008
+        const val MAX_CURVED_AREA_FRACTION = 0.18
+        const val MIN_CURVED_SURROUNDING_BROWN = 0.22
+        const val MIN_CURVED_PATH_FRACTION = 0.20
+        const val MIN_TRACKED_CURVED_PATH_FRACTION = 0.12
+        const val IDEAL_CURVED_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8

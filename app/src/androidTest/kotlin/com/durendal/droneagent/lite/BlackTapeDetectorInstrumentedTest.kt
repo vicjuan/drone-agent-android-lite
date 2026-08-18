@@ -21,6 +21,7 @@ class BlackTapeDetectorInstrumentedTest {
         val detection = detect(frame, width, height)
         assertEquals(0.0, detection.angleFromVerticalDegrees, 1.0)
         assertTrue(detection.longSideFraction >= 0.95)
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
     }
 
     @Test
@@ -35,6 +36,7 @@ class BlackTapeDetectorInstrumentedTest {
         val detection = detect(frame, width, height)
         assertEquals(0.0, detection.angleFromVerticalDegrees, 1.0)
         assertTrue(detection.longSideFraction >= 0.95)
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
     }
 
     @Test
@@ -51,6 +53,28 @@ class BlackTapeDetectorInstrumentedTest {
         val terminal = checkNotNull(detections[1])
         assertEquals(0.0, terminal.angleFromVerticalDegrees, 1.0)
         assertTrue(terminal.longSideFraction < 0.25)
+        assertEquals(0.0, terminal.nearFieldOffsetFraction, 0.01)
+    }
+
+    @Test
+    fun curvedTapeReportsItsLookaheadDirection() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+
+        val detection = checkNotNull(
+            detectSequence(
+                frames = listOf(frame),
+                width = width,
+                height = height,
+                mode = TapeDetectionMode.CURVED,
+            ).single(),
+        )
+
+        assertTrue(detection.angleFromVerticalDegrees > 10.0)
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
+        assertTrue(detection.longSideFraction > 0.9)
     }
 
     private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection =
@@ -62,12 +86,14 @@ class BlackTapeDetectorInstrumentedTest {
         frames: List<ByteArray>,
         width: Int,
         height: Int,
+        mode: TapeDetectionMode = TapeDetectionMode.STRAIGHT,
     ): List<TapeDetection?> {
         val outcomes = LinkedBlockingQueue<DetectionOutcome>()
         val detector = BlackTapeDetector(
             onResult = { outcomes.offer(DetectionOutcome(it, null)) },
             onError = { outcomes.offer(DetectionOutcome(null, it)) },
         )
+        detector.setDetectionMode(mode)
         try {
             return frames.mapIndexed { index, frame ->
                 if (index > 0) Thread.sleep(300)
@@ -120,6 +146,23 @@ class BlackTapeDetectorInstrumentedTest {
                 frame[offset + 1] = value.toByte()
                 frame[offset + 2] = value.toByte()
             }
+        }
+    }
+
+    private fun fillCurvedRibbon(
+        frame: ByteArray,
+        frameWidth: Int,
+        frameHeight: Int,
+        direction: Double,
+        value: Int,
+    ) {
+        for (y in 0 until frameHeight) {
+            val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
+            val center =
+                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
+            val left = (center - 15.0).toInt().coerceAtLeast(0)
+            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
+            fillRect(frame, frameWidth, left, y, right, y + 1, value)
         }
     }
 }
