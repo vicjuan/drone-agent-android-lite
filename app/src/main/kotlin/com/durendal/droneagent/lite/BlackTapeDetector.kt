@@ -45,6 +45,8 @@ class BlackTapeDetector(
     @Volatile private var lastDetectionMode = TapeDetectionMode.PATH
     @Volatile private var lastPathSampleCount = 0
     @Volatile private var lastPathAxis = "NONE"
+    @Volatile private var lastPathCurvatureDegrees = 0.0
+    @Volatile private var lastPathCurvatureSmoothness = 0.0
     @Volatile private var lastFloorSeedCount = 0
     @Volatile private var lastFloorFraction = 0.0
     private val pathDirectionEstimator = TapePathDirectionEstimator()
@@ -108,13 +110,16 @@ class BlackTapeDetector(
 
     fun diagnosticsSummary(): String =
         (
-            "mode=%s pathAxis=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
-                "floorSeeds=%d floor=%.2f rejects=invalid:%d area:%d aspect:%d length:%d " +
-                "curve:%d width:%d edge:%d fill:%d chroma:%d floor:%d"
+            "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
+                "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
+                "rejects=invalid:%d area:%d aspect:%d length:%d curve:%d width:%d edge:%d " +
+                "fill:%d chroma:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathAxis,
             lastPathSampleCount,
+            lastPathCurvatureDegrees,
+            lastPathCurvatureSmoothness,
             lastOtsuThreshold,
             lastEffectiveThreshold,
             lastClassSeparation,
@@ -264,6 +269,8 @@ class BlackTapeDetector(
             }
             consecutiveDetectionMisses = 0
             val rect = winner.bounds
+            lastPathCurvatureDegrees = winner.pathCurvatureDegrees
+            lastPathCurvatureSmoothness = winner.pathCurvatureSmoothness
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
             previousPathMedianWidthFraction =
                 winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
@@ -429,10 +436,16 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
+        lastPathCurvatureDegrees = path.curvatureDegrees
+        lastPathCurvatureSmoothness = path.curvatureSmoothness
+        // A wall or floor edge can acquire an apparent bend at one noisy endpoint.
+        // Circular tape must change direction across several path segments.
         if (
             requireCurvature &&
-            !path.horizontalFallback &&
-            path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES
+            (
+                path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES ||
+                    path.curvatureSmoothness < MIN_PATH_CURVATURE_SMOOTHNESS
+                )
         ) {
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal] += 1
             return null
@@ -518,6 +531,8 @@ class BlackTapeDetector(
             pathSampleCount = path.sampleCount,
             pathMedianWidthFraction = path.medianWidthFraction,
             horizontalFallback = path.horizontalFallback,
+            pathCurvatureDegrees = path.curvatureDegrees,
+            pathCurvatureSmoothness = path.curvatureSmoothness,
         )
     }
 
@@ -632,8 +647,9 @@ class BlackTapeDetector(
         val pathSampleCount: Int,
         val pathMedianWidthFraction: Double,
         val horizontalFallback: Boolean,
+        val pathCurvatureDegrees: Double,
+        val pathCurvatureSmoothness: Double,
     )
-
     private data class FloorContext(
         val surroundingFraction: Double,
         val minimumSideFraction: Double,
@@ -659,6 +675,7 @@ class BlackTapeDetector(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
+        const val MIN_PATH_CURVATURE_SMOOTHNESS = 0.08
         const val MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR = 0.0
         const val MIN_HORIZONTAL_PATH_SIDE_FLOOR = 0.0
         const val MIN_PATH_FRACTION = 0.20

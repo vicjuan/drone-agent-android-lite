@@ -15,6 +15,7 @@ internal data class TapePathEstimate(
     val medianWidthFraction: Double,
     val widthConsistency: Double,
     val curvatureDegrees: Double,
+    val curvatureSmoothness: Double,
     val sampleCount: Int,
     val bounds: TapePathBounds,
     val horizontalFallback: Boolean = false,
@@ -158,6 +159,7 @@ internal class TapePathDirectionEstimator {
             medianWidthFraction = medianWidthFraction,
             widthConsistency = widthConsistency,
             curvatureDegrees = curvatureDegrees(pointsX, pointsY, pointCount),
+            curvatureSmoothness = curvatureSmoothness(pointsX, pointsY, pointCount),
             sampleCount = pointCount,
             bounds = pathBounds,
         )
@@ -287,6 +289,8 @@ internal class TapePathDirectionEstimator {
             widthConsistency = widthConsistency,
             curvatureDegrees =
                 curvatureDegrees(trace.pointsX, trace.pointsY, trace.pointCount),
+            curvatureSmoothness =
+                curvatureSmoothness(trace.pointsX, trace.pointsY, trace.pointCount),
             sampleCount = trace.pointCount,
             bounds = TapePathBounds(
                 left = minOf(firstX, lastX).coerceIn(left, right - 1),
@@ -451,6 +455,49 @@ internal class TapePathDirectionEstimator {
         return minOf(difference, 180.0 - difference)
     }
 
+    private fun curvatureSmoothness(
+        pointsX: DoubleArray,
+        pointsY: DoubleArray,
+        pointCount: Int,
+    ): Double {
+        val segmentSize = pointCount / CURVATURE_SEGMENT_COUNT
+        if (segmentSize < 2) return 0.0
+        var previousAngle = segmentAngle(pointsX, pointsY, start = 0, segmentSize)
+        var signedTurn = 0.0
+        var absoluteTurn = 0.0
+        var largestTurn = 0.0
+        for (segmentIndex in 1 until CURVATURE_SEGMENT_COUNT) {
+            val start = minOf(segmentIndex * segmentSize, pointCount - segmentSize)
+            val angle = segmentAngle(pointsX, pointsY, start, segmentSize)
+            var turn = angle - previousAngle
+            if (turn > 90.0) turn -= 180.0
+            if (turn < -90.0) turn += 180.0
+            signedTurn += turn
+            absoluteTurn += abs(turn)
+            largestTurn = maxOf(largestTurn, abs(turn))
+            previousAngle = angle
+        }
+        if (absoluteTurn == 0.0) return 0.0
+        val directionConsistency = abs(signedTurn) / absoluteTurn
+        val distribution = 1.0 - largestTurn / absoluteTurn
+        return directionConsistency * distribution
+    }
+
+    private fun segmentAngle(
+        pointsX: DoubleArray,
+        pointsY: DoubleArray,
+        start: Int,
+        segmentSize: Int,
+    ): Double {
+        val end = start + segmentSize - 1
+        return TapeOrientation.deviationFromVerticalDegrees(
+            pointsX[end] - pointsX[start],
+            pointsY[end] - pointsY[start],
+        )
+    }
+
+
+
     private fun nearestRun(
         mask: ByteArray,
         frameWidth: Int,
@@ -508,6 +555,7 @@ internal class TapePathDirectionEstimator {
         const val NEAR_FIELD_SAMPLE_COUNT = 8
         const val MIN_TANGENT_HALF_SPAN = 3
         const val CURVATURE_TANGENT_DIVISOR = 8
+        const val CURVATURE_SEGMENT_COUNT = 5
         const val MAX_CURVATURE_TANGENT_SPAN = 24
         const val MAX_TANGENT_HALF_SPAN = 12
     }

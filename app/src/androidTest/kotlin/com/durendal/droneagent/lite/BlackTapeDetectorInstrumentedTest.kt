@@ -339,6 +339,22 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun straightWallFloorEdgeFromFlightIsNotCurvedTape() {
+        val frame = rgbaAsset("straight-wall-floor-edge.jpg")
+        val diagnostics = mutableListOf<String>()
+
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width = 640,
+                height = 360,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(diagnostics.single(), null, detection)
+    }
+
+    @Test
     fun darkDoorEdgeAboveGrayBaseboardIsNotTape() {
         val width = 640
         val height = 360
