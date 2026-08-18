@@ -85,10 +85,6 @@ internal class TapeTrackingController {
     private var lastCommandAtNanos = 0L
     var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
         private set
-    private var circularTrackCandidateSinceNanos = 0L
-    private var consecutiveCircularTrackDetections = 0
-    private var circularTrackConfirmed = false
-    private var circularReferenceBounds: NormalizedRect? = null
 
 
     fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
@@ -270,7 +266,8 @@ internal class TapeTrackingController {
             return decision(
                 phase = phase,
                 yawRateDegreesPerSecond = 0.0,
-                forwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos),
+                forwardSpeedMetersPerSecond =
+                    if (mode == TapeTrackingMode.CIRCULAR) 0.0 else desiredForwardSpeed(nowNanos),
                 gimbalTarget = target,
             )
         }
@@ -295,68 +292,13 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation?,
         nowNanos: Long,
     ) {
-        if (observation == null) {
-            clearControlMeasurements()
-            if (phase == TapeTrackingPhase.TRACKING && circularTrackConfirmed) {
-                phase = TapeTrackingPhase.VERIFYING_ENDPOINT
-                endpointVerificationStartedAtNanos = nowNanos
-                consecutiveEndpointMisses = 1
-                resetAppliedCommands()
-            } else if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
-                consecutiveEndpointMisses += 1
-            }
-            return
-        }
-
-        if (phase == TapeTrackingPhase.TRACKING) {
-            updateControlMeasurements(
-                observation.angleFromVerticalDegrees,
-                observation.nearFieldOffsetFraction,
-                nowNanos,
-            )
-            lastDetectionAtNanos = nowNanos
-            circularReferenceBounds = observation.bounds
-            if (observation.longSideFraction >= CIRCULAR_MIN_TRACK_FRACTION) {
-                if (circularTrackCandidateSinceNanos == 0L) {
-                    circularTrackCandidateSinceNanos = nowNanos
-                }
-                consecutiveCircularTrackDetections += 1
-                if (
-                    consecutiveCircularTrackDetections >= CIRCULAR_TRACK_CONFIRMATION_COUNT &&
-                    nowNanos - circularTrackCandidateSinceNanos >=
-                    CIRCULAR_TRACK_CONFIRMATION_NANOS
-                ) {
-                    circularTrackConfirmed = true
-                }
-            } else {
-                circularTrackCandidateSinceNanos = 0L
-                consecutiveCircularTrackDetections = 0
-            }
-            return
-        }
-
-        if (phase != TapeTrackingPhase.VERIFYING_ENDPOINT) return
-        val reference = circularReferenceBounds
-        val matchesTrackedPath =
-            reference != null &&
-                overlapOfSmallerArea(observation.bounds, reference) >=
-                CIRCULAR_REACQUISITION_MIN_OVERLAP
-        if (!matchesTrackedPath) {
-            clearControlMeasurements()
-            consecutiveEndpointMisses += 1
-            return
-        }
-        phase = TapeTrackingPhase.TRACKING
-        endpointVerificationStartedAtNanos = 0L
-        consecutiveEndpointMisses = 0
-        circularReferenceBounds = observation.bounds
+        if (observation == null || phase != TapeTrackingPhase.TRACKING) return
         updateControlMeasurements(
             observation.angleFromVerticalDegrees,
             observation.nearFieldOffsetFraction,
             nowNanos,
         )
         lastDetectionAtNanos = nowNanos
-        resetAppliedCommands()
     }
 
 
@@ -407,10 +349,6 @@ internal class TapeTrackingController {
         endpointVerificationStartedAtNanos = 0L
         consecutiveEndpointMisses = 0
         endpointReferenceBounds = null
-        circularTrackCandidateSinceNanos = 0L
-        consecutiveCircularTrackDetections = 0
-        circularTrackConfirmed = false
-        circularReferenceBounds = null
         lateralCorrectionActive = false
         resetControlState()
     }
@@ -680,10 +618,6 @@ internal class TapeTrackingController {
         const val ENDPOINT_TRACK_MIN_OVERLAP = 0.20
         const val ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND = 2.0
         const val ENDPOINT_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.03
-        const val CIRCULAR_MIN_TRACK_FRACTION = 0.20
-        const val CIRCULAR_TRACK_CONFIRMATION_COUNT = 4
-        const val CIRCULAR_TRACK_CONFIRMATION_NANOS = 750_000_000L
-        const val CIRCULAR_REACQUISITION_MIN_OVERLAP = 0.10
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 6.0

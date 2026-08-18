@@ -376,24 +376,27 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular mode hovers instead of landing when a confirmed path disappears`() {
+    fun `circular mode holds a brief miss then hovers when detection becomes stale`() {
         val controller = circularTrackingController()
-        confirmCircularTrack(controller)
+        controller.observe(observation(12.0, 0.8, 0.05), seconds(2))
+        controller.tick(seconds(2))
 
-        repeat(12) { index ->
-            controller.observe(null, seconds(3) + index * 250_000_000L)
-        }
-        val waiting = controller.tick(seconds(6))
+        controller.observe(null, seconds(2) + 250_000_000L)
+        val briefMiss = controller.tick(seconds(2) + 500_000_000L)
+        val stale = controller.tick(seconds(3) + 250_000_000L)
 
-        assertFalse(waiting.endpointReached)
-        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, waiting.phase)
-        assertEquals(0.0, waiting.forwardSpeedMetersPerSecond, 0.0)
-        assertEquals(0.0, waiting.rightSpeedMetersPerSecond, 0.0)
-        assertEquals(0.0, waiting.yawRateDegreesPerSecond, 0.0)
+        assertFalse(briefMiss.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, briefMiss.phase)
+        assertTrue(briefMiss.forwardSpeedMetersPerSecond > 0.0)
+        assertTrue(briefMiss.yawRateDegreesPerSecond > 0.0)
+        assertEquals(TapeTrackingPhase.TRACKING, stale.phase)
+        assertEquals(0.0, stale.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stale.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stale.yawRateDegreesPerSecond, 0.0)
     }
 
     @Test
-    fun `circular mode does not land when no path was ever confirmed`() {
+    fun `circular mode does not land when no path was ever detected`() {
         val controller = circularTrackingController()
 
         repeat(8) { index ->
@@ -407,29 +410,23 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular path reacquisition resumes tracking after a miss`() {
+    fun `circular path reacquisition resumes directly after a miss`() {
         val controller = circularTrackingController()
-        confirmCircularTrack(controller)
-
-        controller.observe(null, seconds(3))
+        controller.observe(observation(9.0, 0.75, 0.03), seconds(2))
+        controller.observe(null, seconds(2) + 250_000_000L)
         assertEquals(
-            TapeTrackingPhase.VERIFYING_ENDPOINT,
-            controller.tick(seconds(3)).phase,
+            TapeTrackingPhase.TRACKING,
+            controller.tick(seconds(2) + 250_000_000L).phase,
         )
-        controller.observe(observation(9.0, 0.75, 0.03), seconds(3) + 250_000_000L)
-        val resumed = controller.tick(seconds(3) + 250_000_000L)
+
+        controller.observe(observation(8.0, 0.8, 0.03), seconds(2) + 500_000_000L)
+        val resumed = controller.tick(seconds(2) + 500_000_000L)
 
         assertFalse(resumed.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
     }
 
-    private fun confirmCircularTrack(controller: TapeTrackingController) {
-        controller.observe(observation(8.0, 0.8), seconds(2))
-        controller.observe(observation(9.0, 0.8), seconds(2) + 250_000_000L)
-        controller.observe(observation(10.0, 0.8), seconds(2) + 500_000_000L)
-        controller.observe(observation(11.0, 0.8), seconds(2) + 750_000_000L)
-    }
 
     private fun circularTrackingController(): TapeTrackingController =
         TapeTrackingController().also {
