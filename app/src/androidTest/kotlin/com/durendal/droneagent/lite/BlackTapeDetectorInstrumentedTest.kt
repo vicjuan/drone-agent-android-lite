@@ -204,6 +204,26 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(horizontal.lookaheadXFraction < horizontal.anchorXFraction)
     }
     @Test
+    fun veryDarkTapeRemainsDetectableUnderWarmColourCast() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbonRgb(
+            frame,
+            width,
+            height,
+            direction = 1.0,
+            red = 55,
+            green = 35,
+            blue = 15,
+        )
+
+        val detection = detectSequence(listOf(frame), width, height).single()
+
+        assertTrue(detection != null)
+    }
+
+    @Test
     fun curvedRedPlasticIsNotTape() {
         val width = 640
         val height = 360

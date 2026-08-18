@@ -465,7 +465,13 @@ class BlackTapeDetector(
         val candidateMeanLab = Core.mean(lab, candidateMask)
         val candidateChroma =
             hypot(candidateMeanLab.`val`[1] - LAB_NEUTRAL_CHROMA, candidateMeanLab.`val`[2] - LAB_NEUTRAL_CHROMA)
-        if (candidateChroma > MAX_TAPE_CHROMA) {
+        val excessiveChroma =
+            candidateChroma > MAX_NEUTRAL_TAPE_CHROMA &&
+                (
+                    candidateMeanLab.`val`[0] > MAX_COLOR_CAST_TAPE_LIGHTNESS ||
+                        candidateChroma > MAX_DARK_TAPE_CHROMA
+                    )
+        if (excessiveChroma) {
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal] += 1
             return null
         }
@@ -655,7 +661,9 @@ class BlackTapeDetector(
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val LAB_NEUTRAL_CHROMA = 128.0
-        const val MAX_TAPE_CHROMA = 12.0
+        const val MAX_NEUTRAL_TAPE_CHROMA = 12.0
+        const val MAX_DARK_TAPE_CHROMA = 24.0
+        const val MAX_COLOR_CAST_TAPE_LIGHTNESS = 45.0
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
         val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)
