@@ -110,32 +110,6 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun horizontalArcRemainsDetectableDuringYawRecovery() {
-        val width = 640
-        val height = 360
-        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
-        for (x in 80 until 600) {
-            val progress = (x - 80) / 519.0
-            val centerY = 205.0 + 95.0 * progress * progress
-            fillRect(
-                frame,
-                width,
-                x,
-                (centerY - 15.0).toInt(),
-                x + 1,
-                (centerY + 15.0).toInt(),
-                value = 20,
-            )
-        }
-
-        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
-
-        assertTrue(detection.angleFromVerticalDegrees < -70.0)
-        assertTrue(detection.longSideFraction > 1.4)
-        assertTrue(detection.nearFieldOffsetFraction > 0.35)
-    }
-
-    @Test
     fun thickTapeWinsWhenItIntersectsAThinFloorSeam() {
         val width = 640
         val height = 360

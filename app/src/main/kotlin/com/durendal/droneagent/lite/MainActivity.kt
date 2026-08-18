@@ -672,7 +672,7 @@ class MainActivity : Activity() {
                         circularTapeLap =
                             circularHeading?.let {
                                 HeadingTurn(
-                                    direction = TurnDirection.LEFT,
+                                    direction = TurnDirection.RIGHT,
                                     initialHeadingDegrees = it,
                                     targetDegrees = 360.0,
                                 )
