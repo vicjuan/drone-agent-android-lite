@@ -303,7 +303,7 @@ internal class TapeTrackingController {
                 consecutiveEndpointMisses = 1
                 resetAppliedCommands()
             } else if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
-                registerCircularEndpointMiss(nowNanos)
+                consecutiveEndpointMisses += 1
             }
             return
         }
@@ -343,7 +343,7 @@ internal class TapeTrackingController {
                 CIRCULAR_REACQUISITION_MIN_OVERLAP
         if (!matchesTrackedPath) {
             clearControlMeasurements()
-            registerCircularEndpointMiss(nowNanos)
+            consecutiveEndpointMisses += 1
             return
         }
         phase = TapeTrackingPhase.TRACKING
@@ -359,17 +359,6 @@ internal class TapeTrackingController {
         resetAppliedCommands()
     }
 
-    private fun registerCircularEndpointMiss(nowNanos: Long) {
-        consecutiveEndpointMisses += 1
-        if (
-            consecutiveEndpointMisses >= CIRCULAR_ENDPOINT_MISS_COUNT &&
-            nowNanos - endpointVerificationStartedAtNanos >=
-            CIRCULAR_ENDPOINT_CONFIRMATION_NANOS
-        ) {
-            phase = TapeTrackingPhase.TURNING
-            endpointPending = true
-        }
-    }
 
     private fun beginEndpointVerificationIfReady(nowNanos: Long) {
         if (
@@ -694,8 +683,6 @@ internal class TapeTrackingController {
         const val CIRCULAR_MIN_TRACK_FRACTION = 0.20
         const val CIRCULAR_TRACK_CONFIRMATION_COUNT = 4
         const val CIRCULAR_TRACK_CONFIRMATION_NANOS = 750_000_000L
-        const val CIRCULAR_ENDPOINT_MISS_COUNT = 4
-        const val CIRCULAR_ENDPOINT_CONFIRMATION_NANOS = 750_000_000L
         const val CIRCULAR_REACQUISITION_MIN_OVERLAP = 0.10
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70

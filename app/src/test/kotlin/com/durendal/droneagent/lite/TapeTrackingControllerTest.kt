@@ -376,20 +376,20 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular mode lands only after a confirmed path disappears`() {
+    fun `circular mode hovers instead of landing when a confirmed path disappears`() {
         val controller = circularTrackingController()
         confirmCircularTrack(controller)
 
-        controller.observe(null, seconds(3))
-        controller.observe(null, seconds(3) + 250_000_000L)
-        controller.observe(null, seconds(3) + 500_000_000L)
-        assertFalse(controller.tick(seconds(3) + 500_000_000L).endpointReached)
+        repeat(12) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+        val waiting = controller.tick(seconds(6))
 
-        controller.observe(null, seconds(3) + 750_000_000L)
-        val endpoint = controller.tick(seconds(3) + 750_000_000L)
-
-        assertTrue(endpoint.endpointReached)
-        assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
+        assertFalse(waiting.endpointReached)
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, waiting.phase)
+        assertEquals(0.0, waiting.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, waiting.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, waiting.yawRateDegreesPerSecond, 0.0)
     }
 
     @Test
@@ -407,7 +407,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular path reacquisition cancels automatic landing`() {
+    fun `circular path reacquisition resumes tracking after a miss`() {
         val controller = circularTrackingController()
         confirmCircularTrack(controller)
 
