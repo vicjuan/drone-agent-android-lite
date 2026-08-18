@@ -368,6 +368,38 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
     }
 
+    @Test
+    fun `displaced anchor translates even while lookahead is nearly horizontal`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(-82.0, 0.8, 0.45), seconds(2))
+
+        val first = controller.tick(seconds(2))
+        val accelerated = controller.tick(seconds(2) + 250_000_000L)
+
+        assertEquals(0.020, first.rightSpeedMetersPerSecond, 0.001)
+        assertTrue(accelerated.rightSpeedMetersPerSecond >= 0.069)
+        assertTrue(
+            kotlin.math.abs(accelerated.yawRateDegreesPerSecond) <=
+                TapeTrackingController.ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND,
+        )
+        assertEquals(0.0, accelerated.forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `centered anchor releases translation and restores full circular yaw`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(-82.0, 0.8, 0.45), seconds(2))
+        var decision = controller.tick(seconds(2))
+        repeat(7) { index ->
+            val now = seconds(2) + (index + 1) * 250_000_000L
+            controller.observe(observation(-82.0, 0.8, 0.0), now)
+            decision = controller.tick(now)
+        }
+
+        assertTrue(decision.yawRateDegreesPerSecond < -2.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.001)
+    }
+
 
     @Test
     fun `circular mode follows the lookahead tangent at experiment speed`() {

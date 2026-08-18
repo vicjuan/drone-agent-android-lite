@@ -272,8 +272,10 @@ internal class TapeTrackingController {
             )
         }
 
-        val targetYawRate = desiredYawRate()
+        // Establish the anchor correction state before yaw selection so a
+        // displaced rail translates first instead of spending the frame spinning.
         val targetRightSpeed = desiredRightSpeed()
+        val targetYawRate = desiredYawRate()
         val (yawRate, rightSpeed) = applyOutputLimits(
             targetYawRate,
             targetRightSpeed,
@@ -407,13 +409,19 @@ internal class TapeTrackingController {
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_DEAD_ZONE_DEGREES
             else YAW_DEAD_ZONE_DEGREES
         if (abs(angle) <= deadZone) return 0.0
-        val maximumYawRate = when {
+        val modeMaximumYawRate = when {
             mode == TapeTrackingMode.CIRCULAR ->
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
             phase == TapeTrackingPhase.VERIFYING_ENDPOINT ->
                 ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND
             else -> MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND
         }
+        val maximumYawRate =
+            if (lateralCorrectionActive) {
+                minOf(modeMaximumYawRate, ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND)
+            } else {
+                modeMaximumYawRate
+            }
         val gain =
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_PROPORTIONAL_GAIN
             else YAW_PROPORTIONAL_GAIN
@@ -421,18 +429,13 @@ internal class TapeTrackingController {
     }
 
     private fun desiredRightSpeed(): Double {
-        val angle = controlledAngleDegrees ?: return 0.0
         val offset = controlledHorizontalOffsetFraction ?: return 0.0
         lateralCorrectionActive = when {
             lateralCorrectionActive && abs(offset) <= CENTERING_STOP_FRACTION -> false
             !lateralCorrectionActive && abs(offset) >= CENTERING_START_FRACTION -> true
             else -> lateralCorrectionActive
         }
-        if (!lateralCorrectionActive || abs(angle) >= MAX_LATERAL_CORRECTION_ANGLE_DEGREES) {
-            return 0.0
-        }
-        val angleScale =
-            (1.0 - abs(angle) / MAX_LATERAL_CORRECTION_ANGLE_DEGREES).coerceIn(0.0, 1.0)
+        if (!lateralCorrectionActive) return 0.0
         val maximumCenteringSpeed =
             if (mode == TapeTrackingMode.CIRCULAR) {
                 CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND
@@ -443,8 +446,7 @@ internal class TapeTrackingController {
             (
                 offset * LATERAL_PROPORTIONAL_GAIN +
                     offsetRatePerSecond * LATERAL_DERIVATIVE_GAIN
-                )
-                .coerceIn(-maximumCenteringSpeed, maximumCenteringSpeed) * angleScale
+                ).coerceIn(-maximumCenteringSpeed, maximumCenteringSpeed)
         return if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
             correction.coerceIn(
                 -ENDPOINT_MAX_CENTERING_SPEED_METERS_PER_SECOND,
@@ -614,7 +616,7 @@ internal class TapeTrackingController {
         const val LATERAL_PROPORTIONAL_GAIN = 0.35
         const val LATERAL_DERIVATIVE_GAIN = 0.10
         const val MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.10
-        const val MAX_LATERAL_CORRECTION_ANGLE_DEGREES = 45.0
+        const val ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND = 2.0
         const val STABLE_ANGLE_DEGREES = 5.0
         const val STABILIZED_FILTER_ALPHA = 0.4
         const val MAX_OFFSET_RATE_PER_SECOND = 1.0
@@ -642,7 +644,7 @@ internal class TapeTrackingController {
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 6.0
         const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.05
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.03
-        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.05
+        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.10
         const val CIRCULAR_STABLE_ANGLE_DEGREES = 8.0
         const val CIRCULAR_MAX_MOVING_ANGLE_DEGREES = 45.0
         const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = 0.25
