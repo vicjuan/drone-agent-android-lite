@@ -1,5 +1,7 @@
 package com.durendal.droneagent.lite
 
+import android.graphics.BitmapFactory
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -148,6 +150,63 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detection.bounds.right > 0.68)
     }
     @Test
+    fun finalCardboardSceneKeepsVisibleTapeDetectable() {
+        val frame = rgbaAsset("final-cardboard-tape.jpg")
+        val diagnostics = mutableListOf<String>()
+
+        val detection =
+            checkNotNull(
+                detectSequence(
+                    listOf(frame),
+                    width = 640,
+                    height = 360,
+                    onDiagnostics = diagnostics::add,
+                ).single(),
+            ) {
+                diagnostics.single()
+            }
+
+        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 70.0)
+        assertTrue(detection.longSideFraction > 0.50)
+    }
+
+    @Test
+    fun horizontalCurvedTapeCanBeAcquiredWithoutPreviousDetection() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (x in 60 until 590) {
+            val horizontalFraction = (x - 60) / 529.0
+            val centerY = (230.0 + 55.0 * horizontalFraction * horizontalFraction).toInt()
+            fillRect(
+                frame,
+                width,
+                left = x,
+                top = centerY - 15,
+                right = x + 1,
+                bottom = centerY + 15,
+                value = 20,
+            )
+        }
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            checkNotNull(
+                detectSequence(
+                    listOf(frame),
+                    width,
+                    height,
+                    onDiagnostics = diagnostics::add,
+                ).single(),
+            ) {
+                diagnostics.single()
+            }
+
+        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 80.0)
+        assertTrue(detection.longSideFraction > 1.0)
+    }
+
+    @Test
     fun trackedTapeReacquiresHorizontallyWithoutSelectingThinFloorSeam() {
         val width = 640
         val height = 360
@@ -289,9 +348,26 @@ class BlackTapeDetectorInstrumentedTest {
         fillRectRgb(frame, width, 120, 0, 300, 245, red = 130, green = 78, blue = 42)
         fillRect(frame, width, left = 270, top = 0, right = 300, bottom = 245, value = 20)
 
+
         val detection = detectSequence(listOf(frame), width, height).single()
 
         assertEquals(null, detection)
+    }
+    private fun rgbaAsset(name: String): ByteArray {
+        val context = InstrumentationRegistry.getInstrumentation().context
+        val bitmap = context.assets.open(name).use(BitmapFactory::decodeStream)
+        check(bitmap.width == 640 && bitmap.height == 360)
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        return ByteArray(pixels.size * 4).also { frame ->
+            pixels.forEachIndexed { index, pixel ->
+                val offset = index * 4
+                frame[offset] = (pixel shr 16).toByte()
+                frame[offset + 1] = (pixel shr 8).toByte()
+                frame[offset + 2] = pixel.toByte()
+                frame[offset + 3] = 255.toByte()
+            }
+        }
     }
 
     private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection =

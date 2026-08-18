@@ -411,23 +411,29 @@ class BlackTapeDetector(
             right = bounds.x + bounds.width,
             bottom = bounds.y + bounds.height,
         )
-        val path = verticalPath ?: previousPathMedianWidthFraction?.let { trackedWidth ->
-            pathDirectionEstimator.estimateHorizontalFallback(
-                mask = candidateMaskBytes,
-                frameWidth = candidateMask.cols(),
-                frameHeight = candidateMask.rows(),
-                left = bounds.x,
-                top = bounds.y,
-                right = bounds.x + bounds.width,
-                bottom = bounds.y + bounds.height,
-                expectedMedianWidthFraction = trackedWidth,
-            )
-        }
+        val horizontalPath = pathDirectionEstimator.estimateHorizontalFallback(
+            mask = candidateMaskBytes,
+            frameWidth = candidateMask.cols(),
+            frameHeight = candidateMask.rows(),
+            left = bounds.x,
+            top = bounds.y,
+            right = bounds.x + bounds.width,
+            bottom = bounds.y + bounds.height,
+            expectedMedianWidthFraction = previousPathMedianWidthFraction,
+        )
+        val path =
+            listOfNotNull(verticalPath, horizontalPath).maxByOrNull {
+                it.arcLengthFraction * it.widthConsistency
+            }
         if (path == null) {
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
-        if (requireCurvature && path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES) {
+        if (
+            requireCurvature &&
+            !path.horizontalFallback &&
+            path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES
+        ) {
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal] += 1
             return null
         }
@@ -438,10 +444,6 @@ class BlackTapeDetector(
             pathBounds.right - pathBounds.left,
             pathBounds.bottom - pathBounds.top,
         )
-        if (path.horizontalFallback && !overlapsPrevious(refinedBounds)) {
-            rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
-            return null
-        }
         val pathAreaFraction =
             path.arcLengthFraction * path.medianWidthFraction *
                 frameShortSide * frameShortSide / frameArea
@@ -454,7 +456,7 @@ class BlackTapeDetector(
             refinedBounds.x <= HORIZONTAL_EDGE_MARGIN &&
                 refinedBounds.x + refinedBounds.width >=
                 floorMask.cols() - HORIZONTAL_EDGE_MARGIN
-        if (!overlapsPrevious && spansFrameWidth) {
+        if (!overlapsPrevious && spansFrameWidth && !path.horizontalFallback) {
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
             return null
         }
@@ -472,9 +474,15 @@ class BlackTapeDetector(
             return null
         }
         val context = floorContext(floorMask, refinedBounds)
+        val minimumSurroundingFloor =
+            if (path.horizontalFallback) MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR
+            else MIN_PATH_SURROUNDING_FLOOR
+        val minimumSideFloor =
+            if (path.horizontalFallback) MIN_HORIZONTAL_PATH_SIDE_FLOOR
+            else MIN_PATH_SIDE_FLOOR
         if (
-            context.surroundingFraction < MIN_PATH_SURROUNDING_FLOOR ||
-            context.minimumSideFraction < MIN_PATH_SIDE_FLOOR
+            context.surroundingFraction < minimumSurroundingFloor ||
+            context.minimumSideFraction < minimumSideFloor
         ) {
             rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal] += 1
             return null
@@ -651,12 +659,14 @@ class BlackTapeDetector(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
+        const val MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR = 0.0
+        const val MIN_HORIZONTAL_PATH_SIDE_FLOOR = 0.0
         const val MIN_PATH_FRACTION = 0.20
         const val MIN_TRACKED_PATH_FRACTION = 0.12
         const val MIN_PATH_CURVATURE_DEGREES = 8.0
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
-        const val MIN_TAPE_CHANNEL_BALANCE = 0.40
+        const val MIN_TAPE_CHANNEL_BALANCE = 0.32
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
         val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)

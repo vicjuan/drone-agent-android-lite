@@ -93,12 +93,26 @@ class TapePathDirectionEstimatorTest {
                 expectedMedianWidthFraction = 30.0 / FRAME_HEIGHT,
             ),
         )
+        val acquired = checkNotNull(
+            estimator.estimateHorizontalFallback(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 0,
+                top = 0,
+                right = FRAME_WIDTH,
+                bottom = FRAME_HEIGHT,
+            ),
+        )
+
 
         assertEquals(null, unanchored)
         assertTrue(tracked.horizontalFallback)
         assertTrue(kotlin.math.abs(tracked.lookaheadAngleFromVerticalDegrees) > 80.0)
         assertEquals(30.0 / FRAME_HEIGHT, tracked.medianWidthFraction, 0.01)
         assertTrue(tracked.bounds.bottom < 310)
+        assertTrue(acquired.horizontalFallback)
+        assertEquals(30.0 / FRAME_HEIGHT, acquired.medianWidthFraction, 0.01)
     }
 
     @Test

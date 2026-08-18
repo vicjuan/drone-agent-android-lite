@@ -163,11 +163,11 @@ internal class TapePathDirectionEstimator {
         )
     }
     /**
-     * Reacquires the same tracked ribbon after it rotates too far for row-wise tracing.
+     * Traces a ribbon that is predominantly horizontal in the camera frame.
      *
-     * This is deliberately unavailable without a trusted width from an earlier vertical trace.
-     * It scans columns in both directions and rejects runs whose thickness no longer matches
-     * that ribbon, preventing a long, thin floor seam from winning merely because it is horizontal.
+     * A prior vertical trace narrows the accepted width during tracking. Without
+     * one, the normal tape-width bounds still allow initial acquisition while
+     * excluding thin floor seams.
      */
     fun estimateHorizontalFallback(
         mask: ByteArray,
@@ -177,22 +177,28 @@ internal class TapePathDirectionEstimator {
         top: Int,
         right: Int,
         bottom: Int,
-        expectedMedianWidthFraction: Double,
+        expectedMedianWidthFraction: Double? = null,
     ): TapePathEstimate? {
         require(mask.size >= frameWidth * frameHeight)
         if (left !in 0 until right || top !in 0 until bottom) return null
         if (right > frameWidth || bottom > frameHeight) return null
 
         val frameShortSide = minOf(frameWidth, frameHeight).toDouble()
-        val expectedWidth = expectedMedianWidthFraction * frameShortSide
-        if (expectedWidth !in
-            frameShortSide * MIN_LOCAL_WIDTH_FRACTION..
-            frameShortSide * MAX_LOCAL_WIDTH_FRACTION
+        val expectedWidth = expectedMedianWidthFraction?.times(frameShortSide)
+        if (
+            expectedWidth != null &&
+            expectedWidth !in
+                frameShortSide * MIN_LOCAL_WIDTH_FRACTION..
+                frameShortSide * MAX_LOCAL_WIDTH_FRACTION
         ) {
             return null
         }
-        val minimumTrackedWidth = expectedWidth * MIN_TRACKED_WIDTH_RATIO
-        val maximumTrackedWidth = expectedWidth * MAX_TRACKED_WIDTH_RATIO
+        val minimumTrackedWidth =
+            expectedWidth?.times(MIN_TRACKED_WIDTH_RATIO)
+                ?: frameShortSide * MIN_LOCAL_WIDTH_FRACTION
+        val maximumTrackedWidth =
+            expectedWidth?.times(MAX_TRACKED_WIDTH_RATIO)
+                ?: frameShortSide * MAX_LOCAL_WIDTH_FRACTION
         val leftToRight = traceColumns(
             mask = mask,
             frameWidth = frameWidth,
@@ -302,7 +308,7 @@ internal class TapePathDirectionEstimator {
         step: Int,
         minimumTrackedWidth: Double,
         maximumTrackedWidth: Double,
-        expectedWidth: Double,
+        expectedWidth: Double?,
     ): HorizontalTrace? {
         val capacity = right - left
         val pointsX = DoubleArray(capacity)
@@ -378,7 +384,7 @@ internal class TapePathDirectionEstimator {
         previousWidth: Double,
         minimumTrackedWidth: Double,
         maximumTrackedWidth: Double,
-        expectedWidth: Double,
+        expectedWidth: Double?,
     ): PixelRun? {
         var best: PixelRun? = null
         var y = top
@@ -391,14 +397,14 @@ internal class TapePathDirectionEstimator {
             if (candidate.width !in minimumTrackedWidth..maximumTrackedWidth) continue
             val candidateCost =
                 if (previousCenter.isNaN()) {
-                    abs(candidate.width - expectedWidth)
+                    expectedWidth?.let { abs(candidate.width - it) } ?: -candidate.width
                 } else {
                     abs(candidate.center - previousCenter) +
                         abs(candidate.width - previousWidth) * WIDTH_CHANGE_COST
                 }
             val bestCost = best?.let {
                 if (previousCenter.isNaN()) {
-                    abs(it.width - expectedWidth)
+                    expectedWidth?.let { expected -> abs(it.width - expected) } ?: -it.width
                 } else {
                     abs(it.center - previousCenter) +
                         abs(it.width - previousWidth) * WIDTH_CHANGE_COST
