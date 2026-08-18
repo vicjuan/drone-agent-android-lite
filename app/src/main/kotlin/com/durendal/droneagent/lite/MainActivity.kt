@@ -749,7 +749,10 @@ class MainActivity : Activity() {
             }
             val decision = tapeTracking.tick(now)
             decision.gimbalTarget?.let(::applyTapeTrackingGimbalTarget)
-            if (decision.endpointReached) {
+            if (
+                activeTapeTrackingMode == TapeTrackingMode.STRAIGHT &&
+                decision.endpointReached
+            ) {
                 beginTapeTurnaround()
                 return
             }
@@ -804,11 +807,7 @@ class MainActivity : Activity() {
                             "$trackingName（穩定化 PD 置中、比例偏航）"
                         }
                     TapeTrackingPhase.VERIFYING_ENDPOINT ->
-                        if (activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) {
-                            "圓形膠帶暫時遺失：懸停等待重新辨識"
-                        } else {
-                            "疑似膠帶末端：低速前進確認中"
-                        }
+                        "疑似膠帶末端：低速前進確認中"
                     TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"
                     TapeTrackingPhase.DISABLED -> "$trackingName 已停止"
                 }
@@ -824,6 +823,9 @@ class MainActivity : Activity() {
         if (mode == TapeTrackingMode.CIRCULAR) "圓形黑膠帶追蹤" else "黑膠帶追蹤"
 
     private fun beginTapeTurnaround() {
+        check(activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) {
+            "Circular tape tracking has no physical endpoint turnaround"
+        }
         val heading = aircraftHeadingDegrees
         if (heading == null || aircraftHeadingAtNanos == 0L) {
             stopTapeTracking(

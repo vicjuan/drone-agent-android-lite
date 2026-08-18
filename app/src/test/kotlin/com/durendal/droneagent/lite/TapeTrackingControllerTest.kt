@@ -426,6 +426,22 @@ class TapeTrackingControllerTest {
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
     }
+    @Test
+    fun `circular mode ignores the straight tape endpoint signature`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(0.0, 0.8), seconds(2))
+        controller.observe(observation(0.0, 0.35), seconds(3))
+        controller.observe(observation(0.0, 0.35), seconds(3) + 400_000_000L)
+        controller.observe(observation(0.0, 0.35), seconds(3) + 800_000_000L)
+        repeat(4) { index ->
+            controller.observe(null, seconds(4) + index * 250_000_000L)
+        }
+
+        val decision = controller.tick(seconds(5))
+
+        assertFalse(decision.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+    }
 
 
     private fun circularTrackingController(): TapeTrackingController =

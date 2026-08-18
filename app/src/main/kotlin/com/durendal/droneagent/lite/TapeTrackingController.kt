@@ -547,19 +547,24 @@ internal class TapeTrackingController {
         rightSpeedMetersPerSecond: Double = 0.0,
         gimbalTarget: TrackingGimbalTarget? = null,
         endpointReached: Boolean = false,
-    ) = TapeTrackingDecision(
-        phase = phase,
-        yawRateDegreesPerSecond = yawRateDegreesPerSecond,
-        forwardSpeedMetersPerSecond = forwardSpeedMetersPerSecond,
-        rightSpeedMetersPerSecond = rightSpeedMetersPerSecond,
-        gimbalTarget = gimbalTarget,
-        endpointReached = endpointReached,
-        rawAngleDegrees = rawAngleDegrees,
-        controlledAngleDegrees = controlledAngleDegrees,
-        rawOffsetFraction = rawHorizontalOffsetFraction,
-        controlledOffsetFraction = controlledHorizontalOffsetFraction,
-        offsetRatePerSecond = offsetRatePerSecond,
-    )
+    ): TapeTrackingDecision {
+        check(!endpointReached || mode == TapeTrackingMode.STRAIGHT) {
+            "Only straight tape tracking can report a physical endpoint"
+        }
+        return TapeTrackingDecision(
+            phase = phase,
+            yawRateDegreesPerSecond = yawRateDegreesPerSecond,
+            forwardSpeedMetersPerSecond = forwardSpeedMetersPerSecond,
+            rightSpeedMetersPerSecond = rightSpeedMetersPerSecond,
+            gimbalTarget = gimbalTarget,
+            endpointReached = endpointReached,
+            rawAngleDegrees = rawAngleDegrees,
+            controlledAngleDegrees = controlledAngleDegrees,
+            rawOffsetFraction = rawHorizontalOffsetFraction,
+            controlledOffsetFraction = controlledHorizontalOffsetFraction,
+            offsetRatePerSecond = offsetRatePerSecond,
+        )
+    }
 
     private fun exponentialAverage(previous: Double, sample: Double, alpha: Double): Double =
         previous + alpha * (sample - previous)
