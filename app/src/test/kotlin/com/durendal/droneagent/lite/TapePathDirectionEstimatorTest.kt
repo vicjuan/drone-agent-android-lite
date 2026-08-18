@@ -59,6 +59,35 @@ class TapePathDirectionEstimatorTest {
         assertTrue(estimate.medianWidthFraction > 0.07)
     }
 
+    @Test
+    fun `horizontal arc remains traceable while aircraft yaws into alignment`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (x in 80 until 600) {
+            val progress = (x - 80) / 519.0
+            val centerY = 205.0 + 95.0 * progress * progress
+            val top = (centerY - HALF_TAPE_WIDTH).toInt().coerceAtLeast(0)
+            val bottom = (centerY + HALF_TAPE_WIDTH).toInt().coerceAtMost(FRAME_HEIGHT)
+            for (y in top until bottom) mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
+        }
+
+        val estimate = checkNotNull(
+            estimator.estimate(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 80,
+                top = 180,
+                right = 600,
+                bottom = 320,
+            ),
+        )
+
+        assertTrue(estimate.lookaheadAngleFromVerticalDegrees < -70.0)
+        assertTrue(estimate.sampleCount > 450)
+        assertTrue(estimate.arcLengthFraction > 1.4)
+        assertTrue(estimate.nearFieldCenterX > 550.0)
+    }
+
     private fun estimateRibbon(curveDirection: Double): TapePathEstimate? {
         val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
         for (y in 0 until FRAME_HEIGHT) {

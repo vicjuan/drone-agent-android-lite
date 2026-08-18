@@ -393,6 +393,45 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `circular angle filter preserves direction across axial wrap`() {
+        val controller = circularTrackingController()
+        repeat(4) { index ->
+            controller.observe(
+                observation(-86.0, 0.8, 0.05),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        controller.observe(observation(87.0, 0.8, 0.05), seconds(3))
+
+        val decision = controller.tick(seconds(3))
+
+        assertEquals(87.0, decision.rawAngleDegrees!!, 0.0)
+        assertTrue(decision.controlledAngleDegrees!! < -85.0)
+        assertTrue(decision.yawRateDegreesPerSecond < 0.0)
+    }
+
+    @Test
+    fun `horizontal path loss keeps yaw recovery but never translates`() {
+        val controller = circularTrackingController()
+        repeat(4) { index ->
+            controller.observe(
+                observation(-80.0, 0.8, 0.05),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+
+        controller.observe(null, seconds(3))
+        val recovering = controller.tick(seconds(3) + 250_000_000L)
+        val expired = controller.tick(seconds(5) + 250_000_001L)
+
+        assertEquals(-TapeTrackingController.CIRCULAR_RECOVERY_YAW_RATE_DEGREES_PER_SECOND, recovering.yawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, recovering.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, recovering.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, expired.yawRateDegreesPerSecond, 0.0)
+        assertFalse(recovering.endpointReached)
+    }
+
+    @Test
     fun `circular mode does not land when no path was ever confirmed`() {
         val controller = circularTrackingController()
 

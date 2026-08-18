@@ -89,6 +89,8 @@ internal class TapeTrackingController {
     private var consecutiveCircularTrackDetections = 0
     private var circularTrackConfirmed = false
     private var circularReferenceBounds: NormalizedRect? = null
+    private var circularRecoveryYawRateDegreesPerSecond = 0.0
+    private var circularRecoveryUntilNanos = 0L
 
 
     fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
@@ -266,11 +268,22 @@ internal class TapeTrackingController {
             controlledAngleDegrees == null ||
             controlledHorizontalOffsetFraction == null
         ) {
+            val recoveryYawRate =
+                if (
+                    mode == TapeTrackingMode.CIRCULAR &&
+                    phase == TapeTrackingPhase.VERIFYING_ENDPOINT &&
+                    nowNanos <= circularRecoveryUntilNanos
+                ) {
+                    circularRecoveryYawRateDegreesPerSecond
+                } else {
+                    0.0
+                }
             resetAppliedCommands()
             return decision(
                 phase = phase,
-                yawRateDegreesPerSecond = 0.0,
-                forwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos),
+                yawRateDegreesPerSecond = recoveryYawRate,
+                forwardSpeedMetersPerSecond =
+                    if (mode == TapeTrackingMode.CIRCULAR) 0.0 else desiredForwardSpeed(nowNanos),
                 gimbalTarget = target,
             )
         }
@@ -296,14 +309,17 @@ internal class TapeTrackingController {
         nowNanos: Long,
     ) {
         if (observation == null) {
-            clearControlMeasurements()
             if (phase == TapeTrackingPhase.TRACKING && circularTrackConfirmed) {
+                beginCircularRecovery(nowNanos)
+                clearControlMeasurements()
                 phase = TapeTrackingPhase.VERIFYING_ENDPOINT
                 endpointVerificationStartedAtNanos = nowNanos
                 consecutiveEndpointMisses = 1
                 resetAppliedCommands()
             } else if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
                 consecutiveEndpointMisses += 1
+            } else {
+                clearControlMeasurements()
             }
             return
         }
@@ -342,6 +358,7 @@ internal class TapeTrackingController {
                 overlapOfSmallerArea(observation.bounds, reference) >=
                 CIRCULAR_REACQUISITION_MIN_OVERLAP
         if (!matchesTrackedPath) {
+            beginCircularRecovery(nowNanos)
             clearControlMeasurements()
             consecutiveEndpointMisses += 1
             return
@@ -349,6 +366,8 @@ internal class TapeTrackingController {
         phase = TapeTrackingPhase.TRACKING
         endpointVerificationStartedAtNanos = 0L
         consecutiveEndpointMisses = 0
+        circularRecoveryYawRateDegreesPerSecond = 0.0
+        circularRecoveryUntilNanos = 0L
         circularReferenceBounds = observation.bounds
         updateControlMeasurements(
             observation.angleFromVerticalDegrees,
@@ -411,6 +430,8 @@ internal class TapeTrackingController {
         consecutiveCircularTrackDetections = 0
         circularTrackConfirmed = false
         circularReferenceBounds = null
+        circularRecoveryYawRateDegreesPerSecond = 0.0
+        circularRecoveryUntilNanos = 0L
         lateralCorrectionActive = false
         resetControlState()
     }
@@ -424,7 +445,7 @@ internal class TapeTrackingController {
         rawHorizontalOffsetFraction = horizontalOffsetFraction
         val previousOffset = controlledHorizontalOffsetFraction
         val nextAngle = controlledAngleDegrees?.let {
-            exponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
+            axialExponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
         } ?: angleDegrees
         val nextOffset = previousOffset?.let {
             exponentialAverage(it, horizontalOffsetFraction, STABILIZED_FILTER_ALPHA)
@@ -450,6 +471,13 @@ internal class TapeTrackingController {
         offsetRatePerSecond = 0.0
         lastControlObservationAtNanos = 0L
         lateralCorrectionActive = false
+    }
+    private fun beginCircularRecovery(nowNanos: Long) {
+        val angle = controlledAngleDegrees ?: return
+        if (abs(angle) < CIRCULAR_RECOVERY_MIN_ANGLE_DEGREES) return
+        circularRecoveryYawRateDegreesPerSecond =
+            angle.sign * CIRCULAR_RECOVERY_YAW_RATE_DEGREES_PER_SECOND
+        circularRecoveryUntilNanos = nowNanos + CIRCULAR_RECOVERY_DURATION_NANOS
     }
 
     private fun resetControlState() {
@@ -626,6 +654,16 @@ internal class TapeTrackingController {
     private fun exponentialAverage(previous: Double, sample: Double, alpha: Double): Double =
         previous + alpha * (sample - previous)
 
+    private fun axialExponentialAverage(previous: Double, sample: Double, alpha: Double): Double {
+        var equivalentSample = sample
+        while (equivalentSample - previous > 90.0) equivalentSample -= 180.0
+        while (equivalentSample - previous < -90.0) equivalentSample += 180.0
+        var average = exponentialAverage(previous, equivalentSample, alpha)
+        while (average > 90.0) average -= 180.0
+        while (average < -90.0) average += 180.0
+        return average
+    }
+
     private fun moveToward(current: Double, target: Double, maximumDelta: Double): Double =
         when {
             target > current -> minOf(target, current + maximumDelta)
@@ -684,6 +722,9 @@ internal class TapeTrackingController {
         const val CIRCULAR_TRACK_CONFIRMATION_COUNT = 4
         const val CIRCULAR_TRACK_CONFIRMATION_NANOS = 750_000_000L
         const val CIRCULAR_REACQUISITION_MIN_OVERLAP = 0.10
+        const val CIRCULAR_RECOVERY_MIN_ANGLE_DEGREES = 45.0
+        const val CIRCULAR_RECOVERY_YAW_RATE_DEGREES_PER_SECOND = 3.0
+        const val CIRCULAR_RECOVERY_DURATION_NANOS = 2_000_000_000L
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 6.0
