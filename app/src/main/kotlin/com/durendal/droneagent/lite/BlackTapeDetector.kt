@@ -44,6 +44,8 @@ class BlackTapeDetector(
     private var luminanceBytes = ByteArray(0)
     @Volatile private var lastDetectionMode = TapeDetectionMode.PATH
     @Volatile private var lastPathSampleCount = 0
+    @Volatile private var lastFloorSeedCount = 0
+    @Volatile private var lastFloorFraction = 0.0
     private val pathDirectionEstimator = TapePathDirectionEstimator()
     private var candidateMaskBytes = ByteArray(0)
 
@@ -105,7 +107,8 @@ class BlackTapeDetector(
     fun diagnosticsSummary(): String =
         (
             "mode=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
-                "rejects=invalid:%d area:%d aspect:%d length:%d width:%d edge:%d fill:%d brown:%d"
+                "floorSeeds=%d floor=%.2f rejects=invalid:%d area:%d aspect:%d length:%d " +
+                "width:%d edge:%d fill:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathSampleCount,
@@ -113,6 +116,8 @@ class BlackTapeDetector(
             lastEffectiveThreshold,
             lastClassSeparation,
             lastContourCount,
+            lastFloorSeedCount,
+            lastFloorFraction,
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal],
             rejectionCounts[TapeCandidateRejection.AREA.ordinal],
             rejectionCounts[TapeCandidateRejection.ASPECT.ordinal],
@@ -120,7 +125,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
-            rejectionCounts[TapeCandidateRejection.BROWN_CONTEXT.ordinal],
+            rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal],
         )
 
     override fun close() {
@@ -133,10 +138,11 @@ class BlackTapeDetector(
         val rgb = Mat()
         val gray = Mat()
         val blurred = Mat()
-        val hsv = Mat()
+        val lab = Mat()
         val blackMask = Mat()
         val bridgedBlackMask = Mat()
-        val brownMask = Mat()
+        val floorMask = Mat()
+        val floorMaskWithBorder = Mat()
         val cleanedBlackMask = Mat()
         val candidateMask = Mat()
         val hierarchy = Mat()
@@ -165,6 +171,8 @@ class BlackTapeDetector(
         try {
             rejectionCounts.fill(0)
             lastContourCount = 0
+            lastFloorSeedCount = 0
+            lastFloorFraction = 0.0
             source.put(0, 0, rgbaBytes)
             val scale = min(1.0, MAX_ANALYSIS_DIMENSION / max(width, height).toDouble())
             val analysis = if (scale < 1.0) {
@@ -202,8 +210,10 @@ class BlackTapeDetector(
                 return null
             }
 
-            Imgproc.cvtColor(rgb, hsv, Imgproc.COLOR_RGB2HSV)
-            Core.inRange(hsv, BROWN_MIN_HSV, BROWN_MAX_HSV, brownMask)
+            Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
+            lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
+            lastFloorFraction =
+                Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
             Imgproc.morphologyEx(blackMask, bridgedBlackMask, Imgproc.MORPH_CLOSE, closeKernel)
             Imgproc.morphologyEx(bridgedBlackMask, cleanedBlackMask, Imgproc.MORPH_OPEN, openKernel)
             Imgproc.findContours(
@@ -227,7 +237,7 @@ class BlackTapeDetector(
                         contours,
                         cleanedBlackMask,
                         candidateMask,
-                        brownMask,
+                        floorMask,
                         frameArea,
                         frameShortSide,
                         mode,
@@ -270,10 +280,11 @@ class BlackTapeDetector(
             closeKernel.release()
             openKernel.release()
             cleanedBlackMask.release()
-            brownMask.release()
+            floorMaskWithBorder.release()
+            floorMask.release()
             bridgedBlackMask.release()
             blackMask.release()
-            hsv.release()
+            lab.release()
             blurred.release()
             gray.release()
             rgb.release()
@@ -282,13 +293,56 @@ class BlackTapeDetector(
         }
     }
 
+    private fun buildFloorMask(
+        lab: Mat,
+        blackMask: Mat,
+        floorMask: Mat,
+        floorMaskWithBorder: Mat,
+    ): Int {
+        floorMaskWithBorder.create(
+            lab.rows() + 2,
+            lab.cols() + 2,
+            org.opencv.core.CvType.CV_8UC1,
+        )
+        floorMaskWithBorder.setTo(Scalar(0.0))
+        var acceptedSeeds = 0
+        val seedRows = intArrayOf(
+            (lab.rows() * 0.92).toInt().coerceIn(0, lab.rows() - 1),
+            lab.rows() - 2,
+        )
+        for (y in seedRows) {
+            for (xFraction in FLOOR_SEED_X_FRACTIONS) {
+                val x = (lab.cols() * xFraction).toInt().coerceIn(0, lab.cols() - 1)
+                if (blackMask.get(y, x)[0] != 0.0) continue
+                val filled = Imgproc.floodFill(
+                    lab,
+                    floorMaskWithBorder,
+                    Point(x.toDouble(), y.toDouble()),
+                    Scalar(0.0),
+                    Rect(),
+                    FLOOR_LAB_LOWER_DIFFERENCE,
+                    FLOOR_LAB_UPPER_DIFFERENCE,
+                    FLOOR_FLOOD_FILL_FLAGS,
+                )
+                if (filled > 0) acceptedSeeds++
+            }
+        }
+        val interior = floorMaskWithBorder.submat(1, lab.rows() + 1, 1, lab.cols() + 1)
+        try {
+            interior.copyTo(floorMask)
+        } finally {
+            interior.release()
+        }
+        return acceptedSeeds
+    }
+
     private fun scoreCandidate(
         contour: MatOfPoint,
         contourIndex: Int,
         contours: List<MatOfPoint>,
         blackMask: Mat,
         candidateMask: Mat,
-        brownMask: Mat,
+        floorMask: Mat,
         frameArea: Double,
         frameShortSide: Double,
         mode: TapeDetectionMode,
@@ -305,7 +359,7 @@ class BlackTapeDetector(
                 contours,
                 blackMask,
                 candidateMask,
-                brownMask,
+                floorMask,
                 contourArea,
                 bounds,
                 frameArea,
@@ -329,16 +383,18 @@ class BlackTapeDetector(
         val shortSide = min(orientedWidth, orientedHeight)
         val longSide = max(orientedWidth, orientedHeight)
         val orientedArea = orientedWidth * orientedHeight
+        val context = floorContext(floorMask, bounds)
         val metrics = TapeCandidateMetrics(
             areaFraction = contourArea / frameArea,
             aspectRatio = longSide / shortSide,
             shortSideFraction = shortSide / frameShortSide,
             longSideFraction = longSide / frameShortSide,
             orientedFill = (contourArea / orientedArea).coerceIn(0.0, 1.0),
-            surroundingBrown = surroundingBrownFraction(brownMask, bounds),
+            surroundingFloor = context.surroundingFraction,
+            minimumSideFloor = context.minimumSideFraction,
             touchesHorizontalFrameEdge =
                 bounds.x <= HORIZONTAL_EDGE_MARGIN ||
-                    bounds.x + bounds.width >= brownMask.cols() - HORIZONTAL_EDGE_MARGIN,
+                    bounds.x + bounds.width >= floorMask.cols() - HORIZONTAL_EDGE_MARGIN,
             overlapsPreviousDetection = overlapsPrevious(bounds),
         )
         val rejection = TapeCandidatePolicy.rejectionReason(metrics)
@@ -353,7 +409,7 @@ class BlackTapeDetector(
             angleFromVerticalDegrees = axis.angleFromVerticalDegrees,
             longSideFraction = metrics.longSideFraction,
             nearFieldOffsetFraction =
-                (axis.nearFieldCenterX / brownMask.cols() - 0.5).coerceIn(-0.5, 0.5),
+                (axis.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
         )
     }
 
@@ -362,7 +418,7 @@ class BlackTapeDetector(
         contours: List<MatOfPoint>,
         blackMask: Mat,
         candidateMask: Mat,
-        brownMask: Mat,
+        floorMask: Mat,
         contourArea: Double,
         bounds: Rect,
         frameArea: Double,
@@ -377,14 +433,17 @@ class BlackTapeDetector(
         if (
             !overlapsPrevious &&
             (bounds.x <= HORIZONTAL_EDGE_MARGIN ||
-                bounds.x + bounds.width >= brownMask.cols() - HORIZONTAL_EDGE_MARGIN)
+                bounds.x + bounds.width >= floorMask.cols() - HORIZONTAL_EDGE_MARGIN)
         ) {
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
             return null
         }
-        val surroundingBrown = surroundingBrownFraction(brownMask, bounds)
-        if (surroundingBrown < MIN_PATH_SURROUNDING_BROWN) {
-            rejectionCounts[TapeCandidateRejection.BROWN_CONTEXT.ordinal] += 1
+        val context = floorContext(floorMask, bounds)
+        if (
+            context.surroundingFraction < MIN_PATH_SURROUNDING_FLOOR ||
+            context.minimumSideFraction < MIN_PATH_SIDE_FLOOR
+        ) {
+            rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal] += 1
             return null
         }
 
@@ -418,8 +477,10 @@ class BlackTapeDetector(
         val pathConfidence =
             (path.arcLengthFraction / IDEAL_PATH_FRACTION).coerceIn(0.0, 1.0)
         val continuityConfidence = if (overlapsPrevious) 1.0 else 0.5
+        val floorConfidence =
+            (context.surroundingFraction + context.minimumSideFraction) / 2.0
         val score = (
-            surroundingBrown * 0.35 +
+            floorConfidence * 0.35 +
                 path.widthConsistency * 0.30 +
                 pathConfidence * 0.25 +
                 continuityConfidence * 0.10
@@ -430,7 +491,7 @@ class BlackTapeDetector(
             angleFromVerticalDegrees = path.lookaheadAngleFromVerticalDegrees,
             longSideFraction = path.arcLengthFraction,
             nearFieldOffsetFraction =
-                (path.nearFieldCenterX / brownMask.cols() - 0.5).coerceIn(-0.5, 0.5),
+                (path.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
             pathSampleCount = path.sampleCount,
         )
     }
@@ -474,13 +535,35 @@ class BlackTapeDetector(
         )
     }
 
-    private fun surroundingBrownFraction(brownMask: Mat, bounds: Rect): Double {
-        val surround = expand(bounds, brownMask.cols(), brownMask.rows())
+    private fun floorContext(floorMask: Mat, bounds: Rect): FloorContext {
+        val surround = expand(bounds, floorMask.cols(), floorMask.rows())
         val surroundArea = (surround.area() - bounds.area()).coerceAtLeast(1.0)
-        val surroundingBrownPixels =
-            (countNonZero(brownMask, surround) - countNonZero(brownMask, bounds)).coerceAtLeast(0)
-        return (surroundingBrownPixels / surroundArea).coerceIn(0.0, 1.0)
+        val surroundingFloorPixels =
+            (countNonZero(floorMask, surround) - countNonZero(floorMask, bounds)).coerceAtLeast(0)
+        val surroundingFraction =
+            (surroundingFloorPixels / surroundArea).coerceIn(0.0, 1.0)
+
+        val maximumPadding = max(1, floorMask.cols() / MAX_SIDE_PADDING_DIVISOR)
+        val sidePadding =
+            min(max(MIN_SURROUND_PADDING, (bounds.width * SIDE_CONTEXT_SCALE).toInt()), maximumPadding)
+        val leftWidth = min(sidePadding, bounds.x)
+        val rightStart = bounds.x + bounds.width
+        val rightWidth = min(sidePadding, floorMask.cols() - rightStart)
+        val leftFraction =
+            if (leftWidth == 0) 0.0
+            else maskFraction(floorMask, Rect(bounds.x - leftWidth, bounds.y, leftWidth, bounds.height))
+        val rightFraction =
+            if (rightWidth == 0) 0.0
+            else maskFraction(floorMask, Rect(rightStart, bounds.y, rightWidth, bounds.height))
+        return FloorContext(
+            surroundingFraction = surroundingFraction,
+            minimumSideFraction = min(leftFraction, rightFraction),
+        )
     }
+
+    private fun maskFraction(mask: Mat, bounds: Rect): Double =
+        countNonZero(mask, bounds).toDouble() / bounds.area().coerceAtLeast(1.0)
+
 
     private fun classSeparation(blurred: Mat, threshold: Double): Double {
         val pixelCount = blurred.total().toInt()
@@ -550,6 +633,11 @@ class BlackTapeDetector(
         val pathSampleCount: Int = 0,
     )
 
+    private data class FloorContext(
+        val surroundingFraction: Double,
+        val minimumSideFraction: Double,
+    )
+
     private data class TapeAxis(
         val angleFromVerticalDegrees: Double,
         val nearFieldCenterX: Double,
@@ -560,6 +648,8 @@ class BlackTapeDetector(
         const val MAX_ANALYSIS_DIMENSION = 640.0
         const val FRAME_INTERVAL_NANOS = 250_000_000L
         const val SURROUND_SCALE = 0.35
+        const val SIDE_CONTEXT_SCALE = 0.35
+        const val MAX_SIDE_PADDING_DIVISOR = 8
         const val HORIZONTAL_EDGE_MARGIN = 1
         const val MIN_SURROUND_PADDING = 8
         const val MIN_CLASS_SEPARATION_LUMINANCE = 30.0
@@ -570,14 +660,18 @@ class BlackTapeDetector(
         const val PATH_OPEN_KERNEL_SIZE = 3.0
         const val MIN_PATH_AREA_FRACTION = 0.0008
         const val MAX_PATH_AREA_FRACTION = 0.18
-        const val MIN_PATH_SURROUNDING_BROWN = 0.22
+        const val MIN_PATH_SURROUNDING_FLOOR = 0.22
+        const val MIN_PATH_SIDE_FLOOR = 0.30
         const val MIN_PATH_FRACTION = 0.20
         const val MIN_TRACKED_PATH_FRACTION = 0.12
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
-        val BROWN_MIN_HSV = Scalar(4.0, 45.0, 35.0)
-        val BROWN_MAX_HSV = Scalar(40.0, 255.0, 255.0)
+        val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)
+        val FLOOR_LAB_LOWER_DIFFERENCE = Scalar(24.0, 18.0, 18.0)
+        val FLOOR_LAB_UPPER_DIFFERENCE = Scalar(24.0, 18.0, 18.0)
+        val FLOOR_FLOOD_FILL_FLAGS =
+            4 or (255 shl 8) or Imgproc.FLOODFILL_FIXED_RANGE or Imgproc.FLOODFILL_MASK_ONLY
     }
 }

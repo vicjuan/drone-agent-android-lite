@@ -65,7 +65,8 @@ internal data class TapeCandidateMetrics(
     val shortSideFraction: Double,
     val longSideFraction: Double,
     val orientedFill: Double,
-    val surroundingBrown: Double,
+    val surroundingFloor: Double,
+    val minimumSideFloor: Double = 1.0,
     val touchesHorizontalFrameEdge: Boolean = false,
     val overlapsPreviousDetection: Boolean = false,
 )
@@ -78,7 +79,7 @@ internal enum class TapeCandidateRejection {
     WIDTH,
     HORIZONTAL_FRAME_EDGE,
     ORIENTED_FILL,
-    BROWN_CONTEXT,
+    FLOOR_CONTEXT,
 }
 
 internal object TapeLuminancePolicy {
@@ -116,8 +117,11 @@ internal object TapeCandidatePolicy {
         if (metrics.orientedFill < MIN_ORIENTED_FILL) {
             return TapeCandidateRejection.ORIENTED_FILL
         }
-        if (metrics.surroundingBrown < MIN_SURROUNDING_BROWN) {
-            return TapeCandidateRejection.BROWN_CONTEXT
+        if (
+            metrics.surroundingFloor < MIN_SURROUNDING_FLOOR ||
+            metrics.minimumSideFloor < MIN_SIDE_FLOOR
+        ) {
+            return TapeCandidateRejection.FLOOR_CONTEXT
         }
         return null
     }
@@ -125,9 +129,10 @@ internal object TapeCandidatePolicy {
     fun score(metrics: TapeCandidateMetrics): Double? {
         if (rejectionReason(metrics) != null) return null
         val aspectConfidence = (metrics.aspectRatio / IDEAL_ASPECT_RATIO).coerceIn(0.0, 1.0)
+        val floorConfidence = (metrics.surroundingFloor + metrics.minimumSideFloor) / 2.0
         return (
             metrics.orientedFill * 0.40 +
-                metrics.surroundingBrown * 0.35 +
+                floorConfidence * 0.35 +
                 aspectConfidence * 0.25
             ).coerceIn(0.0, 1.0)
     }
@@ -141,6 +146,7 @@ internal object TapeCandidatePolicy {
     private const val MIN_LONG_SIDE_FRACTION = 0.25
     private const val MIN_TRACKED_LONG_SIDE_FRACTION = 0.15
     private const val MIN_ORIENTED_FILL = 0.30
-    private const val MIN_SURROUNDING_BROWN = 0.22
+    private const val MIN_SURROUNDING_FLOOR = 0.22
+    private const val MIN_SIDE_FLOOR = 0.30
     private const val IDEAL_ASPECT_RATIO = 8.0
 }

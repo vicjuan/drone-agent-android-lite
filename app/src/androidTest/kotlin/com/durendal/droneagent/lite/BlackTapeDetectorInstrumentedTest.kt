@@ -77,6 +77,34 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detection.longSideFraction > 0.9)
     }
 
+    @Test
+    fun previewModeDetectsCurvedTapeOnGreenFloor() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
+        fillCurvedRibbon(frame, width, height, direction = -1.0, value = 20)
+
+        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
+
+        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
+    }
+
+    @Test
+    fun darkDoorEdgeAboveGrayBaseboardIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
+        fillRectRgb(frame, width, 0, 0, width, 245, red = 235, green = 235, blue = 225)
+        fillRectRgb(frame, width, 0, 245, width, 275, red = 145, green = 145, blue = 140)
+        fillRectRgb(frame, width, 120, 0, 300, 245, red = 130, green = 78, blue = 42)
+        fillRect(frame, width, left = 270, top = 0, right = 300, bottom = 245, value = 20)
+
+        val detection = detectSequence(listOf(frame), width, height).single()
+
+        assertEquals(null, detection)
+    }
+
     private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection =
         checkNotNull(detectSequence(listOf(frame), width, height, TapeDetectionMode.STRAIGHT).single()) {
             "detector rejected the synthetic tape"
@@ -145,6 +173,27 @@ class BlackTapeDetectorInstrumentedTest {
                 frame[offset] = value.toByte()
                 frame[offset + 1] = value.toByte()
                 frame[offset + 2] = value.toByte()
+            }
+        }
+    }
+
+    private fun fillRectRgb(
+        frame: ByteArray,
+        frameWidth: Int,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        red: Int,
+        green: Int,
+        blue: Int,
+    ) {
+        for (y in top until bottom) {
+            for (x in left until right) {
+                val offset = (y * frameWidth + x) * 4
+                frame[offset] = red.toByte()
+                frame[offset + 1] = green.toByte()
+                frame[offset + 2] = blue.toByte()
             }
         }
     }

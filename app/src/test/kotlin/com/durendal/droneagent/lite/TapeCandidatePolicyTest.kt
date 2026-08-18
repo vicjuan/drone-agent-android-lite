@@ -19,7 +19,7 @@ class TapeLuminancePolicyTest {
 }
 class TapeCandidatePolicyTest {
     @Test
-    fun `dark rectangular strip surrounded by brown is accepted`() {
+    fun `dark rectangular strip surrounded by floor is accepted`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(
                 areaFraction = 0.03,
@@ -27,7 +27,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.05,
                 longSideFraction = 0.60,
                 orientedFill = 0.90,
-                surroundingBrown = 0.75,
+                surroundingFloor = 0.75,
             ),
         )
 
@@ -43,7 +43,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.025,
                 longSideFraction = 0.464,
                 orientedFill = 0.90,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
             ),
         )
 
@@ -51,7 +51,7 @@ class TapeCandidatePolicyTest {
     }
 
     @Test
-    fun `dark strip without brown cardboard context is rejected`() {
+    fun `dark strip without floor context is rejected`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(
                 areaFraction = 0.03,
@@ -59,11 +59,28 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.05,
                 longSideFraction = 0.60,
                 orientedFill = 0.90,
-                surroundingBrown = 0.10,
+                surroundingFloor = 0.10,
             ),
         )
 
         assertNull(score)
+    }
+
+    @Test
+    fun `dark boundary with floor on only one side is rejected`() {
+        val rejection = TapeCandidatePolicy.rejectionReason(
+            TapeCandidateMetrics(
+                areaFraction = 0.03,
+                aspectRatio = 4.0,
+                shortSideFraction = 0.05,
+                longSideFraction = 0.60,
+                orientedFill = 0.90,
+                surroundingFloor = 0.60,
+                minimumSideFloor = 0.05,
+            ),
+        )
+
+        assertEquals(TapeCandidateRejection.FLOOR_CONTEXT, rejection)
     }
 
     @Test
@@ -75,7 +92,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.20,
                 longSideFraction = 0.60,
                 orientedFill = 0.95,
-                surroundingBrown = 0.80,
+                surroundingFloor = 0.80,
             ),
         )
 
@@ -91,7 +108,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.06,
                 longSideFraction = 0.70,
                 orientedFill = 0.38,
-                surroundingBrown = 0.32,
+                surroundingFloor = 0.32,
             ),
         )
 
@@ -107,7 +124,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.18,
                 longSideFraction = 1.0,
                 orientedFill = 0.80,
-                surroundingBrown = 0.60,
+                surroundingFloor = 0.60,
             ),
         )
 
@@ -115,7 +132,7 @@ class TapeCandidatePolicyTest {
     }
 
     @Test
-    fun `broad dark edge is rejected even when surrounded by brown`() {
+    fun `broad dark edge is rejected even when surrounded by floor`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(
                 areaFraction = 0.12,
@@ -123,7 +140,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.22,
                 longSideFraction = 0.70,
                 orientedFill = 0.90,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
             ),
         )
 
@@ -139,7 +156,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.018,
                 longSideFraction = 0.17,
                 orientedFill = 0.90,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
             ),
         )
 
@@ -155,7 +172,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.05,
                 longSideFraction = 0.75,
                 orientedFill = 0.82,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
             ),
         )
 
@@ -171,7 +188,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.05,
                 longSideFraction = 0.70,
                 orientedFill = 0.90,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
                 touchesHorizontalFrameEdge = true,
             ),
         )
@@ -188,7 +205,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.05,
                 longSideFraction = 0.70,
                 orientedFill = 0.90,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
                 touchesHorizontalFrameEdge = true,
                 overlapsPreviousDetection = true,
             ),
@@ -206,7 +223,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.11,
                 longSideFraction = 0.20,
                 orientedFill = 0.80,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
             ),
         )
 
@@ -222,7 +239,7 @@ class TapeCandidatePolicyTest {
                 shortSideFraction = 0.11,
                 longSideFraction = 0.20,
                 orientedFill = 0.80,
-                surroundingBrown = 0.70,
+                surroundingFloor = 0.70,
                 overlapsPreviousDetection = true,
             ),
         )
