@@ -34,6 +34,8 @@ class BlackTapeDetector(
     private val lastAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
     private var previousPathMedianWidthFraction: Double? = null
+    private var previousAnchorXFraction: Double? = null
+    private var previousAnchorYFraction: Double? = null
     @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
@@ -101,6 +103,8 @@ class BlackTapeDetector(
             worker.execute {
                 previousBounds = null
                 previousPathMedianWidthFraction = null
+                previousAnchorXFraction = null
+                previousAnchorYFraction = null
                 consecutiveDetectionMisses = 0
             }
         } catch (error: RuntimeException) {
@@ -112,8 +116,8 @@ class BlackTapeDetector(
         (
             "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
                 "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
-                "rejects=invalid:%d area:%d aspect:%d length:%d curve:%d width:%d edge:%d " +
-                "fill:%d chroma:%d floor:%d"
+                "rejects=invalid:%d area:%d aspect:%d length:%d curve:%d direction:%d width:%d " +
+                "edge:%d fill:%d chroma:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathAxis,
@@ -131,6 +135,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.ASPECT.ordinal],
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal],
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal],
+            rejectionCounts[TapeCandidateRejection.DIRECTION_CONTINUITY.ordinal],
             rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
@@ -240,6 +245,7 @@ class BlackTapeDetector(
             val frameShortSide = min(analysis.cols(), analysis.rows()).toDouble()
             var best: Candidate? = null
             var bestSelectionScore = Double.NEGATIVE_INFINITY
+            var highestSelectionScore = Double.NEGATIVE_INFINITY
             for ((contourIndex, contour) in contours.withIndex()) {
                 val candidate =
                     scoreCandidate(
@@ -254,10 +260,32 @@ class BlackTapeDetector(
                         frameShortSide,
                         mode,
                     ) ?: continue
+                if (
+                    mode == TapeDetectionMode.PATH &&
+                    !matchesPreviousAnchor(candidate)
+                ) {
+                    rejectionCounts[TapeCandidateRejection.DIRECTION_CONTINUITY.ordinal] += 1
+                    continue
+                }
                 val continuityBonus =
                     if (overlapsPrevious(candidate.bounds)) PREVIOUS_OVERLAP_BONUS else 1.0
                 val selectionScore = candidate.score * continuityBonus
-                if (selectionScore > bestSelectionScore) {
+                highestSelectionScore = max(highestSelectionScore, selectionScore)
+                val counterclockwiseAcquisition =
+                    mode == TapeDetectionMode.PATH && previousAnchorXFraction == null
+                val shouldSelect = when {
+                    best == null -> true
+                    bestSelectionScore <
+                        highestSelectionScore - DIRECTION_SCORE_TOLERANCE -> true
+                    counterclockwiseAcquisition &&
+                        selectionScore >=
+                        highestSelectionScore - DIRECTION_SCORE_TOLERANCE &&
+                        candidate.anchorXFraction > best.anchorXFraction -> true
+                    !counterclockwiseAcquisition &&
+                        selectionScore > bestSelectionScore -> true
+                    else -> false
+                }
+                if (shouldSelect) {
                     best = candidate
                     bestSelectionScore = selectionScore
                 }
@@ -274,6 +302,8 @@ class BlackTapeDetector(
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
             previousPathMedianWidthFraction =
                 winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
+            previousAnchorXFraction = winner.anchorXFraction
+            previousAnchorYFraction = winner.anchorYFraction
             lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "CENTERLINE"
             lastPathSampleCount = winner.pathSampleCount
             return TapeDetection(
@@ -409,6 +439,8 @@ class BlackTapeDetector(
         val pixelCount = candidateMask.total().toInt()
         if (candidateMaskBytes.size != pixelCount) candidateMaskBytes = ByteArray(pixelCount)
         candidateMask.get(0, 0, candidateMaskBytes)
+        // In the camera-down image, entering a rainbow at its right endpoint and
+        // tracing toward the left follows the circle counterclockwise.
         val verticalPath = pathDirectionEstimator.estimate(
             mask = candidateMaskBytes,
             frameWidth = candidateMask.cols(),
@@ -417,6 +449,10 @@ class BlackTapeDetector(
             top = bounds.y,
             right = bounds.x + bounds.width,
             bottom = bounds.y + bounds.height,
+            initialCenterHint =
+                previousAnchorXFraction?.times(candidateMask.cols()),
+            preferRightmostInitialRun =
+                requireCurvature && previousAnchorXFraction == null,
         )
         val horizontalPath = pathDirectionEstimator.estimateHorizontalFallback(
             mask = candidateMaskBytes,
@@ -427,6 +463,12 @@ class BlackTapeDetector(
             right = bounds.x + bounds.width,
             bottom = bounds.y + bounds.height,
             expectedMedianWidthFraction = previousPathMedianWidthFraction,
+            preferredNearFieldX =
+                previousAnchorXFraction?.times(candidateMask.cols()),
+            preferredNearFieldY =
+                previousAnchorYFraction?.times(candidateMask.rows()),
+            preferRightToLeft =
+                requireCurvature && previousAnchorXFraction == null,
         )
         val path =
             listOfNotNull(verticalPath, horizontalPath).maxByOrNull {
@@ -606,11 +648,21 @@ class BlackTapeDetector(
         return intersection / smallerArea >= MIN_PREVIOUS_OVERLAP
     }
 
+    private fun matchesPreviousAnchor(candidate: Candidate): Boolean {
+        val previousX = previousAnchorXFraction ?: return true
+        val previousY = previousAnchorYFraction ?: return true
+        val deltaX = candidate.anchorXFraction - previousX
+        val deltaY = candidate.anchorYFraction - previousY
+        return deltaX * deltaX + deltaY * deltaY <= MAX_ANCHOR_STEP_FRACTION_SQUARED
+    }
+
     private fun registerDetectionMiss() {
         consecutiveDetectionMisses++
         if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) {
             previousBounds = null
             previousPathMedianWidthFraction = null
+            previousAnchorXFraction = null
+            previousAnchorYFraction = null
         }
     }
 
@@ -686,6 +738,8 @@ class BlackTapeDetector(
         const val MIN_TAPE_CHANNEL_BALANCE = 0.32
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
+        const val DIRECTION_SCORE_TOLERANCE = 0.08
+        const val MAX_ANCHOR_STEP_FRACTION_SQUARED = 0.09
         val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)
         val FLOOR_LAB_LOWER_DIFFERENCE = Scalar(24.0, 18.0, 18.0)
         val FLOOR_LAB_UPPER_DIFFERENCE = Scalar(24.0, 18.0, 18.0)

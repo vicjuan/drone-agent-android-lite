@@ -47,6 +47,8 @@ internal class TapePathDirectionEstimator {
         top: Int,
         right: Int,
         bottom: Int,
+        initialCenterHint: Double? = null,
+        preferRightmostInitialRun: Boolean = false,
     ): TapePathEstimate? {
         require(mask.size >= frameWidth * frameHeight)
         if (left !in 0 until right || top !in 0 until bottom) return null
@@ -73,6 +75,8 @@ internal class TapePathDirectionEstimator {
                     previousCenter,
                     previousWidth,
                     maximumLocalWidth,
+                    initialCenterHint,
+                    preferRightmostInitialRun,
                 )
             if (run == null) {
                 if (pointCount > 0 && ++missingRows > MAX_CONSECUTIVE_MISSING_ROWS) break
@@ -180,6 +184,9 @@ internal class TapePathDirectionEstimator {
         right: Int,
         bottom: Int,
         expectedMedianWidthFraction: Double? = null,
+        preferredNearFieldX: Double? = null,
+        preferredNearFieldY: Double? = null,
+        preferRightToLeft: Boolean = false,
     ): TapePathEstimate? {
         require(mask.size >= frameWidth * frameHeight)
         if (left !in 0 until right || top !in 0 until bottom) return null
@@ -225,9 +232,15 @@ internal class TapePathDirectionEstimator {
             maximumTrackedWidth = maximumTrackedWidth,
             expectedWidth = expectedWidth,
         )
-        val trace = listOfNotNull(leftToRight, rightToLeft).maxByOrNull {
-            it.nearFieldCenterY + it.arcLength / frameShortSide
-        } ?: return null
+        val trace =
+            selectHorizontalTrace(
+                leftToRight,
+                rightToLeft,
+                preferredNearFieldX,
+                preferredNearFieldY,
+                preferRightToLeft,
+                frameShortSide,
+            ) ?: return null
         val arcLengthFraction = trace.arcLength / frameShortSide
         if (arcLengthFraction < MIN_ARC_LENGTH_FRACTION) return null
 
@@ -300,6 +313,30 @@ internal class TapePathDirectionEstimator {
             ),
             horizontalFallback = true,
         )
+    }
+
+    private fun selectHorizontalTrace(
+        leftToRight: HorizontalTrace?,
+        rightToLeft: HorizontalTrace?,
+        preferredNearFieldX: Double?,
+        preferredNearFieldY: Double?,
+        preferRightToLeft: Boolean,
+        frameShortSide: Double,
+    ): HorizontalTrace? {
+        val available = listOfNotNull(leftToRight, rightToLeft)
+        if (available.isEmpty()) return null
+        if (preferredNearFieldX != null && preferredNearFieldY != null) {
+            return available.minByOrNull {
+                hypot(
+                    it.nearFieldCenterX - preferredNearFieldX,
+                    it.nearFieldCenterY - preferredNearFieldY,
+                )
+            }
+        }
+        if (preferRightToLeft && rightToLeft != null) return rightToLeft
+        return available.maxByOrNull {
+            it.nearFieldCenterY + it.arcLength / frameShortSide
+        }
     }
 
     private fun traceColumns(
@@ -507,6 +544,8 @@ internal class TapePathDirectionEstimator {
         previousCenter: Double,
         previousWidth: Double,
         maximumLocalWidth: Double,
+        initialCenterHint: Double?,
+        preferRightmostInitialRun: Boolean,
     ): PixelRun? {
         var best: PixelRun? = null
         var x = left
@@ -518,7 +557,22 @@ internal class TapePathDirectionEstimator {
             val candidate = PixelRun(runStart, x)
             if (candidate.width > maximumLocalWidth) continue
             if (previousCenter.isNaN()) {
-                if (best == null || candidate.width > best.width) best = candidate
+                val candidateCost =
+                    initialCenterHint?.let { abs(candidate.center - it) } ?: -candidate.width
+                val bestCost = best?.let {
+                    initialCenterHint?.let { hint -> abs(it.center - hint) } ?: -it.width
+                }
+                if (
+                    bestCost == null ||
+                    candidateCost < bestCost ||
+                    (
+                        candidateCost == bestCost &&
+                            preferRightmostInitialRun &&
+                            candidate.center > checkNotNull(best).center
+                        )
+                ) {
+                    best = candidate
+                }
                 continue
             }
             val candidateCost =

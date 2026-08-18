@@ -142,6 +142,75 @@ class TapePathDirectionEstimatorTest {
     }
 
     @Test
+    fun `counterclockwise acquisition starts from the right side of a rainbow`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (x in 100 until 541) {
+            val horizontalFraction = (x - 320.0) / 220.0
+            val centerY = 280.0 - 110.0 * (1.0 - horizontalFraction * horizontalFraction)
+            fillColumnRun(mask, x, centerY, halfWidth = 15)
+        }
+
+        val estimate =
+            checkNotNull(
+                estimator.estimateHorizontalFallback(
+                    mask = mask,
+                    frameWidth = FRAME_WIDTH,
+                    frameHeight = FRAME_HEIGHT,
+                    left = 90,
+                    top = 140,
+                    right = 551,
+                    bottom = 310,
+                    preferRightToLeft = true,
+                ),
+            )
+
+        assertTrue(estimate.nearFieldCenterX > 500.0)
+        assertTrue(estimate.lookaheadCenterX < estimate.nearFieldCenterX)
+    }
+
+    @Test
+    fun `vertical rainbow trace keeps the previous right side anchor`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (y in 120 until 301) {
+            val progress = (y - 120.0) / 180.0
+            val halfSpan = 170.0 * kotlin.math.sqrt(progress)
+            fillRun(mask, y, centerX = 320.0 - halfSpan, halfWidth = 15)
+            fillRun(mask, y, centerX = 320.0 + halfSpan, halfWidth = 15)
+        }
+
+        val acquired =
+            checkNotNull(
+                estimator.estimate(
+                    mask = mask,
+                    frameWidth = FRAME_WIDTH,
+                    frameHeight = FRAME_HEIGHT,
+                    left = 120,
+                    top = 100,
+                    right = 521,
+                    bottom = 320,
+                    preferRightmostInitialRun = true,
+                ),
+            )
+        val continued =
+            checkNotNull(
+                estimator.estimate(
+                    mask = mask,
+                    frameWidth = FRAME_WIDTH,
+                    frameHeight = FRAME_HEIGHT,
+                    left = 120,
+                    top = 100,
+                    right = 521,
+                    bottom = 320,
+                    initialCenterHint = acquired.nearFieldCenterX,
+                ),
+            )
+
+        assertTrue(acquired.nearFieldCenterX > 450.0)
+        assertTrue(acquired.lookaheadCenterX < acquired.nearFieldCenterX)
+        assertEquals(acquired.nearFieldCenterX, continued.nearFieldCenterX, 1.0)
+    }
+
+    @Test
     fun `horizontal fallback rejects a ribbon whose width no longer matches tracking`() {
         val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
         for (x in 100 until 550) {

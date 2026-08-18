@@ -207,6 +207,37 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun rainbowTapeAcquiresTheRightEndpointForCounterclockwiseTracking() {
+        val width = 640
+        val height = 360
+        val detection =
+            checkNotNull(
+                detectSequence(listOf(rainbowFrame(width, height)), width, height).single(),
+            )
+
+        assertTrue(detection.anchorXFraction > 0.75)
+        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
+    }
+
+    @Test
+    fun rainbowTrackingDoesNotSwitchToTheLowerLeftEndpoint() {
+        val width = 640
+        val height = 360
+        val detections =
+            detectSequence(
+                listOf(
+                    rainbowFrame(width, height),
+                    rainbowFrame(width, height, leftEndpointDrop = 40.0),
+                ),
+                width,
+                height,
+            ).map(::checkNotNull)
+
+        assertTrue(detections.all { it.anchorXFraction > 0.75 })
+        assertTrue(detections.all { it.lookaheadXFraction < it.anchorXFraction })
+    }
+
+    @Test
     fun trackedTapeReacquiresHorizontallyWithoutSelectingThinFloorSeam() {
         val width = 640
         val height = 360
@@ -369,6 +400,34 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(null, detection)
     }
+    private fun rainbowFrame(
+        width: Int,
+        height: Int,
+        leftEndpointDrop: Double = 0.0,
+    ): ByteArray {
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (x in 100 until 541) {
+            val horizontalFraction = (x - 320.0) / 220.0
+            val drop = leftEndpointDrop * (540.0 - x) / 440.0
+            val centerY =
+                (
+                    280.0 -
+                        110.0 * (1.0 - horizontalFraction * horizontalFraction) +
+                        drop
+                    ).toInt()
+            fillRect(
+                frame,
+                width,
+                left = x,
+                top = centerY - 15,
+                right = x + 1,
+                bottom = centerY + 15,
+                value = 20,
+            )
+        }
+        return frame
+    }
+
     private fun rgbaAsset(name: String): ByteArray {
         val context = InstrumentationRegistry.getInstrumentation().context
         val bitmap = context.assets.open(name).use(BitmapFactory::decodeStream)
