@@ -13,6 +13,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
+import kotlin.math.hypot
 import kotlin.math.min
 
 /**
@@ -110,7 +111,7 @@ class BlackTapeDetector(
         (
             "mode=%s pathAxis=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
                 "floorSeeds=%d floor=%.2f rejects=invalid:%d area:%d aspect:%d length:%d " +
-                "curve:%d width:%d edge:%d fill:%d floor:%d"
+                "curve:%d width:%d edge:%d fill:%d chroma:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathAxis,
@@ -129,6 +130,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
+            rejectionCounts[TapeCandidateRejection.CHROMA.ordinal],
             rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal],
         )
 
@@ -242,6 +244,7 @@ class BlackTapeDetector(
                         contours,
                         cleanedBlackMask,
                         candidateMask,
+                        lab,
                         floorMask,
                         frameArea,
                         frameShortSide,
@@ -354,6 +357,7 @@ class BlackTapeDetector(
         contours: List<MatOfPoint>,
         blackMask: Mat,
         candidateMask: Mat,
+        lab: Mat,
         floorMask: Mat,
         frameArea: Double,
         frameShortSide: Double,
@@ -369,6 +373,7 @@ class BlackTapeDetector(
             contours = contours,
             blackMask = blackMask,
             candidateMask = candidateMask,
+            lab = lab,
             floorMask = floorMask,
             bounds = bounds,
             frameArea = frameArea,
@@ -382,6 +387,7 @@ class BlackTapeDetector(
         contours: List<MatOfPoint>,
         blackMask: Mat,
         candidateMask: Mat,
+        lab: Mat,
         floorMask: Mat,
         bounds: Rect,
         frameArea: Double,
@@ -451,6 +457,16 @@ class BlackTapeDetector(
                 floorMask.cols() - HORIZONTAL_EDGE_MARGIN
         if (!overlapsPrevious && spansFrameWidth) {
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
+            return null
+        }
+        // Measure only thresholded dark pixels inside this contour. A closed tape loop's
+        // outer contour also encloses brown floor, which must not contaminate tape colour.
+        Core.bitwise_and(candidateMask, blackMask, candidateMask)
+        val candidateMeanLab = Core.mean(lab, candidateMask)
+        val candidateChroma =
+            hypot(candidateMeanLab.`val`[1] - LAB_NEUTRAL_CHROMA, candidateMeanLab.`val`[2] - LAB_NEUTRAL_CHROMA)
+        if (candidateChroma > MAX_TAPE_CHROMA) {
+            rejectionCounts[TapeCandidateRejection.CHROMA.ordinal] += 1
             return null
         }
         val context = floorContext(floorMask, refinedBounds)
@@ -638,6 +654,8 @@ class BlackTapeDetector(
         const val MIN_PATH_CURVATURE_DEGREES = 8.0
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
+        const val LAB_NEUTRAL_CHROMA = 128.0
+        const val MAX_TAPE_CHROMA = 12.0
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
         val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)

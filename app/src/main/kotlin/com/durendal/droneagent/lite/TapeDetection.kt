@@ -86,6 +86,7 @@ internal enum class TapeCandidateRejection {
     WIDTH,
     HORIZONTAL_FRAME_EDGE,
     ORIENTED_FILL,
+    CHROMA,
     FLOOR_CONTEXT,
 }
 

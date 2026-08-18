@@ -204,6 +204,50 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(horizontal.lookaheadXFraction < horizontal.anchorXFraction)
     }
     @Test
+    fun curvedRedPlasticIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbonRgb(
+            frame,
+            width,
+            height,
+            direction = 1.0,
+            red = 120,
+            green = 20,
+            blue = 20,
+        )
+
+        val diagnostics = mutableListOf<String>()
+        val detection = detectSequence(listOf(frame), width, height, onDiagnostics = diagnostics::add).single()
+
+        assertEquals(null, detection)
+        assertTrue(diagnostics.single().contains("chroma:1"))
+    }
+
+    @Test
+    fun curvedFloorShadowIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbonRgb(
+            frame,
+            width,
+            height,
+            direction = -1.0,
+            red = 72,
+            green = 48,
+            blue = 20,
+        )
+
+        val diagnostics = mutableListOf<String>()
+        val detection = detectSequence(listOf(frame), width, height, onDiagnostics = diagnostics::add).single()
+
+        assertEquals(null, detection)
+        assertTrue(diagnostics.single().contains("chroma:1"))
+    }
+
+    @Test
     fun straightPathIsRejectedInCurvedTapeMode() {
         val width = 640
         val height = 360
@@ -341,4 +385,23 @@ class BlackTapeDetectorInstrumentedTest {
             fillRect(frame, frameWidth, left, y, right, y + 1, value)
         }
     }
+    private fun fillCurvedRibbonRgb(
+        frame: ByteArray,
+        frameWidth: Int,
+        frameHeight: Int,
+        direction: Double,
+        red: Int,
+        green: Int,
+        blue: Int,
+    ) {
+        for (y in 0 until frameHeight) {
+            val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
+            val center =
+                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
+            val left = (center - 15.0).toInt().coerceAtLeast(0)
+            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
+            fillRectRgb(frame, frameWidth, left, y, right, y + 1, red, green, blue)
+        }
+    }
+
 }
