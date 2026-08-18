@@ -48,7 +48,8 @@ class BlackTapeDetectorInstrumentedTest {
         val terminalTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
         fillRect(terminalTape, width, left = 300, top = 290, right = 340, bottom = height, value = 20)
 
-        val detections = detectSequence(listOf(fullTape, terminalTape), width, height)
+        val detections =
+            detectSequence(listOf(fullTape, terminalTape), width, height, TapeDetectionMode.STRAIGHT)
         assertTrue(detections[0] != null)
         val terminal = checkNotNull(detections[1])
         assertEquals(0.0, terminal.angleFromVerticalDegrees, 1.0)
@@ -57,7 +58,7 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun curvedTapeReportsItsLookaheadDirection() {
+    fun previewModeDetectsCurvedTapeWithoutStartingTracking() {
         val width = 640
         val height = 360
         val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
@@ -68,7 +69,6 @@ class BlackTapeDetectorInstrumentedTest {
                 frames = listOf(frame),
                 width = width,
                 height = height,
-                mode = TapeDetectionMode.CURVED,
             ).single(),
         )
 
@@ -78,7 +78,7 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection =
-        checkNotNull(detectSequence(listOf(frame), width, height).single()) {
+        checkNotNull(detectSequence(listOf(frame), width, height, TapeDetectionMode.STRAIGHT).single()) {
             "detector rejected the synthetic tape"
         }
 
@@ -86,14 +86,14 @@ class BlackTapeDetectorInstrumentedTest {
         frames: List<ByteArray>,
         width: Int,
         height: Int,
-        mode: TapeDetectionMode = TapeDetectionMode.STRAIGHT,
+        mode: TapeDetectionMode? = null,
     ): List<TapeDetection?> {
         val outcomes = LinkedBlockingQueue<DetectionOutcome>()
         val detector = BlackTapeDetector(
             onResult = { outcomes.offer(DetectionOutcome(it, null)) },
             onError = { outcomes.offer(DetectionOutcome(null, it)) },
         )
-        detector.setDetectionMode(mode)
+        mode?.let(detector::setDetectionMode)
         try {
             return frames.mapIndexed { index, frame ->
                 if (index > 0) Thread.sleep(300)

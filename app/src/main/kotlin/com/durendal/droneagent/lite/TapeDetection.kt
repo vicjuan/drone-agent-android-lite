@@ -1,9 +1,14 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.atan2
+
+/**
+ * PATH follows a sampled tape centerline and is the passive preview default, so
+ * curved tape is outlined before the operator enables autonomous tracking.
+ */
 internal enum class TapeDetectionMode {
     STRAIGHT,
-    CURVED,
+    PATH,
 }
 
 /** A black-tape candidate expressed in source-frame proportions. */

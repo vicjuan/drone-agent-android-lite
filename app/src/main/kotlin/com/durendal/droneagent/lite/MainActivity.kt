@@ -643,7 +643,7 @@ class MainActivity : Activity() {
                         tapeEndpointTurn = false
                         tapeDetector?.setDetectionMode(
                             if (mode == TapeTrackingMode.CIRCULAR) {
-                                TapeDetectionMode.CURVED
+                                TapeDetectionMode.PATH
                             } else {
                                 TapeDetectionMode.STRAIGHT
                             },
@@ -845,7 +845,7 @@ class MainActivity : Activity() {
             mainHandler.removeCallbacks(headingTurnTickRunnable)
         }
         tapeTracking.stop()
-        tapeDetector?.setDetectionMode(TapeDetectionMode.STRAIGHT)
+        tapeDetector?.setDetectionMode(TapeDetectionMode.PATH)
         tapeTrackingStartPending = false
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
         gimbal.setInput(0.0, 0.0)

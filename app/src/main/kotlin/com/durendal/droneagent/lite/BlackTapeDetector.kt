@@ -34,7 +34,7 @@ class BlackTapeDetector(
     private val closed = AtomicBoolean(false)
     private val lastAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
-    @Volatile private var detectionMode = TapeDetectionMode.STRAIGHT
+    @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
     @Volatile private var lastEffectiveThreshold = 0.0
@@ -42,7 +42,7 @@ class BlackTapeDetector(
     @Volatile private var lastContourCount = 0
     private val rejectionCounts = IntArray(TapeCandidateRejection.entries.size)
     private var luminanceBytes = ByteArray(0)
-    @Volatile private var lastDetectionMode = TapeDetectionMode.STRAIGHT
+    @Volatile private var lastDetectionMode = TapeDetectionMode.PATH
     @Volatile private var lastPathSampleCount = 0
     private val pathDirectionEstimator = TapePathDirectionEstimator()
     private var candidateMaskBytes = ByteArray(0)
@@ -146,17 +146,17 @@ class BlackTapeDetector(
         lastDetectionMode = mode
         lastPathSampleCount = 0
         val closeKernel = Imgproc.getStructuringElement(
-            if (mode == TapeDetectionMode.CURVED) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
-            if (mode == TapeDetectionMode.CURVED) {
-                Size(CURVED_CLOSE_KERNEL_SIZE, CURVED_CLOSE_KERNEL_SIZE)
+            if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
+            if (mode == TapeDetectionMode.PATH) {
+                Size(PATH_CLOSE_KERNEL_SIZE, PATH_CLOSE_KERNEL_SIZE)
             } else {
                 Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT)
             },
         )
         val openKernel = Imgproc.getStructuringElement(
-            if (mode == TapeDetectionMode.CURVED) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
-            if (mode == TapeDetectionMode.CURVED) {
-                Size(CURVED_OPEN_KERNEL_SIZE, CURVED_OPEN_KERNEL_SIZE)
+            if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
+            if (mode == TapeDetectionMode.PATH) {
+                Size(PATH_OPEN_KERNEL_SIZE, PATH_OPEN_KERNEL_SIZE)
             } else {
                 Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_OPEN_KERNEL_HEIGHT)
             },
@@ -299,8 +299,8 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
             return null
         }
-        if (mode == TapeDetectionMode.CURVED) {
-            return scoreCurvedCandidate(
+        if (mode == TapeDetectionMode.PATH) {
+            return scorePathCandidate(
                 contourIndex,
                 contours,
                 blackMask,
@@ -357,7 +357,7 @@ class BlackTapeDetector(
         )
     }
 
-    private fun scoreCurvedCandidate(
+    private fun scorePathCandidate(
         contourIndex: Int,
         contours: List<MatOfPoint>,
         blackMask: Mat,
@@ -369,7 +369,7 @@ class BlackTapeDetector(
         frameShortSide: Double,
     ): Candidate? {
         val areaFraction = contourArea / frameArea
-        if (areaFraction !in MIN_CURVED_AREA_FRACTION..MAX_CURVED_AREA_FRACTION) {
+        if (areaFraction !in MIN_PATH_AREA_FRACTION..MAX_PATH_AREA_FRACTION) {
             rejectionCounts[TapeCandidateRejection.AREA.ordinal] += 1
             return null
         }
@@ -383,7 +383,7 @@ class BlackTapeDetector(
             return null
         }
         val surroundingBrown = surroundingBrownFraction(brownMask, bounds)
-        if (surroundingBrown < MIN_CURVED_SURROUNDING_BROWN) {
+        if (surroundingBrown < MIN_PATH_SURROUNDING_BROWN) {
             rejectionCounts[TapeCandidateRejection.BROWN_CONTEXT.ordinal] += 1
             return null
         }
@@ -410,13 +410,13 @@ class BlackTapeDetector(
             return null
         }
         val minimumPathFraction =
-            if (overlapsPrevious) MIN_TRACKED_CURVED_PATH_FRACTION else MIN_CURVED_PATH_FRACTION
+            if (overlapsPrevious) MIN_TRACKED_PATH_FRACTION else MIN_PATH_FRACTION
         if (path.arcLengthFraction < minimumPathFraction) {
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
         val pathConfidence =
-            (path.arcLengthFraction / IDEAL_CURVED_PATH_FRACTION).coerceIn(0.0, 1.0)
+            (path.arcLengthFraction / IDEAL_PATH_FRACTION).coerceIn(0.0, 1.0)
         val continuityConfidence = if (overlapsPrevious) 1.0 else 0.5
         val score = (
             surroundingBrown * 0.35 +
@@ -566,14 +566,14 @@ class BlackTapeDetector(
         const val TAPE_MASK_KERNEL_WIDTH = 3.0
         const val VERTICAL_OPEN_KERNEL_HEIGHT = 31.0
         const val VERTICAL_CLOSE_KERNEL_HEIGHT = 25.0
-        const val CURVED_CLOSE_KERNEL_SIZE = 5.0
-        const val CURVED_OPEN_KERNEL_SIZE = 3.0
-        const val MIN_CURVED_AREA_FRACTION = 0.0008
-        const val MAX_CURVED_AREA_FRACTION = 0.18
-        const val MIN_CURVED_SURROUNDING_BROWN = 0.22
-        const val MIN_CURVED_PATH_FRACTION = 0.20
-        const val MIN_TRACKED_CURVED_PATH_FRACTION = 0.12
-        const val IDEAL_CURVED_PATH_FRACTION = 0.80
+        const val PATH_CLOSE_KERNEL_SIZE = 5.0
+        const val PATH_OPEN_KERNEL_SIZE = 3.0
+        const val MIN_PATH_AREA_FRACTION = 0.0008
+        const val MAX_PATH_AREA_FRACTION = 0.18
+        const val MIN_PATH_SURROUNDING_BROWN = 0.22
+        const val MIN_PATH_FRACTION = 0.20
+        const val MIN_TRACKED_PATH_FRACTION = 0.12
+        const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
