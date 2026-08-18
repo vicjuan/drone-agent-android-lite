@@ -9,6 +9,7 @@ internal enum class TurnDirection(val commandSign: Double, val label: String) {
 internal class HeadingTurn(
     val direction: TurnDirection,
     initialHeadingDegrees: Double,
+    private val targetDegrees: Double = TARGET_DEGREES,
 ) {
     private var directedDisplacementDegrees = 0.0
     private var previousHeadingDegrees = initialHeadingDegrees
@@ -20,7 +21,7 @@ internal class HeadingTurn(
         val signedDelta = shortestAngularDelta(previousHeadingDegrees, headingDegrees)
         previousHeadingDegrees = headingDegrees
         directedDisplacementDegrees += signedDelta * direction.commandSign
-        return (TARGET_DEGREES - progressDegrees).coerceAtLeast(0.0)
+        return (targetDegrees - progressDegrees).coerceAtLeast(0.0)
     }
 
     companion object {

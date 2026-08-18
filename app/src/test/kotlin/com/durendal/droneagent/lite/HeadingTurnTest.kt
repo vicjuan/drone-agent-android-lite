@@ -25,6 +25,17 @@ class HeadingTurnTest {
     }
 
     @Test
+    fun `full circle target accumulates one clockwise revolution`() {
+        val circle = HeadingTurn(TurnDirection.RIGHT, 170.0, targetDegrees = 360.0)
+
+        assertEquals(270.0, circle.update(-100.0), 0.0)
+        assertEquals(180.0, circle.update(-10.0), 0.0)
+        assertEquals(90.0, circle.update(80.0), 0.0)
+        assertEquals(0.0, circle.update(170.0), 0.0)
+        assertEquals(360.0, circle.progressDegrees, 0.0)
+    }
+
+    @Test
     fun `opposite drift does not create directed progress`() {
         val turn = HeadingTurn(TurnDirection.RIGHT, 0.0)
 

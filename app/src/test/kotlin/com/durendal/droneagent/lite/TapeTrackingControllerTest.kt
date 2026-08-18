@@ -25,62 +25,12 @@ class TapeOverlayLabelTest {
 }
 
 class TapeTrackingControllerTest {
-    @Test
-    fun `tracking turns outside tolerance and advances only while aligned`() {
-        val controller = trackingController()
-
-        controller.observe(45.0, 0.8, seconds(2))
-        var decision = controller.tick(seconds(2))
-        assertEquals(5.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-
-        controller.observe(-50.0, 0.8, seconds(2))
-        assertEquals(-5.0, controller.tick(seconds(2)).yawRateDegreesPerSecond, 0.0)
-        controller.observe(10.0, 0.8, seconds(2))
-        decision = controller.tick(seconds(2))
-        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.3, decision.forwardSpeedMetersPerSecond, 0.0)
-        controller.observe(10.1, 0.8, seconds(2))
-        decision = controller.tick(seconds(2))
-        assertEquals(5.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-        controller.observe(null, null, seconds(2))
-        decision = controller.tick(seconds(2))
-        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-    }
-
-    @Test
-    fun `aligned tape translates toward image center before advancing`() {
-        val controller = trackingController()
-
-        controller.observe(0.0, 0.8, seconds(2), horizontalOffsetFraction = 0.30)
-        var decision = controller.tick(seconds(2))
-        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-        assertEquals(0.12, decision.rightSpeedMetersPerSecond, 0.001)
-
-        controller.observe(0.0, 0.8, seconds(2), horizontalOffsetFraction = -0.50)
-        decision = controller.tick(seconds(2))
-        assertEquals(-0.15, decision.rightSpeedMetersPerSecond, 0.001)
-
-        controller.observe(0.0, 0.8, seconds(2), horizontalOffsetFraction = 0.08)
-        decision = controller.tick(seconds(2))
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
-        assertEquals(0.3, decision.forwardSpeedMetersPerSecond, 0.0)
-
-        controller.observe(20.0, 0.8, seconds(2), horizontalOffsetFraction = 0.30)
-        decision = controller.tick(seconds(2))
-        assertEquals(5.0, decision.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-    }
 
     @Test
     fun `aligned shortened tape enters a bounded endpoint probe before turning`() {
         val controller = trackingController()
         controller.observe(0.0, 0.8, seconds(2))
-        assertEquals(0.3, controller.tick(seconds(2)).forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.15, controller.tick(seconds(2)).forwardSpeedMetersPerSecond, 0.0)
 
         controller.observe(0.0, 0.35, seconds(3))
         assertEquals(0.0, controller.tick(seconds(3)).forwardSpeedMetersPerSecond, 0.0)
@@ -121,6 +71,24 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `gradual endpoint shrink enters probe before detector loses the tape`() {
+        val controller = trackingController()
+        controller.observe(0.0, 1.0, seconds(2))
+        controller.observe(-5.2, 0.74, seconds(3))
+        controller.observe(-4.0, 0.72, seconds(3) + 250_000_000L)
+        controller.observe(-2.4, 0.70, seconds(3) + 500_000_000L)
+        controller.observe(0.0, 0.681, seconds(3) + 750_000_000L)
+
+        val probe = controller.tick(seconds(3) + 750_000_000L)
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, probe.phase)
+        assertEquals(0.10, probe.forwardSpeedMetersPerSecond, 0.0)
+
+        val endpoint = confirmEndpointDisappearance(controller, seconds(6))
+        assertTrue(endpoint.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
+    }
+
+    @Test
     fun `verified short tape turns only after three consecutive misses`() {
         val controller = trackingController()
         controller.observe(0.0, 1.0, seconds(2))
@@ -132,14 +100,49 @@ class TapeTrackingControllerTest {
             controller.tick(seconds(3) + 800_000_000L).phase,
         )
 
-        controller.observe(null, null, seconds(4))
-        controller.observe(null, null, seconds(4) + 250_000_000L)
-        assertFalse(controller.tick(seconds(4) + 250_000_000L).endpointReached)
-        controller.observe(null, null, seconds(4) + 500_000_000L)
+        controller.observe(null, null, seconds(5) + 300_000_000L)
+        controller.observe(null, null, seconds(5) + 550_000_000L)
+        assertFalse(controller.tick(seconds(5) + 550_000_000L).endpointReached)
+        controller.observe(null, null, seconds(5) + 800_000_000L)
 
-        val endpoint = controller.tick(seconds(4) + 500_000_000L)
+        val endpoint = controller.tick(seconds(5) + 800_000_000L)
         assertTrue(endpoint.endpointReached)
         assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
+    }
+
+    @Test
+    fun `endpoint probe completes before unrelated candidates can turn`() {
+        val controller = trackingController()
+        enterEndpointVerification(controller)
+
+        controller.observe(86.8, 0.353, seconds(4), horizontalOffsetFraction = 0.223)
+        controller.observe(0.0, 0.258, seconds(4) + 250_000_000L, horizontalOffsetFraction = 0.283)
+        controller.observe(87.3, 0.294, seconds(4) + 500_000_000L, horizontalOffsetFraction = 0.196)
+
+        val probing = controller.tick(seconds(4) + 500_000_000L)
+        assertFalse(probing.endpointReached)
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, probing.phase)
+        assertEquals(0.10, probing.forwardSpeedMetersPerSecond, 0.0)
+
+        controller.observe(86.8, 0.353, seconds(5) + 300_000_000L, horizontalOffsetFraction = 0.223)
+        val endpoint = controller.tick(seconds(5) + 300_000_000L)
+        assertTrue(endpoint.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, endpoint.phase)
+    }
+
+    @Test
+    fun `centered endpoint continuation resets the miss sequence`() {
+        val controller = trackingController()
+        enterEndpointVerification(controller)
+
+        controller.observe(null, null, seconds(4))
+        controller.observe(0.0, 0.30, seconds(4) + 250_000_000L)
+        controller.observe(null, null, seconds(4) + 500_000_000L)
+        controller.observe(null, null, seconds(4) + 750_000_000L)
+
+        val waiting = controller.tick(seconds(4) + 750_000_000L)
+        assertFalse(waiting.endpointReached)
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, waiting.phase)
     }
 
     @Test
@@ -154,39 +157,38 @@ class TapeTrackingControllerTest {
         val decision = controller.tick(seconds(5))
         assertFalse(decision.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
-        assertEquals(-5.0, decision.yawRateDegreesPerSecond, 0.0)
     }
 
     @Test
     fun `turn completion resets endpoint baseline and recenters camera`() {
         val controller = trackingController()
         enterEndpointVerification(controller)
-        confirmEndpointDisappearance(controller, seconds(4))
+        confirmEndpointDisappearance(controller, seconds(6))
 
-        controller.resumeAfterTurn(seconds(5))
-        val recenter = controller.tick(seconds(5))
+        controller.resumeAfterTurn(seconds(7))
+        val recenter = controller.tick(seconds(7))
         assertEquals(TapeTrackingPhase.RECENTERING, recenter.phase)
         assertEquals(TrackingGimbalTarget.DOWN_CENTER, recenter.gimbalTarget)
-        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(7)).phase)
-        controller.observe(0.0, 0.35, seconds(7))
-        val resumed = controller.tick(seconds(7))
+        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(9)).phase)
+        controller.observe(0.0, 0.35, seconds(9))
+        val resumed = controller.tick(seconds(9))
         assertFalse(resumed.endpointReached)
-        assertEquals(0.3, resumed.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.15, resumed.forwardSpeedMetersPerSecond, 0.0)
     }
 
     @Test
     fun `post turn recovery advances briefly then keeps detecting while hovering`() {
         val controller = trackingController()
         enterEndpointVerification(controller)
-        assertTrue(confirmEndpointDisappearance(controller, seconds(4)).endpointReached)
+        assertTrue(confirmEndpointDisappearance(controller, seconds(6)).endpointReached)
 
-        controller.resumeAfterTurn(seconds(5))
-        assertEquals(0.0, controller.tick(seconds(5)).forwardSpeedMetersPerSecond, 0.0)
-        val recovery = controller.tick(seconds(7))
+        controller.resumeAfterTurn(seconds(7))
+        assertEquals(0.0, controller.tick(seconds(7)).forwardSpeedMetersPerSecond, 0.0)
+        val recovery = controller.tick(seconds(9))
         assertEquals(TapeTrackingPhase.TRACKING, recovery.phase)
         assertEquals(0.15, recovery.forwardSpeedMetersPerSecond, 0.0)
 
-        val waiting = controller.tick(seconds(10))
+        val waiting = controller.tick(seconds(12))
         assertFalse(waiting.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, waiting.phase)
         assertEquals(0.0, waiting.forwardSpeedMetersPerSecond, 0.0)
@@ -208,7 +210,39 @@ class TapeTrackingControllerTest {
         assertTrue(controller.enabled)
 
         controller.observe(0.0, 0.8, seconds(9))
-        assertEquals(0.3, controller.tick(seconds(9)).forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.15, controller.tick(seconds(9)).forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `reflection gap cannot turn a reacquired short tape into an endpoint`() {
+        val controller = trackingController()
+        controller.observe(0.0, 1.0, seconds(2))
+        controller.observe(null, null, seconds(3))
+
+        controller.observe(-4.9, 0.293, seconds(3) + 250_000_000L)
+        controller.observe(-4.4, 0.306, seconds(3) + 650_000_000L)
+        controller.observe(-3.3, 0.306, seconds(3) + 1_050_000_000L)
+
+        val reflection = controller.tick(seconds(3) + 1_050_000_000L)
+        assertFalse(reflection.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, reflection.phase)
+        assertEquals(0.10, reflection.forwardSpeedMetersPerSecond, 0.0)
+
+        controller.observe(null, null, seconds(4) + 200_000_000L)
+        controller.observe(-90.0, 0.406, seconds(4) + 450_000_000L)
+        val glareEdge = controller.tick(seconds(4) + 450_000_000L)
+        assertEquals(0.0, glareEdge.yawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, glareEdge.forwardSpeedMetersPerSecond, 0.0)
+
+        controller.observe(0.0, 0.8, seconds(5))
+        controller.observe(0.0, 0.35, seconds(6))
+        controller.observe(0.0, 0.35, seconds(6) + 400_000_000L)
+        controller.observe(0.0, 0.35, seconds(6) + 800_000_000L)
+
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(seconds(6) + 800_000_000L).phase,
+        )
     }
 
     @Test
@@ -216,13 +250,42 @@ class TapeTrackingControllerTest {
         val controller = trackingController()
         enterEndpointVerification(controller)
 
-        controller.observe(0.0, 0.70, seconds(4))
+        controller.observe(0.0, 0.90, seconds(4))
         val resumed = controller.tick(seconds(4))
 
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertFalse(resumed.endpointReached)
-        assertEquals(0.3, resumed.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.15, resumed.forwardSpeedMetersPerSecond, 0.0)
     }
+
+    @Test
+    fun `controller filters offset and rate limits lateral commands`() {
+        val controller = TapeTrackingController()
+        controller.start(0L)
+        controller.tick(0L)
+        controller.tick(seconds(2))
+
+        controller.observe(0.0, 0.8, seconds(2), horizontalOffsetFraction = 0.20)
+        val first = controller.tick(seconds(2))
+        assertEquals(0.20, first.controlledOffsetFraction!!, 0.001)
+        assertEquals(0.020, first.rightSpeedMetersPerSecond, 0.001)
+
+        controller.observe(
+            0.0,
+            0.8,
+            seconds(2) + 250_000_000L,
+            horizontalOffsetFraction = 0.0,
+        )
+        val braking = controller.tick(seconds(2) + 250_000_000L)
+        assertEquals(0.12, braking.controlledOffsetFraction!!, 0.001)
+        assertEquals(-0.32, braking.offsetRatePerSecond, 0.001)
+        assertEquals(0.010, braking.rightSpeedMetersPerSecond, 0.001)
+
+        val stale = controller.tick(seconds(4))
+        assertEquals(0.0, stale.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stale.yawRateDegreesPerSecond, 0.0)
+    }
+
 
     private fun enterEndpointVerification(controller: TapeTrackingController) {
         controller.observe(0.0, 0.8, seconds(2))

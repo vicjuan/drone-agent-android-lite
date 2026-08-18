@@ -93,12 +93,19 @@ class BlackTapeDetector(
     }
 
     fun diagnosticsSummary(): String =
-        "otsu=%.1f effective=%.1f separation=%.1f contours=%d rejects=shape:%d edge:%d fill:%d brown:%d".format(
+        (
+            "otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
+                "rejects=invalid:%d area:%d aspect:%d length:%d width:%d edge:%d fill:%d brown:%d"
+            ).format(
             lastOtsuThreshold,
             lastEffectiveThreshold,
             lastClassSeparation,
             lastContourCount,
-            rejectionCounts[TapeCandidateRejection.SHAPE.ordinal],
+            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal],
+            rejectionCounts[TapeCandidateRejection.AREA.ordinal],
+            rejectionCounts[TapeCandidateRejection.ASPECT.ordinal],
+            rejectionCounts[TapeCandidateRejection.LENGTH.ordinal],
+            rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
             rejectionCounts[TapeCandidateRejection.BROWN_CONTEXT.ordinal],
@@ -116,12 +123,22 @@ class BlackTapeDetector(
         val blurred = Mat()
         val hsv = Mat()
         val blackMask = Mat()
-        val openedBlackMask = Mat()
+        val bridgedBlackMask = Mat()
         val brownMask = Mat()
         val cleanedBlackMask = Mat()
         val hierarchy = Mat()
-        val openKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
-        val closeKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
+        // Fluorescent glare creates short bright gaps inside the black tape. Close only
+        // along its axis so those fragments reconnect without merging nearby objects.
+        val closeKernel = Imgproc.getStructuringElement(
+            Imgproc.MORPH_RECT,
+            Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT),
+        )
+        // Run opening after closing: the continuous vertical strip survives while thin
+        // horizontal cardboard seams are removed from the joined mask.
+        val openKernel = Imgproc.getStructuringElement(
+            Imgproc.MORPH_RECT,
+            Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_OPEN_KERNEL_HEIGHT),
+        )
         val contours = mutableListOf<MatOfPoint>()
         try {
             rejectionCounts.fill(0)
@@ -165,8 +182,8 @@ class BlackTapeDetector(
 
             Imgproc.cvtColor(rgb, hsv, Imgproc.COLOR_RGB2HSV)
             Core.inRange(hsv, BROWN_MIN_HSV, BROWN_MAX_HSV, brownMask)
-            Imgproc.morphologyEx(blackMask, openedBlackMask, Imgproc.MORPH_OPEN, openKernel)
-            Imgproc.morphologyEx(openedBlackMask, cleanedBlackMask, Imgproc.MORPH_CLOSE, closeKernel)
+            Imgproc.morphologyEx(blackMask, bridgedBlackMask, Imgproc.MORPH_CLOSE, closeKernel)
+            Imgproc.morphologyEx(bridgedBlackMask, cleanedBlackMask, Imgproc.MORPH_OPEN, openKernel)
             Imgproc.findContours(
                 cleanedBlackMask,
                 contours,
@@ -220,7 +237,7 @@ class BlackTapeDetector(
             openKernel.release()
             cleanedBlackMask.release()
             brownMask.release()
-            openedBlackMask.release()
+            bridgedBlackMask.release()
             blackMask.release()
             hsv.release()
             blurred.release()
@@ -247,7 +264,7 @@ class BlackTapeDetector(
         val orientedWidth = orientedBounds.size.width
         val orientedHeight = orientedBounds.size.height
         if (orientedWidth <= 0.0 || orientedHeight <= 0.0) {
-            rejectionCounts[TapeCandidateRejection.SHAPE.ordinal] += 1
+            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
             return null
         }
 
@@ -256,7 +273,7 @@ class BlackTapeDetector(
         val orientedArea = orientedWidth * orientedHeight
         val bounds = Imgproc.boundingRect(contour)
         if (bounds.width <= 0 || bounds.height <= 0) {
-            rejectionCounts[TapeCandidateRejection.SHAPE.ordinal] += 1
+            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
             return null
         }
         val metrics = TapeCandidateMetrics(
@@ -387,6 +404,9 @@ class BlackTapeDetector(
         const val HORIZONTAL_EDGE_MARGIN = 1
         const val MIN_SURROUND_PADDING = 8
         const val MIN_CLASS_SEPARATION_LUMINANCE = 30.0
+        const val TAPE_MASK_KERNEL_WIDTH = 3.0
+        const val VERTICAL_OPEN_KERNEL_HEIGHT = 31.0
+        const val VERTICAL_CLOSE_KERNEL_HEIGHT = 25.0
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8

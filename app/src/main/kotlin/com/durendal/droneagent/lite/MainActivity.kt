@@ -75,6 +75,7 @@ class MainActivity : Activity() {
     private lateinit var sequenceButton: PillButton
     private lateinit var cameraDownButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
+    private lateinit var circleButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
     private lateinit var gimbalPad: StickPadView
@@ -164,6 +165,14 @@ class MainActivity : Activity() {
     private var commandedTapeForwardSpeed = 0.0
     private var commandedTapeRightSpeed = 0.0
     private var tapeEndpointTurn = false
+    private var tapeCommandLoggedAtNanos = 0L
+
+    /** One operator-requested, open-loop 1 m diameter right circle. */
+    private var circleTurn: HeadingTurn? = null
+    private var circleStartPending = false
+    private var circleStartedAtNanos = 0L
+    private var circleAuthoritySeen = false
+    private var circleRenderedProgressBucket = -1
 
 
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
@@ -202,6 +211,13 @@ class MainActivity : Activity() {
                 shuttleAuthoritySeen = true
             } else if (shuttleAuthoritySeen) {
                 abortShuttle("實體遙控器已接管，持續來回已停止")
+            }
+        }
+        if (circleTurn != null) {
+            if (status.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER) {
+                circleAuthoritySeen = true
+            } else if (circleAuthoritySeen) {
+                stopCircleFlight("實體遙控器已接管，低速繞圈已停止", release = false)
             }
         }
         if (tapeTracking.enabled) {
@@ -378,6 +394,12 @@ class MainActivity : Activity() {
      * for one can never graze the other.
      */
     private fun buildTopBar(): ViewGroup = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(buildPrimaryActionRow())
+        addView(buildExperimentActionRow())
+    }
+
+    private fun buildPrimaryActionRow(): ViewGroup = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
@@ -400,6 +422,13 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
         addView(landButton, actionParams(marginStart = dp(10)))
+    }
+
+    private fun buildExperimentActionRow(): ViewGroup = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.START
+        circleButton = PillButton("低速右繞一圈", StickPadView.GREEN) { toggleCircleFlight() }
+        addView(circleButton, actionParams())
     }
 
     private fun actionParams(marginStart: Int = 0, marginEnd: Int = 0) =
@@ -510,7 +539,6 @@ class MainActivity : Activity() {
         if (tapeTracking.enabled) {
             stopTapeTracking("攝影機手動向下，黑膠帶追蹤已停止", release = true)
         }
-        render("攝影機轉向下方…")
         gimbal.rotateTo(
             CAMERA_DOWN_PITCH_DEGREES,
             0.0,
@@ -534,6 +562,7 @@ class MainActivity : Activity() {
         }
     }
 
+
     private fun startTapeTracking() {
         flightLog.write(
             "press: tape tracking registered=$registered connected=$aircraftConnected " +
@@ -548,8 +577,8 @@ class MainActivity : Activity() {
             return
         }
         if (
-            shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
-            leftStickActive || rightStickActive
+            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
+            nudging || holdingHeight || leftStickActive || rightStickActive
         ) {
             render("另一個飛行控制正在使用中")
             return
@@ -594,6 +623,7 @@ class MainActivity : Activity() {
                         commandedTapeYawRate = 0.0
                         commandedTapeForwardSpeed = 0.0
                         commandedTapeRightSpeed = 0.0
+                        tapeCommandLoggedAtNanos = 0L
                         tapeTrackingButton.text = "停止黑膠帶追蹤"
                         flightLog.write("tape tracking started avoidance=CLOSE")
                         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
@@ -647,27 +677,38 @@ class MainActivity : Activity() {
             }
             virtualStick.setYawRate(yawRate)
             virtualStick.setHorizontalVelocity(requestedForwardSpeed, requestedRightSpeed)
-            if (
+            val commandChanged =
                 yawRate != commandedTapeYawRate ||
-                requestedForwardSpeed != commandedTapeForwardSpeed ||
-                requestedRightSpeed != commandedTapeRightSpeed
-            ) {
+                    requestedForwardSpeed != commandedTapeForwardSpeed ||
+                    requestedRightSpeed != commandedTapeRightSpeed
+            if (commandChanged) {
                 commandedTapeYawRate = yawRate
                 commandedTapeForwardSpeed = requestedForwardSpeed
                 commandedTapeRightSpeed = requestedRightSpeed
-                flightLog.write(
-                    "tape tracking yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
-                        yawRate,
-                        requestedForwardSpeed,
-                        requestedRightSpeed,
-                    ),
-                )
+                val stopped =
+                    yawRate == 0.0 && requestedForwardSpeed == 0.0 && requestedRightSpeed == 0.0
+                if (stopped || now - tapeCommandLoggedAtNanos >= TAPE_COMMAND_LOG_PERIOD_NANOS) {
+                    tapeCommandLoggedAtNanos = now
+                    flightLog.write(
+                        "tape tracking rawAngle=${decision.rawAngleDegrees.logNumber(1)} " +
+                            "angle=${decision.controlledAngleDegrees.logNumber(1)} " +
+                            "rawOffset=${decision.rawOffsetFraction.logNumber(3)} " +
+                            "offset=${decision.controlledOffsetFraction.logNumber(3)} " +
+                            "offsetRate=%+.3f yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
+                                decision.offsetRatePerSecond,
+                                yawRate,
+                                requestedForwardSpeed,
+                                requestedRightSpeed,
+                            ),
+                    )
+                }
             }
             if (decision.phase != renderedTapeTrackingPhase) {
                 renderedTapeTrackingPhase = decision.phase
                 val status = when (decision.phase) {
                     TapeTrackingPhase.RECENTERING -> "黑膠帶追蹤：攝影機復位中"
-                    TapeTrackingPhase.TRACKING -> "黑膠帶追蹤中（方向 ±10°、橫向置中 ±8%）"
+                    TapeTrackingPhase.TRACKING ->
+                        "黑膠帶追蹤（穩定化 PD 置中、比例偏航）"
                     TapeTrackingPhase.VERIFYING_ENDPOINT ->
                         "疑似膠帶末端：低速前進確認中"
                     TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"
@@ -755,6 +796,7 @@ class MainActivity : Activity() {
         tapeTrackingAuthoritySeen = false
         tapeTrackingStartedAtNanos = 0L
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
+        tapeCommandLoggedAtNanos = 0L
         if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "黑膠帶追蹤"
         if (centerCamera && registered && aircraftConnected) {
             applyTapeTrackingGimbalTarget(TrackingGimbalTarget.DOWN_CENTER)
@@ -786,7 +828,7 @@ class MainActivity : Activity() {
                 if (
                     release && stickOwned && !stickTransitionPending &&
                     !leftStickActive && !rightStickActive && !holdingHeight &&
-                    shuttleStep == null && headingTurn == null && !nudging
+                    shuttleStep == null && headingTurn == null && circleTurn == null && !nudging
                 ) {
                     releaseControlLink { error ->
                         render(error?.let { "$restoredMessage（釋放控制權失敗：$it）" } ?: restoredMessage)
@@ -802,6 +844,9 @@ class MainActivity : Activity() {
         val isDeflected = x != 0.0 || y != 0.0
         if (isDeflected && tapeTracking.enabled) {
             stopTapeTracking("畫面搖桿已接管，黑膠帶追蹤已停止", release = false)
+        }
+        if (isDeflected && (circleTurn != null || circleStartPending)) {
+            stopCircleFlight("畫面搖桿已接管，低速繞圈已停止", release = false)
         }
         val horizontalStopReason =
             if (side == StickSide.RIGHT && isDeflected) {
@@ -868,7 +913,7 @@ class MainActivity : Activity() {
     private val idleReleaseRunnable = Runnable {
         if (
             leftStickActive || rightStickActive || holdingHeight || headingTurn != null ||
-            shuttleStep != null || tapeTracking.enabled || !stickOwned
+            circleTurn != null || shuttleStep != null || tapeTracking.enabled || !stickOwned
         ) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
@@ -917,16 +962,23 @@ class MainActivity : Activity() {
         takeoffButton.available = ready && !flying
         landButton.available = ready && flying
         val turning = headingTurn != null
+        val circling = circleTurn != null || circleStartPending
         val sequencing = shuttleStep != null
         holdButton.available =
-            ready && flying && !holdingHeight && !turning && !sequencing && !tapeTracking.enabled
-        sequenceButton.available =
-            ready && flying && !nudging && !turning && !holdingHeight && !sequencing &&
+            ready && flying && !holdingHeight && !turning && !circling && !sequencing &&
                 !tapeTracking.enabled
+        sequenceButton.available =
+            ready && flying && !nudging && !turning && !circling && !holdingHeight &&
+                !sequencing && !tapeTracking.enabled
         cameraDownButton.available = ready
         tapeTrackingButton.available =
             tapeTracking.enabled ||
-                (ready && flying && !nudging && !turning && !holdingHeight && !sequencing)
+                (ready && flying && !nudging && !turning && !circling && !holdingHeight &&
+                    !sequencing)
+        circleButton.available =
+            circling || circleStartPending ||
+                (ready && flying && !nudging && !turning && !holdingHeight && !sequencing &&
+                    !tapeTracking.enabled)
         // Sticks stay live during the shuttle: any deflection is an explicit
         // operator takeover and cancels automation before applying that input.
         leftPad.isEnabled = ready && flying
@@ -952,6 +1004,7 @@ class MainActivity : Activity() {
             append(" · heading=").append(aircraftHeadingDegrees?.let { "%.1f°".format(it) } ?: "—")
             append(" · turn=").append(headingTurn?.let { "%.0f/180°".format(it.progressDegrees) } ?: "off")
             append(" · sequence=").append(shuttleStep?.name ?: "off")
+            append(" · circle=").append(circleTurn?.let { "%.0f/360°".format(it.progressDegrees) } ?: "off")
             append(" · landingConfirmNeeded=").append(confirmationNeeded)
             append("\nbattery=").append(batteryPercent?.let { "$it%" } ?: "—")
             append(if (lowCellVoltage) " lowCell" else "")
@@ -1033,6 +1086,9 @@ class MainActivity : Activity() {
             }
         }
     }
+
+    private fun Double?.logNumber(decimalPlaces: Int): String =
+        this?.let { "%+.${decimalPlaces}f".format(it) } ?: "null"
 
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(
@@ -1424,7 +1480,10 @@ class MainActivity : Activity() {
             )
         }
         horizontalActuationStopReason()?.let { reason ->
-            if (rightStickActive || nudging) stopHorizontalActuation(reason)
+            when {
+                circleTurn != null -> stopCircleFlight("低速繞圈停止：$reason")
+                rightStickActive || nudging -> stopHorizontalActuation(reason)
+            }
         }
         if (changed || trigger == "BRAKE read-back") {
             render(failure ?: "BRAKE 已確認，水平避障資料可用")
@@ -1462,6 +1521,7 @@ class MainActivity : Activity() {
         aircraftHeadingDegrees = heading
         aircraftHeadingAtNanos = System.nanoTime()
         headingTurn?.update(heading)
+        circleTurn?.update(heading)
         driveHeadingTurn()
     }
 
@@ -1481,6 +1541,173 @@ class MainActivity : Activity() {
     }
 
     // -------------------------------------------------------- actuation ----
+    private fun toggleCircleFlight() {
+        if (circleTurn != null || circleStartPending) {
+            stopCircleFlight("低速右繞圈已由操作者停止")
+        } else {
+            startCircleFlight()
+        }
+    }
+    private fun startCircleFlight() {
+        val heading = aircraftHeadingDegrees
+        flightLog.write(
+            "press: slow circle flying=$flying heading=$heading owned=$stickOwned " +
+                "authority=${stickStatus.authority}",
+        )
+        if (!registered || !aircraftConnected || !flying) {
+            render("飛機未在空中，無法低速繞圈")
+            return
+        }
+        if (heading == null || aircraftHeadingAtNanos == 0L) {
+            render("沒有機頭方向資料，無法低速繞圈")
+            return
+        }
+        if (
+            shuttleStep != null || headingTurn != null || circleTurn != null || nudging ||
+            holdingHeight || tapeTracking.enabled || tapeTrackingStartPending ||
+            leftStickActive || rightStickActive
+        ) {
+            render("另一個飛行控制正在使用中")
+            return
+        }
+        horizontalActuationStopReason()?.let {
+            render(it)
+            return
+        }
+        circleStartPending = true
+        mainHandler.removeCallbacks(idleReleaseRunnable)
+        holdStatus = "低速右繞一圈：取得控制權…"
+        render(holdStatus)
+        acquireControlLink(
+            onFailure = { reason ->
+                circleStartPending = false
+                stopCircleFlight("低速右繞圈取消：$reason", release = false)
+            },
+        ) {
+            if (!circleStartPending) {
+                if (stickOwned && !stickTransitionPending) {
+                    releaseControlLink { render("低速右繞圈已取消") }
+                }
+                return@acquireControlLink
+            }
+            val currentHeading = aircraftHeadingDegrees
+            if (!flying || currentHeading == null) {
+                stopCircleFlight("低速右繞圈取消：飛行或機頭方向狀態失效")
+                return@acquireControlLink
+            }
+            circleTurn = HeadingTurn(
+                direction = TurnDirection.RIGHT,
+                initialHeadingDegrees = currentHeading,
+                targetDegrees = CIRCLE_TARGET_DEGREES,
+            )
+            circleStartPending = false
+            circleStartedAtNanos = System.nanoTime()
+            circleAuthoritySeen =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            circleRenderedProgressBucket = -1
+            circleButton.text = "停止低速繞圈"
+            flightLog.write(
+                "slow circle started direction=RIGHT speed=$CIRCLE_FORWARD_SPEED_MPS " +
+                    "yaw=$CIRCLE_YAW_RATE_DPS radius=$CIRCLE_RADIUS_METERS",
+            )
+            mainHandler.removeCallbacks(circleTickRunnable)
+            mainHandler.post(circleTickRunnable)
+        }
+    }
+
+    private val circleTickRunnable = object : Runnable {
+        override fun run() {
+            val circle = circleTurn ?: return
+            if (!registered || !aircraftConnected || !flying || !stickOwned) {
+                stopCircleFlight("低速右繞圈停止：飛行或控制權狀態失效", release = false)
+                return
+            }
+            val now = System.nanoTime()
+            val ownsAuthority =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            if (ownsAuthority) {
+                circleAuthoritySeen = true
+            } else {
+                virtualStick.setHorizontalVelocity(0.0, 0.0)
+                virtualStick.setYawRate(0.0)
+                if (
+                    circleAuthoritySeen ||
+                    now - circleStartedAtNanos >= AUTHORITY_HANDOVER_TIMEOUT_NANOS
+                ) {
+                    stopCircleFlight("低速右繞圈停止：未取得或已失去控制權", release = false)
+                    return
+                }
+                mainHandler.postDelayed(this, CIRCLE_TICK_MS)
+                return
+            }
+            if (
+                now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS ||
+                now - circleStartedAtNanos > CIRCLE_TIMEOUT_NANOS
+            ) {
+                stopCircleFlight(
+                    "低速右繞圈停止：機頭方向中斷或逾時（已轉 %.0f°）".format(
+                        circle.progressDegrees,
+                    ),
+                )
+                return
+            }
+            if (circle.progressDegrees >= CIRCLE_TARGET_DEGREES - CIRCLE_TOLERANCE_DEGREES) {
+                stopCircleFlight(
+                    "低速右繞一圈完成（%.0f°）".format(circle.progressDegrees),
+                )
+                return
+            }
+            horizontalActuationStopReason()?.let {
+                stopCircleFlight("低速右繞圈停止：$it")
+                return
+            }
+            virtualStick.setHorizontalVelocity(CIRCLE_FORWARD_SPEED_MPS, 0.0)
+            virtualStick.setYawRate(CIRCLE_YAW_RATE_DPS)
+            val progressBucket = (circle.progressDegrees / CIRCLE_PROGRESS_BUCKET_DEGREES).toInt()
+            if (progressBucket != circleRenderedProgressBucket) {
+                circleRenderedProgressBucket = progressBucket
+                holdStatus =
+                    "低速右繞一圈：%.0f/360°，%.2f m/s，直徑約 %.1f m".format(
+                        circle.progressDegrees,
+                        CIRCLE_FORWARD_SPEED_MPS,
+                        CIRCLE_RADIUS_METERS * 2.0,
+                    )
+                render(holdStatus)
+            }
+            mainHandler.postDelayed(this, CIRCLE_TICK_MS)
+        }
+    }
+
+    private fun stopCircleFlight(message: String, release: Boolean = true) {
+        val wasActive = circleStartPending || circleTurn != null
+        circleStartPending = false
+        if (!wasActive) {
+            render(message)
+            return
+        }
+        circleTurn = null
+        circleStartedAtNanos = 0L
+        circleAuthoritySeen = false
+        circleStartPending = false
+        circleRenderedProgressBucket = -1
+        mainHandler.removeCallbacks(circleTickRunnable)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
+        virtualStick.setYawRate(0.0)
+        if (::circleButton.isInitialized) circleButton.text = "低速右繞一圈"
+        holdStatus = message
+        flightLog.write(message)
+        if (
+            release && stickOwned && !stickTransitionPending &&
+            !leftStickActive && !rightStickActive && !holdingHeight &&
+            shuttleStep == null && headingTurn == null && !tapeTracking.enabled
+        ) {
+            releaseControlLink { error ->
+                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
+            }
+        } else {
+            render(message)
+        }
+    }
 
     private fun startShuttle() {
         flightLog.write(
@@ -1495,8 +1722,8 @@ class MainActivity : Activity() {
             return
         }
         if (
-            shuttleStep != null || headingTurn != null || nudging || holdingHeight ||
-            tapeTracking.enabled || leftStickActive || rightStickActive
+            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
+            nudging || holdingHeight || tapeTracking.enabled || leftStickActive || rightStickActive
         ) {
             render("另一個飛行控制正在使用中")
             return
@@ -1591,8 +1818,8 @@ class MainActivity : Activity() {
             return
         }
         if (
-            shuttleStep != null || headingTurn != null || holdingHeight || nudging ||
-            tapeTracking.enabled || leftStickActive || rightStickActive
+            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
+            holdingHeight || nudging || tapeTracking.enabled || leftStickActive || rightStickActive
         ) {
             render("另一個飛行控制正在使用中")
             return
@@ -1778,6 +2005,9 @@ class MainActivity : Activity() {
             abortShuttle("降落操作取消持續來回", release = false)
         }
         if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
+        if (circleTurn != null || circleStartPending) {
+            stopCircleFlight("降落操作取消低速繞圈", release = false)
+        }
         if (tapeTracking.enabled) {
             stopTapeTracking("降落操作取消黑膠帶追蹤", release = false, centerCamera = true)
         }
@@ -1921,6 +2151,9 @@ class MainActivity : Activity() {
         } else if (headingTurn != null) {
             finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
         }
+        if (circleTurn != null || circleStartPending) {
+            stopCircleFlight("飛行狀態結束，低速繞圈已停止", release = false)
+        }
         if (tapeTracking.enabled) {
             stopTapeTracking("飛行狀態結束，黑膠帶追蹤已停止", release = false)
         }
@@ -1937,6 +2170,9 @@ class MainActivity : Activity() {
         }
         if (tapeTracking.enabled) {
             stopTapeTracking("控制權釋放，黑膠帶追蹤已停止", release = false)
+        }
+        if (circleTurn != null || circleStartPending) {
+            stopCircleFlight("控制權釋放，低速繞圈已停止", release = false)
         }
         val generation = beginTransition("release") {
             onDone("釋放控制權無回應")
@@ -2186,6 +2422,10 @@ class MainActivity : Activity() {
             render("180° 旋轉進行中，無法同時定高")
             return
         }
+        if (circleTurn != null || circleStartPending) {
+            render("低速繞圈進行中，無法同時定高")
+            return
+        }
         if (tapeTracking.enabled) {
             render("黑膠帶追蹤進行中，無法同時定高")
             return
@@ -2398,6 +2638,16 @@ class MainActivity : Activity() {
         const val TURN_TIMEOUT_NANOS = 15_000_000_000L
         const val MAX_MOVING_HEADING_AGE_NANOS = 1_000_000_000L
 
+        /** Half-speed trial: both linear and angular speed are halved, preserving the 0.5 m radius. */
+        const val CIRCLE_FORWARD_SPEED_MPS = 0.05
+        const val CIRCLE_RADIUS_METERS = 0.50
+        const val CIRCLE_YAW_RATE_DPS = 5.7295779513
+        const val CIRCLE_TARGET_DEGREES = 360.0
+        const val CIRCLE_TOLERANCE_DEGREES = 2.0
+        const val CIRCLE_TICK_MS = 100L
+        const val CIRCLE_PROGRESS_BUCKET_DEGREES = 10.0
+        const val CIRCLE_TIMEOUT_NANOS = 90_000_000_000L
+
         /** Grace period before centred sticks hand the aircraft back to the RC. */
         const val STICK_IDLE_RELEASE_MS = 3_000L
 
@@ -2455,6 +2705,7 @@ class MainActivity : Activity() {
         const val TAPE_TRACKING_TICK_MS = 100L
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
+        const val TAPE_COMMAND_LOG_PERIOD_NANOS = 250_000_000L
 
         /** Registration retries before the operator has to press the button. */
         const val MAX_REGISTER_ATTEMPTS = 10

@@ -35,6 +35,22 @@ class TapeCandidatePolicyTest {
     }
 
     @Test
+    fun `thin cardboard seam shadow is rejected by tape width`() {
+        val rejection = TapeCandidatePolicy.rejectionReason(
+            TapeCandidateMetrics(
+                areaFraction = 0.0065,
+                aspectRatio = 18.5,
+                shortSideFraction = 0.025,
+                longSideFraction = 0.464,
+                orientedFill = 0.90,
+                surroundingBrown = 0.70,
+            ),
+        )
+
+        assertEquals(TapeCandidateRejection.WIDTH, rejection)
+    }
+
+    @Test
     fun `dark strip without brown cardboard context is rejected`() {
         val score = TapeCandidatePolicy.score(
             TapeCandidateMetrics(
@@ -174,6 +190,39 @@ class TapeCandidatePolicyTest {
                 orientedFill = 0.90,
                 surroundingBrown = 0.70,
                 touchesHorizontalFrameEdge = true,
+                overlapsPreviousDetection = true,
+            ),
+        )
+
+        assertNotNull(score)
+    }
+
+    @Test
+    fun `untracked short dark fragment is rejected as scenery`() {
+        val rejection = TapeCandidatePolicy.rejectionReason(
+            TapeCandidateMetrics(
+                areaFraction = 0.025,
+                aspectRatio = 1.8,
+                shortSideFraction = 0.11,
+                longSideFraction = 0.20,
+                orientedFill = 0.80,
+                surroundingBrown = 0.70,
+            ),
+        )
+
+        assertEquals(TapeCandidateRejection.ASPECT, rejection)
+    }
+
+    @Test
+    fun `overlapping terminal tape keeps continuity as its visible shape shortens`() {
+        val score = TapeCandidatePolicy.score(
+            TapeCandidateMetrics(
+                areaFraction = 0.025,
+                aspectRatio = 1.8,
+                shortSideFraction = 0.11,
+                longSideFraction = 0.20,
+                orientedFill = 0.80,
+                surroundingBrown = 0.70,
                 overlapsPreviousDetection = true,
             ),
         )

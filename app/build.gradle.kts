@@ -38,6 +38,7 @@ android {
         versionName = "0.1.0-lite"
 
         manifestPlaceholders["djiApiKey"] = djiApiKey
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // MSDK ships arm64 natives only for the aircraft package we use; keeping
         // one ABI also keeps the APK small and the build fast.
@@ -81,4 +82,6 @@ dependencies {
     // Registration talks to DJI servers through this implementation.
     runtimeOnly("com.dji:dji-sdk-v5-networkImp:$djiMsdkVersion")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

@@ -59,7 +59,11 @@ internal data class TapeCandidateMetrics(
 )
 
 internal enum class TapeCandidateRejection {
-    SHAPE,
+    INVALID_GEOMETRY,
+    AREA,
+    ASPECT,
+    LENGTH,
+    WIDTH,
     HORIZONTAL_FRAME_EDGE,
     ORIENTED_FILL,
     BROWN_CONTEXT,
@@ -73,27 +77,26 @@ internal object TapeLuminancePolicy {
 }
 
 internal object TapeCandidatePolicy {
-    fun hasPlausibleShape(
-        areaFraction: Double,
-        aspectRatio: Double,
-        shortSideFraction: Double,
-        longSideFraction: Double,
-    ): Boolean =
-        areaFraction in MIN_AREA_FRACTION..MAX_AREA_FRACTION &&
-            aspectRatio >= MIN_ASPECT_RATIO &&
-            shortSideFraction <= MAX_SHORT_SIDE_FRACTION &&
-            longSideFraction >= MIN_LONG_SIDE_FRACTION
-
     fun rejectionReason(metrics: TapeCandidateMetrics): TapeCandidateRejection? {
-        if (
-            !hasPlausibleShape(
-                metrics.areaFraction,
-                metrics.aspectRatio,
-                metrics.shortSideFraction,
-                metrics.longSideFraction,
-            )
-        ) {
-            return TapeCandidateRejection.SHAPE
+        if (metrics.areaFraction !in MIN_AREA_FRACTION..MAX_AREA_FRACTION) {
+            return TapeCandidateRejection.AREA
+        }
+        val minimumAspectRatio =
+            if (metrics.overlapsPreviousDetection) MIN_TRACKED_ASPECT_RATIO else MIN_ASPECT_RATIO
+        if (metrics.aspectRatio < minimumAspectRatio) {
+            return TapeCandidateRejection.ASPECT
+        }
+        val minimumLongSideFraction =
+            if (metrics.overlapsPreviousDetection) {
+                MIN_TRACKED_LONG_SIDE_FRACTION
+            } else {
+                MIN_LONG_SIDE_FRACTION
+            }
+        if (metrics.longSideFraction < minimumLongSideFraction) {
+            return TapeCandidateRejection.LENGTH
+        }
+        if (metrics.shortSideFraction !in MIN_SHORT_SIDE_FRACTION..MAX_SHORT_SIDE_FRACTION) {
+            return TapeCandidateRejection.WIDTH
         }
         if (metrics.touchesHorizontalFrameEdge && !metrics.overlapsPreviousDetection) {
             return TapeCandidateRejection.HORIZONTAL_FRAME_EDGE
@@ -120,8 +123,11 @@ internal object TapeCandidatePolicy {
     private const val MIN_AREA_FRACTION = 0.0008
     private const val MAX_AREA_FRACTION = 0.18
     private const val MIN_ASPECT_RATIO = 2.2
+    private const val MIN_TRACKED_ASPECT_RATIO = 1.5
+    private const val MIN_SHORT_SIDE_FRACTION = 0.035
     private const val MAX_SHORT_SIDE_FRACTION = 0.20
     private const val MIN_LONG_SIDE_FRACTION = 0.25
+    private const val MIN_TRACKED_LONG_SIDE_FRACTION = 0.15
     private const val MIN_ORIENTED_FILL = 0.30
     private const val MIN_SURROUNDING_BROWN = 0.22
     private const val IDEAL_ASPECT_RATIO = 8.0
