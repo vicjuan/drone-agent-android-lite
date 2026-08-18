@@ -15,7 +15,10 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Fixed-rate, two-axis camera-gimbal control for an analogue pad. */
+/**
+ * Two-axis camera-gimbal control: a fixed-rate speed stream for the analogue pad,
+ * plus [rotateTo] for the absolute poses autonomous tracking needs.
+ */
 class GimbalSession(
     private val onFailure: (String) -> Unit,
 ) {

@@ -31,7 +31,10 @@ class FlightLog(context: Context) {
     val path: String get() = file.absolutePath
 
     fun write(line: String) {
-        val text = "${stamp.format(Date())} $line\n"
+        // Callers are the UI thread, DJI callbacks and the virtual-stick sender, and
+        // SimpleDateFormat is not thread-safe: unsynchronised use corrupts the very
+        // timestamps this log exists to provide. Stamping still happens at call time.
+        val text = synchronized(stamp) { "${stamp.format(Date())} $line\n" }
         Log.i(TAG, line)
         writer.execute {
             runCatching { file.appendText(text) }

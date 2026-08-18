@@ -35,11 +35,14 @@ internal data class TapePathBounds(
  * connected run nearest the previous row gives a cheap local centerline without mistaking the
  * contour's bounding-box chord for its direction. The steering tangent is measured 40% of the
  * traced arc ahead, matching the look-ahead convention proven in the full drone-agent vision
- * pipeline. A path that turns horizontal enough to stop producing a bounded local run fails
- * closed instead of inventing a direction.
+ * pipeline.
+ *
+ * [estimateVerticalPath] walks rows upward and fails closed once the path turns horizontal
+ * enough to stop producing a bounded local run. [estimateHorizontalFallback] then walks
+ * columns instead, so an arc lying across the frame is still followable rather than lost.
  */
 internal class TapePathDirectionEstimator {
-    fun estimate(
+    fun estimateVerticalPath(
         mask: ByteArray,
         frameWidth: Int,
         frameHeight: Int,

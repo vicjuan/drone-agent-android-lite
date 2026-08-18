@@ -63,7 +63,7 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun previewModeDetectsCurvedTapeWithoutStartingTracking() {
+    fun defaultPathModeDetectsCurvedTape() {
         val width = 640
         val height = 360
         val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
@@ -508,16 +508,7 @@ class BlackTapeDetectorInstrumentedTest {
         right: Int,
         bottom: Int,
         value: Int,
-    ) {
-        for (y in top until bottom) {
-            for (x in left until right) {
-                val offset = (y * frameWidth + x) * 4
-                frame[offset] = value.toByte()
-                frame[offset + 1] = value.toByte()
-                frame[offset + 2] = value.toByte()
-            }
-        }
-    }
+    ) = fillRectRgb(frame, frameWidth, left, top, right, bottom, value, value, value)
 
     private fun fillRectRgb(
         frame: ByteArray,
@@ -546,16 +537,8 @@ class BlackTapeDetectorInstrumentedTest {
         frameHeight: Int,
         direction: Double,
         value: Int,
-    ) {
-        for (y in 0 until frameHeight) {
-            val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
-            val center =
-                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
-            val left = (center - 15.0).toInt().coerceAtLeast(0)
-            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
-            fillRect(frame, frameWidth, left, y, right, y + 1, value)
-        }
-    }
+    ) = fillCurvedRibbonRgb(frame, frameWidth, frameHeight, direction, value, value, value)
+
     private fun fillCurvedRibbonRgb(
         frame: ByteArray,
         frameWidth: Int,
@@ -568,11 +551,15 @@ class BlackTapeDetectorInstrumentedTest {
         for (y in 0 until frameHeight) {
             val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
             val center =
-                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
-            val left = (center - 15.0).toInt().coerceAtLeast(0)
-            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
+                frameWidth / 2.0 + direction * CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            val left = (center - TAPE_HALF_WIDTH).toInt().coerceAtLeast(0)
+            val right = (center + TAPE_HALF_WIDTH).toInt().coerceAtMost(frameWidth)
             fillRectRgb(frame, frameWidth, left, y, right, y + 1, red, green, blue)
         }
     }
 
+    private companion object {
+        const val CURVE_DISPLACEMENT = 140.0
+        const val TAPE_HALF_WIDTH = 15.0
+    }
 }

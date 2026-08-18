@@ -1,7 +1,6 @@
 package com.durendal.droneagent.lite
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -10,10 +9,8 @@ class TapePathDirectionEstimatorTest {
 
     @Test
     fun `lookahead tangent points right along a right bending ribbon`() {
-        val estimate = estimateRibbon(curveDirection = 1.0)
+        val estimate = checkNotNull(estimateRibbon(curveDirection = 1.0))
 
-        assertNotNull(estimate)
-        checkNotNull(estimate)
         assertEquals(FRAME_WIDTH / 2.0, estimate.nearFieldCenterX, 2.0)
         assertTrue(estimate.lookaheadAngleFromVerticalDegrees > 10.0)
         assertTrue(estimate.nearFieldCenterY > FRAME_HEIGHT * 0.95)
@@ -48,7 +45,7 @@ class TapePathDirectionEstimatorTest {
         }
 
         val estimate = checkNotNull(
-            estimator.estimate(
+            estimator.estimateVerticalPath(
                 mask = mask,
                 frameWidth = FRAME_WIDTH,
                 frameHeight = FRAME_HEIGHT,
@@ -72,7 +69,7 @@ class TapePathDirectionEstimatorTest {
             fillColumnRun(mask, x, centerY = 325.0, halfWidth = 3)
         }
 
-        val unanchored = estimator.estimate(
+        val unanchored = estimator.estimateVerticalPath(
             mask = mask,
             frameWidth = FRAME_WIDTH,
             frameHeight = FRAME_HEIGHT,
@@ -180,7 +177,7 @@ class TapePathDirectionEstimatorTest {
 
         val acquired =
             checkNotNull(
-                estimator.estimate(
+                estimator.estimateVerticalPath(
                     mask = mask,
                     frameWidth = FRAME_WIDTH,
                     frameHeight = FRAME_HEIGHT,
@@ -193,7 +190,7 @@ class TapePathDirectionEstimatorTest {
             )
         val continued =
             checkNotNull(
-                estimator.estimate(
+                estimator.estimateVerticalPath(
                     mask = mask,
                     frameWidth = FRAME_WIDTH,
                     frameHeight = FRAME_HEIGHT,
@@ -242,7 +239,7 @@ class TapePathDirectionEstimatorTest {
             val right = (center + HALF_TAPE_WIDTH).toInt().coerceAtMost(FRAME_WIDTH)
             for (x in left until right) mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
         }
-        return estimator.estimate(
+        return estimator.estimateVerticalPath(
             mask = mask,
             frameWidth = FRAME_WIDTH,
             frameHeight = FRAME_HEIGHT,

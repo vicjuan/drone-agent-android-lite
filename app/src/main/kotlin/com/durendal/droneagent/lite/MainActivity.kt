@@ -604,10 +604,7 @@ class MainActivity : Activity() {
             render("OpenCV 未啟動，無法啟動$trackingName")
             return
         }
-        if (
-            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
-            nudging || holdingHeight || leftStickActive || rightStickActive
-        ) {
+        if (anotherFlightControlActive()) {
             render("另一個飛行控制正在使用中")
             return
         }
@@ -1622,11 +1619,7 @@ class MainActivity : Activity() {
             render("沒有機頭方向資料，無法低速繞圈")
             return
         }
-        if (
-            shuttleStep != null || headingTurn != null || circleTurn != null || nudging ||
-            holdingHeight || tapeTracking.enabled || tapeTrackingStartPending ||
-            leftStickActive || rightStickActive
-        ) {
+        if (anotherFlightControlActive()) {
             render("另一個飛行控制正在使用中")
             return
         }
@@ -1748,7 +1741,6 @@ class MainActivity : Activity() {
         circleTurn = null
         circleStartedAtNanos = 0L
         circleAuthoritySeen = false
-        circleStartPending = false
         circleRenderedProgressBucket = -1
         mainHandler.removeCallbacks(circleTickRunnable)
         virtualStick.setHorizontalVelocity(0.0, 0.0)
@@ -1781,10 +1773,7 @@ class MainActivity : Activity() {
             render("沒有機頭方向資料，無法持續來回")
             return
         }
-        if (
-            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
-            nudging || holdingHeight || tapeTracking.enabled || leftStickActive || rightStickActive
-        ) {
+        if (anotherFlightControlActive()) {
             render("另一個飛行控制正在使用中")
             return
         }
@@ -1862,39 +1851,16 @@ class MainActivity : Activity() {
         }
     }
 
-
-    private fun startHeadingTurn(direction: TurnDirection) {
-        val heading = aircraftHeadingDegrees
-        flightLog.write(
-            "press: ${direction.label}180 flying=$flying heading=$heading owned=$stickOwned " +
-                "authority=${stickStatus.authority}",
-        )
-        if (!flying) {
-            render("飛機不在空中，無法旋轉")
-            return
-        }
-        if (heading == null || aircraftHeadingAtNanos == 0L) {
-            render("沒有機頭方向資料，無法旋轉 180°")
-            return
-        }
-        if (
-            shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
-            holdingHeight || nudging || tapeTracking.enabled || leftStickActive || rightStickActive
-        ) {
-            render("另一個飛行控制正在使用中")
-            return
-        }
-        render("取得控制權後${direction.label} 180°…")
-        acquireControlLink {
-            if (!flying || headingTurn != null) return@acquireControlLink
-            val currentHeading = aircraftHeadingDegrees
-            if (currentHeading == null) {
-                render("機頭方向資料中斷，旋轉取消")
-                return@acquireControlLink
-            }
-            armHeadingTurn(direction, currentHeading)
-        }
-    }
+    /**
+     * Every automated manoeuvre and both on-screen sticks are mutually exclusive: they all
+     * drive the same virtual-stick axes. Each entry point asks this one question, so a new
+     * manoeuvre can never be forgotten in one caller's copy of the list. Callers reached
+     * through a toggle have already proven their own activity is idle.
+     */
+    private fun anotherFlightControlActive(): Boolean =
+        shuttleStep != null || headingTurn != null || circleTurn != null || circleStartPending ||
+            nudging || holdingHeight || tapeTracking.enabled || tapeTrackingStartPending ||
+            leftStickActive || rightStickActive
 
     private fun armHeadingTurn(direction: TurnDirection, currentHeading: Double) {
         headingTurn = HeadingTurn(direction, currentHeading)

@@ -6,14 +6,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
-    <!-- The RC-N3 attaches to the phone as a USB accessory (AOA). -->
-    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- The RC-N3 attaches to the phone as a USB accessory (AOA); this app is never a
+         USB host. Native-library packaging is set by jniLibs.useLegacyPackaging instead. -->
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
 
     <application
         android:name=".LiteApplication"
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:label="Mini 4 Pro Lite">
 
         <meta-data

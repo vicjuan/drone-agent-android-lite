@@ -116,8 +116,8 @@ class BlackTapeDetector(
         (
             "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
                 "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
-                "rejects=invalid:%d area:%d aspect:%d length:%d curve:%d direction:%d width:%d " +
-                "edge:%d fill:%d chroma:%d floor:%d"
+                "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
+                "edge:%d chroma:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathAxis,
@@ -132,13 +132,10 @@ class BlackTapeDetector(
             lastFloorFraction,
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal],
             rejectionCounts[TapeCandidateRejection.AREA.ordinal],
-            rejectionCounts[TapeCandidateRejection.ASPECT.ordinal],
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal],
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal],
             rejectionCounts[TapeCandidateRejection.DIRECTION_CONTINUITY.ordinal],
-            rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
-            rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal],
             rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal],
         )
@@ -161,12 +158,17 @@ class BlackTapeDetector(
         val cleanedBlackMask = Mat()
         val candidateMask = Mat()
         val hierarchy = Mat()
-        // Fluorescent glare creates short bright gaps inside the black tape. Close only
-        // along its axis so those fragments reconnect without merging nearby objects.
         val mode = detectionMode
         lastDetectionMode = mode
+        // Path diagnostics describe this frame's winner only, so an early return
+        // or an all-rejected frame must not keep publishing the previous one.
         lastPathSampleCount = 0
-            lastPathAxis = "NONE"
+        lastPathAxis = "NONE"
+        lastPathCurvatureDegrees = 0.0
+        lastPathCurvatureSmoothness = 0.0
+        // Fluorescent glare creates short bright gaps inside the black tape. Straight
+        // tape is closed along its axis so those fragments reconnect without merging
+        // nearby objects; a curved path needs an isotropic kernel instead.
         val closeKernel = Imgproc.getStructuringElement(
             if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
             if (mode == TapeDetectionMode.PATH) {
@@ -300,8 +302,7 @@ class BlackTapeDetector(
             lastPathCurvatureDegrees = winner.pathCurvatureDegrees
             lastPathCurvatureSmoothness = winner.pathCurvatureSmoothness
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
-            previousPathMedianWidthFraction =
-                winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
+            previousPathMedianWidthFraction = winner.pathMedianWidthFraction
             previousAnchorXFraction = winner.anchorXFraction
             previousAnchorYFraction = winner.anchorYFraction
             lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "CENTERLINE"
@@ -387,6 +388,18 @@ class BlackTapeDetector(
         return acceptedSeeds
     }
 
+    /** Prefers the trace that follows more tape at a more consistent width; vertical wins a tie. */
+    private fun betterPath(
+        verticalPath: TapePathEstimate?,
+        horizontalPath: TapePathEstimate?,
+    ): TapePathEstimate? {
+        if (verticalPath == null) return horizontalPath
+        if (horizontalPath == null) return verticalPath
+        val verticalQuality = verticalPath.arcLengthFraction * verticalPath.widthConsistency
+        val horizontalQuality = horizontalPath.arcLengthFraction * horizontalPath.widthConsistency
+        return if (horizontalQuality > verticalQuality) horizontalPath else verticalPath
+    }
+
     private fun scoreCandidate(
         contour: MatOfPoint,
         contourIndex: Int,
@@ -404,33 +417,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
             return null
         }
-        return scorePathCandidate(
-            contourIndex = contourIndex,
-            contours = contours,
-            rawBlackMask = rawBlackMask,
-            candidateMask = candidateMask,
-            rgb = rgb,
-            floorMask = floorMask,
-            bounds = bounds,
-            frameArea = frameArea,
-            frameShortSide = frameShortSide,
-            requireCurvature = mode == TapeDetectionMode.PATH,
-        )
-    }
-
-    private fun scorePathCandidate(
-        contourIndex: Int,
-        contours: List<MatOfPoint>,
-        rawBlackMask: Mat,
-        candidateMask: Mat,
-        rgb: Mat,
-        floorMask: Mat,
-        bounds: Rect,
-        frameArea: Double,
-        frameShortSide: Double,
-        requireCurvature: Boolean,
-    ): Candidate? {
-
+        val requireCurvature = mode == TapeDetectionMode.PATH
         if (candidateMask.empty() || candidateMask.size() != rawBlackMask.size()) {
             candidateMask.create(rawBlackMask.rows(), rawBlackMask.cols(), org.opencv.core.CvType.CV_8UC1)
         }
@@ -441,7 +428,7 @@ class BlackTapeDetector(
         candidateMask.get(0, 0, candidateMaskBytes)
         // In the camera-down image, entering a rainbow at its right endpoint and
         // tracing toward the left follows the circle counterclockwise.
-        val verticalPath = pathDirectionEstimator.estimate(
+        val verticalPath = pathDirectionEstimator.estimateVerticalPath(
             mask = candidateMaskBytes,
             frameWidth = candidateMask.cols(),
             frameHeight = candidateMask.rows(),
@@ -470,16 +457,11 @@ class BlackTapeDetector(
             preferRightToLeft =
                 requireCurvature && previousAnchorXFraction == null,
         )
-        val path =
-            listOfNotNull(verticalPath, horizontalPath).maxByOrNull {
-                it.arcLengthFraction * it.widthConsistency
-            }
+        val path = betterPath(verticalPath, horizontalPath)
         if (path == null) {
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
-        lastPathCurvatureDegrees = path.curvatureDegrees
-        lastPathCurvatureSmoothness = path.curvatureSmoothness
         // A wall or floor edge can acquire an apparent bend at one noisy endpoint.
         // Circular tape must change direction across several path segments.
         if (

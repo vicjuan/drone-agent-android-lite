@@ -49,16 +49,16 @@ internal data class TapeTrackingDecision(
 )
 
 /**
- * Pure timing and steering policy for black-tape tracking. Aircraft and gimbal
- * commands remain in MainActivity, so this class can be tested without DJI SDK.
+ * Timing and steering policy for black-tape tracking: it owns the tracking phase,
+ * the smoothed measurements and the output slew limits, and answers every tick with
+ * a [TapeTrackingDecision]. Aircraft and gimbal commands remain in MainActivity, so
+ * this state machine can be tested without the DJI SDK.
  */
 internal class TapeTrackingController {
     var enabled: Boolean = false
         private set
 
-    var phase: TapeTrackingPhase = TapeTrackingPhase.DISABLED
-        private set
-
+    private var phase: TapeTrackingPhase = TapeTrackingPhase.DISABLED
 
     private var lastDetectionAtNanos = 0L
     private var lastControlObservationAtNanos = 0L
@@ -83,9 +83,7 @@ internal class TapeTrackingController {
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
-    var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
-        private set
-
+    private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
 
     fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
         enabled = true
@@ -351,7 +349,6 @@ internal class TapeTrackingController {
         endpointVerificationStartedAtNanos = 0L
         consecutiveEndpointMisses = 0
         endpointReferenceBounds = null
-        lateralCorrectionActive = false
         resetControlState()
     }
 
