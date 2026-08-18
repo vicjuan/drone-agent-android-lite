@@ -168,8 +168,6 @@ class MainActivity : Activity() {
     private var tapeEndpointTurn = false
     private var tapeCommandLoggedAtNanos = 0L
     private var activeTapeTrackingMode: TapeTrackingMode? = null
-    private var circularTapeLap: HeadingTurn? = null
-    private var circularTapeProgressBucket = -1
 
     /** One operator-requested, open-loop 1 m diameter right circle. */
     private var circleTurn: HeadingTurn? = null
@@ -636,23 +634,6 @@ class MainActivity : Activity() {
                         stopTapeTracking("飛行狀態已改變，$trackingName 取消", release = false)
                         return@runOnUiThread
                     }
-                    val circularHeading =
-                        if (mode == TapeTrackingMode.CIRCULAR) {
-                            aircraftHeadingDegrees?.takeIf {
-                                aircraftHeadingAtNanos != 0L &&
-                                    System.nanoTime() - aircraftHeadingAtNanos <=
-                                    MAX_MOVING_HEADING_AGE_NANOS
-                            }
-                        } else {
-                            null
-                        }
-                    if (mode == TapeTrackingMode.CIRCULAR && circularHeading == null) {
-                        stopTapeTracking(
-                            "沒有即時機頭方向資料，$trackingName 取消",
-                            release = false,
-                        )
-                        return@runOnUiThread
-                    }
                     render("飛機避障已關閉；$trackingName：取得控制權…")
                     acquireControlLink(
                         onFailure = { reason ->
@@ -669,15 +650,6 @@ class MainActivity : Activity() {
                         )
                         val now = System.nanoTime()
                         tapeTracking.start(now, mode)
-                        circularTapeLap =
-                            circularHeading?.let {
-                                HeadingTurn(
-                                    direction = TurnDirection.LEFT,
-                                    initialHeadingDegrees = it,
-                                    targetDegrees = 360.0,
-                                )
-                            }
-                        circularTapeProgressBucket = -1
                         tapeTrackingStartedAtNanos = now
                         tapeTrackingAuthoritySeen =
                             stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
@@ -724,29 +696,6 @@ class MainActivity : Activity() {
                 }
             }
 
-            if (activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) {
-                if (now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS) {
-                    stopTapeTracking(
-                        "機頭方向資料停止更新，圓形黑膠帶追蹤已停止",
-                        release = true,
-                        centerCamera = true,
-                    )
-                    return
-                }
-                val lap = checkNotNull(circularTapeLap)
-                val progressBucket = (lap.progressDegrees / CIRCLE_PROGRESS_BUCKET_DEGREES).toInt()
-                if (progressBucket != circularTapeProgressBucket) {
-                    circularTapeProgressBucket = progressBucket
-                    flightLog.write(
-                        "circular tape lap progress=%.1f/360.0".format(lap.progressDegrees),
-                    )
-                }
-                if (lap.progressDegrees >= 360.0) {
-                    flightLog.write("circular tape lap complete; automatic landing requested")
-                    land(trigger = "circular_tape_lap_complete")
-                    return
-                }
-            }
             val decision = tapeTracking.tick(now)
             decision.gimbalTarget?.let(::applyTapeTrackingGimbalTarget)
             if (
@@ -899,8 +848,6 @@ class MainActivity : Activity() {
         commandedTapeRightSpeed = 0.0
         tapeTrackingAuthoritySeen = false
         tapeTrackingStartedAtNanos = 0L
-        circularTapeLap = null
-        circularTapeProgressBucket = -1
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
         tapeCommandLoggedAtNanos = 0L
         activeTapeTrackingMode = null
@@ -1636,7 +1583,6 @@ class MainActivity : Activity() {
         aircraftHeadingAtNanos = System.nanoTime()
         headingTurn?.update(heading)
         circleTurn?.update(heading)
-        circularTapeLap?.update(heading)
         driveHeadingTurn()
     }
 
