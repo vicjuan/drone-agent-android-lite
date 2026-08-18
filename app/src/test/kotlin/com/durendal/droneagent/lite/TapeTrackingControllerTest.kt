@@ -354,6 +354,20 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, stale.yawRateDegreesPerSecond, 0.0)
     }
 
+    @Test
+    fun `controller filters axial angle across the ninety degree seam`() {
+        val controller = trackingController()
+        controller.observe(observation(89.0, 0.8), seconds(2))
+        controller.tick(seconds(2))
+
+        controller.observe(observation(-89.0, 0.8), seconds(2) + 250_000_000L)
+        val decision = controller.tick(seconds(2) + 250_000_000L)
+
+        assertTrue(decision.controlledAngleDegrees!! > 80.0)
+        assertTrue(decision.yawRateDegreesPerSecond > 0.0)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+    }
+
 
     @Test
     fun `circular mode follows the lookahead tangent at experiment speed`() {

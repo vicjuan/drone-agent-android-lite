@@ -4,7 +4,6 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.Mat
 import org.opencv.core.MatOfPoint
-import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Rect
 import org.opencv.core.Scalar
@@ -264,11 +263,9 @@ class BlackTapeDetector(
             consecutiveDetectionMisses = 0
             val rect = winner.bounds
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
-            if (!winner.horizontalFallback) {
-                previousPathMedianWidthFraction =
-                    winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
-            }
-            lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "VERTICAL"
+            previousPathMedianWidthFraction =
+                winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
+            lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "CENTERLINE"
             lastPathSampleCount = winner.pathSampleCount
             return TapeDetection(
                 sourceWidth = width,
@@ -283,6 +280,10 @@ class BlackTapeDetector(
                 angleFromVerticalDegrees = winner.angleFromVerticalDegrees,
                 longSideFraction = winner.longSideFraction,
                 nearFieldOffsetFraction = winner.nearFieldOffsetFraction,
+                anchorXFraction = winner.anchorXFraction,
+                anchorYFraction = winner.anchorYFraction,
+                lookaheadXFraction = winner.lookaheadXFraction,
+                lookaheadYFraction = winner.lookaheadYFraction,
             )
         } finally {
             candidateMask.release()
@@ -358,68 +359,21 @@ class BlackTapeDetector(
         frameShortSide: Double,
         mode: TapeDetectionMode,
     ): Candidate? {
-        val contourArea = Imgproc.contourArea(contour)
         val bounds = Imgproc.boundingRect(contour)
         if (bounds.width <= 0 || bounds.height <= 0) {
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
             return null
         }
-        if (mode == TapeDetectionMode.PATH) {
-            return scorePathCandidate(
-                contourIndex,
-                contours,
-                blackMask,
-                candidateMask,
-                floorMask,
-                bounds,
-                frameArea,
-                frameShortSide,
-            )
-        }
-
-        val contourPoints = MatOfPoint2f(*contour.toArray())
-        val orientedBounds = try {
-            Imgproc.minAreaRect(contourPoints)
-        } finally {
-            contourPoints.release()
-        }
-        val orientedWidth = orientedBounds.size.width
-        val orientedHeight = orientedBounds.size.height
-        if (orientedWidth <= 0.0 || orientedHeight <= 0.0) {
-            rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal] += 1
-            return null
-        }
-
-        val shortSide = min(orientedWidth, orientedHeight)
-        val longSide = max(orientedWidth, orientedHeight)
-        val orientedArea = orientedWidth * orientedHeight
-        val context = floorContext(floorMask, bounds)
-        val metrics = TapeCandidateMetrics(
-            areaFraction = contourArea / frameArea,
-            aspectRatio = longSide / shortSide,
-            shortSideFraction = shortSide / frameShortSide,
-            longSideFraction = longSide / frameShortSide,
-            orientedFill = (contourArea / orientedArea).coerceIn(0.0, 1.0),
-            surroundingFloor = context.surroundingFraction,
-            minimumSideFloor = context.minimumSideFraction,
-            touchesHorizontalFrameEdge =
-                bounds.x <= HORIZONTAL_EDGE_MARGIN ||
-                    bounds.x + bounds.width >= floorMask.cols() - HORIZONTAL_EDGE_MARGIN,
-            overlapsPreviousDetection = overlapsPrevious(bounds),
-        )
-        val rejection = TapeCandidatePolicy.rejectionReason(metrics)
-        if (rejection != null) {
-            rejectionCounts[rejection.ordinal] += 1
-            return null
-        }
-        val axis = tapeAxis(orientedBounds)
-        return Candidate(
+        return scorePathCandidate(
+            contourIndex = contourIndex,
+            contours = contours,
+            blackMask = blackMask,
+            candidateMask = candidateMask,
+            floorMask = floorMask,
             bounds = bounds,
-            score = checkNotNull(TapeCandidatePolicy.score(metrics)),
-            angleFromVerticalDegrees = axis.angleFromVerticalDegrees,
-            longSideFraction = metrics.longSideFraction,
-            nearFieldOffsetFraction =
-                (axis.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
+            frameArea = frameArea,
+            frameShortSide = frameShortSide,
+            requireCurvature = mode == TapeDetectionMode.PATH,
         )
     }
 
@@ -432,6 +386,7 @@ class BlackTapeDetector(
         bounds: Rect,
         frameArea: Double,
         frameShortSide: Double,
+        requireCurvature: Boolean,
     ): Candidate? {
 
         if (candidateMask.empty() || candidateMask.size() != blackMask.size()) {
@@ -467,7 +422,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
-        if (path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES) {
+        if (requireCurvature && path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES) {
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal] += 1
             return null
         }
@@ -530,50 +485,16 @@ class BlackTapeDetector(
             longSideFraction = path.arcLengthFraction,
             nearFieldOffsetFraction =
                 (path.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
+            anchorXFraction = (path.nearFieldCenterX / floorMask.cols()).coerceIn(0.0, 1.0),
+            anchorYFraction = (path.nearFieldCenterY / floorMask.rows()).coerceIn(0.0, 1.0),
+            lookaheadXFraction = (path.lookaheadCenterX / floorMask.cols()).coerceIn(0.0, 1.0),
+            lookaheadYFraction = (path.lookaheadCenterY / floorMask.rows()).coerceIn(0.0, 1.0),
             pathSampleCount = path.sampleCount,
             pathMedianWidthFraction = path.medianWidthFraction,
             horizontalFallback = path.horizontalFallback,
         )
     }
 
-    private fun tapeAxis(bounds: org.opencv.core.RotatedRect): TapeAxis {
-        val corners = Array(4) { Point() }
-        bounds.points(corners)
-        var longestSquared = Double.NEGATIVE_INFINITY
-        var longestDeltaX = 0.0
-        var longestDeltaY = 0.0
-        var nearest = corners[0]
-        var secondNearest = corners[1]
-        if (secondNearest.y > nearest.y) {
-            nearest = corners[1]
-            secondNearest = corners[0]
-        }
-        for (index in corners.indices) {
-            val start = corners[index]
-            val end = corners[(index + 1) % corners.size]
-            val deltaX = end.x - start.x
-            val deltaY = end.y - start.y
-            val lengthSquared = deltaX * deltaX + deltaY * deltaY
-            if (lengthSquared > longestSquared) {
-                longestSquared = lengthSquared
-                longestDeltaX = deltaX
-                longestDeltaY = deltaY
-            }
-            if (index < 2) continue
-            when {
-                start.y > nearest.y -> {
-                    secondNearest = nearest
-                    nearest = start
-                }
-                start.y > secondNearest.y -> secondNearest = start
-            }
-        }
-        return TapeAxis(
-            angleFromVerticalDegrees =
-                TapeOrientation.deviationFromVerticalDegrees(longestDeltaX, longestDeltaY),
-            nearFieldCenterX = (nearest.x + secondNearest.x) / 2.0,
-        )
-    }
 
     private fun floorContext(floorMask: Mat, bounds: Rect): FloorContext {
         val surround = expand(bounds, floorMask.cols(), floorMask.rows())
@@ -678,9 +599,13 @@ class BlackTapeDetector(
         val angleFromVerticalDegrees: Double,
         val longSideFraction: Double,
         val nearFieldOffsetFraction: Double,
-        val pathSampleCount: Int = 0,
-        val pathMedianWidthFraction: Double? = null,
-        val horizontalFallback: Boolean = false,
+        val anchorXFraction: Double,
+        val anchorYFraction: Double,
+        val lookaheadXFraction: Double,
+        val lookaheadYFraction: Double,
+        val pathSampleCount: Int,
+        val pathMedianWidthFraction: Double,
+        val horizontalFallback: Boolean,
     )
 
     private data class FloorContext(
@@ -688,10 +613,6 @@ class BlackTapeDetector(
         val minimumSideFraction: Double,
     )
 
-    private data class TapeAxis(
-        val angleFromVerticalDegrees: Double,
-        val nearFieldCenterX: Double,
-    )
 
     private companion object {
         const val RGBA_CHANNELS = 4L

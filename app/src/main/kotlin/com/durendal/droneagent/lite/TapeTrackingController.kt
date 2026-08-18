@@ -362,7 +362,7 @@ internal class TapeTrackingController {
         rawHorizontalOffsetFraction = horizontalOffsetFraction
         val previousOffset = controlledHorizontalOffsetFraction
         val nextAngle = controlledAngleDegrees?.let {
-            exponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
+            axialExponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
         } ?: angleDegrees
         val nextOffset = previousOffset?.let {
             exponentialAverage(it, horizontalOffsetFraction, STABILIZED_FILTER_ALPHA)
@@ -568,6 +568,20 @@ internal class TapeTrackingController {
 
     private fun exponentialAverage(previous: Double, sample: Double, alpha: Double): Double =
         previous + alpha * (sample - previous)
+
+    /**
+     * Tape orientation is axial: +89° and -89° describe nearly the same line.
+     * Interpolate across that seam instead of averaging both samples toward 0°.
+     */
+    private fun axialExponentialAverage(previous: Double, sample: Double, alpha: Double): Double {
+        var delta = sample - previous
+        while (delta > 90.0) delta -= 180.0
+        while (delta < -90.0) delta += 180.0
+        var averaged = previous + alpha * delta
+        while (averaged > 90.0) averaged -= 180.0
+        while (averaged < -90.0) averaged += 180.0
+        return averaged
+    }
 
     private fun moveToward(current: Double, target: Double, maximumDelta: Double): Double =
         when {

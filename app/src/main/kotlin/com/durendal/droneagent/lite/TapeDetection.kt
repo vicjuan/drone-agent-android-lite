@@ -20,6 +20,10 @@ data class TapeDetection(
     val angleFromVerticalDegrees: Double,
     val longSideFraction: Double,
     val nearFieldOffsetFraction: Double,
+    val anchorXFraction: Double = bounds.centerX,
+    val anchorYFraction: Double = bounds.bottom,
+    val lookaheadXFraction: Double = bounds.centerX,
+    val lookaheadYFraction: Double = bounds.top,
 ) {
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
@@ -27,6 +31,8 @@ data class TapeDetection(
         require(angleFromVerticalDegrees in -90.0..90.0)
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
+        require(anchorXFraction in 0.0..1.0 && anchorYFraction in 0.0..1.0)
+        require(lookaheadXFraction in 0.0..1.0 && lookaheadYFraction in 0.0..1.0)
     }
 }
 

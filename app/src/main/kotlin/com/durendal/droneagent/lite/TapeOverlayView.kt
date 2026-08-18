@@ -17,6 +17,20 @@ class TapeOverlayView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = density(3f)
     }
+    private val railPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.CYAN
+        style = Paint.Style.STROKE
+        strokeWidth = density(3f)
+    }
+    private val anchorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.YELLOW
+        style = Paint.Style.FILL
+    }
+    private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = density(2f)
+    }
     private val labelBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(210, 0, 0, 0)
         style = Paint.Style.FILL
@@ -57,6 +71,30 @@ class TapeOverlayView(context: Context) : View(context) {
             previewTop + (source.bottom * previewHeight).toFloat(),
         )
         canvas.drawRoundRect(bounds, density(6f), density(6f), boxPaint)
+
+        val anchorX = previewLeft + (result.anchorXFraction * previewWidth).toFloat()
+        val anchorY = previewTop + (result.anchorYFraction * previewHeight).toFloat()
+        val lookaheadX = previewLeft + (result.lookaheadXFraction * previewWidth).toFloat()
+        val lookaheadY = previewTop + (result.lookaheadYFraction * previewHeight).toFloat()
+        val targetX = previewLeft + previewWidth / 2f
+        val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION
+        canvas.drawLine(anchorX, anchorY, lookaheadX, lookaheadY, railPaint)
+        canvas.drawCircle(anchorX, anchorY, density(6f), anchorPaint)
+        val targetRadius = density(10f)
+        canvas.drawLine(
+            targetX - targetRadius,
+            targetY,
+            targetX + targetRadius,
+            targetY,
+            targetPaint,
+        )
+        canvas.drawLine(
+            targetX,
+            targetY - targetRadius,
+            targetX,
+            targetY + targetRadius,
+            targetPaint,
+        )
 
         val label = formatTapeDetectionLabel(
             confidence = result.confidence,
@@ -107,6 +145,7 @@ class TapeOverlayView(context: Context) : View(context) {
 
     private companion object {
         val DETECTED_COLOR = Color.rgb(0, 230, 118)
+        const val TRACKING_TARGET_Y_FRACTION = 0.94f
     }
 }
 

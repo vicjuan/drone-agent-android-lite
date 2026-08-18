@@ -16,6 +16,8 @@ class TapePathDirectionEstimatorTest {
         checkNotNull(estimate)
         assertEquals(FRAME_WIDTH / 2.0, estimate.nearFieldCenterX, 2.0)
         assertTrue(estimate.lookaheadAngleFromVerticalDegrees > 10.0)
+        assertTrue(estimate.nearFieldCenterY > FRAME_HEIGHT * 0.95)
+        assertTrue(estimate.lookaheadCenterY < estimate.nearFieldCenterY)
         assertTrue(estimate.arcLengthFraction > 0.9)
         assertTrue(estimate.curvatureDegrees > 8.0)
     }
@@ -97,6 +99,32 @@ class TapePathDirectionEstimatorTest {
         assertTrue(kotlin.math.abs(tracked.lookaheadAngleFromVerticalDegrees) > 80.0)
         assertEquals(30.0 / FRAME_HEIGHT, tracked.medianWidthFraction, 0.01)
         assertTrue(tracked.bounds.bottom < 310)
+    }
+
+    @Test
+    fun `horizontal fallback anchors the endpoint nearest the image bottom`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (x in 100 until 550) {
+            val centerY = 220.0 + (x - 100) * 0.20
+            fillColumnRun(mask, x, centerY = centerY, halfWidth = 15)
+        }
+
+        val estimate = checkNotNull(
+            estimator.estimateHorizontalFallback(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 90,
+                top = 180,
+                right = 560,
+                bottom = 340,
+                expectedMedianWidthFraction = 30.0 / FRAME_HEIGHT,
+            ),
+        )
+
+        assertTrue(estimate.nearFieldCenterX > 500.0)
+        assertTrue(estimate.nearFieldCenterY > 290.0)
+        assertTrue(estimate.lookaheadCenterX < estimate.nearFieldCenterX)
     }
 
     @Test

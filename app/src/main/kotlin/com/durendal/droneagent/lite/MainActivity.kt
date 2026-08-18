@@ -362,10 +362,13 @@ class MainActivity : Activity() {
             tapeLoggedAtNanos = now
             flightLog.write(
                 detection?.let {
-                    "black tape detected confidence=%.2f angle=%+.1f nearOffset=%+.3f boxOffset=%+.3f length=%.3f bounds=%s %s".format(
+                    "black tape detected confidence=%.2f angle=%+.1f anchor=(%.3f,%.3f) lookahead=(%.3f,%.3f) boxOffset=%+.3f length=%.3f bounds=%s %s".format(
                         it.confidence,
                         it.angleFromVerticalDegrees,
-                        it.nearFieldOffsetFraction,
+                        it.anchorXFraction,
+                        it.anchorYFraction,
+                        it.lookaheadXFraction,
+                        it.lookaheadYFraction,
                         it.bounds.centerX - 0.5,
                         it.longSideFraction,
                         it.bounds,
@@ -750,11 +753,7 @@ class MainActivity : Activity() {
                 val status = when (decision.phase) {
                     TapeTrackingPhase.RECENTERING -> "$trackingName：攝影機復位中"
                     TapeTrackingPhase.TRACKING ->
-                        if (activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) {
-                            "$trackingName（近端置中、前視切線轉向）"
-                        } else {
-                            "$trackingName（穩定化 PD 置中、比例偏航）"
-                        }
+                        "$trackingName（底部錨點置中、前視切線轉向）"
                     TapeTrackingPhase.VERIFYING_ENDPOINT ->
                         "疑似膠帶末端：低速前進確認中"
                     TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"

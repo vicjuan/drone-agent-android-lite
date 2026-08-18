@@ -7,6 +7,9 @@ import kotlin.math.roundToInt
 /** One locally connected black-tape path, ordered from the camera-near end upward. */
 internal data class TapePathEstimate(
     val nearFieldCenterX: Double,
+    val nearFieldCenterY: Double,
+    val lookaheadCenterX: Double,
+    val lookaheadCenterY: Double,
     val lookaheadAngleFromVerticalDegrees: Double,
     val arcLengthFraction: Double,
     val medianWidthFraction: Double,
@@ -123,8 +126,13 @@ internal class TapePathDirectionEstimator {
 
         val anchorSamples = minOf(NEAR_FIELD_SAMPLE_COUNT, pointCount)
         var nearFieldCenterX = 0.0
-        for (index in 0 until anchorSamples) nearFieldCenterX += pointsX[index]
+        var nearFieldCenterY = 0.0
+        for (index in 0 until anchorSamples) {
+            nearFieldCenterX += pointsX[index]
+            nearFieldCenterY += pointsY[index]
+        }
         nearFieldCenterX /= anchorSamples
+        nearFieldCenterY /= anchorSamples
         var pathLeft = frameWidth
         var pathRight = 0
         for (index in 0 until pointCount) {
@@ -141,6 +149,9 @@ internal class TapePathDirectionEstimator {
 
         return TapePathEstimate(
             nearFieldCenterX = nearFieldCenterX,
+            nearFieldCenterY = nearFieldCenterY,
+            lookaheadCenterX = pointsX[lookaheadIndex],
+            lookaheadCenterY = pointsY[lookaheadIndex],
             lookaheadAngleFromVerticalDegrees =
                 TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY),
             arcLengthFraction = arcLengthFraction,
@@ -260,6 +271,9 @@ internal class TapePathDirectionEstimator {
         val lastX = trace.pointsX[trace.pointCount - 1].toInt()
         return TapePathEstimate(
             nearFieldCenterX = trace.nearFieldCenterX,
+            nearFieldCenterY = trace.nearFieldCenterY,
+            lookaheadCenterX = trace.pointsX[lookaheadIndex],
+            lookaheadCenterY = trace.pointsY[lookaheadIndex],
             lookaheadAngleFromVerticalDegrees =
                 TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY),
             arcLengthFraction = arcLengthFraction,
@@ -474,7 +488,7 @@ internal class TapePathDirectionEstimator {
     private companion object {
         const val LOOKAHEAD_ARC_FRACTION = 0.40
         const val MIN_SAMPLE_COUNT = 12
-        const val MIN_ARC_LENGTH_FRACTION = 0.20
+        const val MIN_ARC_LENGTH_FRACTION = 0.12
         const val MIN_LOCAL_WIDTH_FRACTION = 0.025
         const val MAX_LOCAL_WIDTH_FRACTION = 0.20
         const val MIN_WIDTH_CONSISTENCY = 0.40

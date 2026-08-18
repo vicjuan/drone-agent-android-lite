@@ -22,6 +22,9 @@ class BlackTapeDetectorInstrumentedTest {
         assertEquals(0.0, detection.angleFromVerticalDegrees, 1.0)
         assertTrue(detection.longSideFraction >= 0.95)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
+        assertEquals(0.5, detection.anchorXFraction, 0.01)
+        assertTrue(detection.anchorYFraction > 0.95)
+        assertTrue(detection.lookaheadYFraction < detection.anchorYFraction)
     }
 
     @Test
@@ -196,6 +199,9 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(horizontal.longSideFraction > 1.0)
         assertTrue(horizontal.bounds.bottom < 0.85)
         assertTrue(horizontal.nearFieldOffsetFraction > 0.30)
+        assertTrue(horizontal.anchorXFraction > 0.75)
+        assertTrue(horizontal.anchorYFraction > 0.75)
+        assertTrue(horizontal.lookaheadXFraction < horizontal.anchorXFraction)
     }
     @Test
     fun straightPathIsRejectedInCurvedTapeMode() {
