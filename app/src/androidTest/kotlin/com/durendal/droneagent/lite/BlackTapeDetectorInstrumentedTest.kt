@@ -144,6 +144,46 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detection.nearFieldOffsetFraction > 0.15)
         assertTrue(detection.bounds.right > 0.68)
     }
+    @Test
+    fun trackedTapeReacquiresHorizontallyWithoutSelectingThinFloorSeam() {
+        val width = 640
+        val height = 360
+        val floorRed = 180
+        val floorGreen = 120
+        val floorBlue = 50
+        val verticalTape = rgbaFrame(width, height, floorRed, floorGreen, floorBlue)
+        fillRect(verticalTape, width, left = 485, top = 240, right = 515, bottom = height, value = 20)
+        val horizontalTape = rgbaFrame(width, height, floorRed, floorGreen, floorBlue)
+        for (x in 100 until 550) {
+            val centerY = (260.0 + (x - 100) * 0.05).toInt()
+            fillRect(
+                horizontalTape,
+                width,
+                left = x,
+                top = centerY - 15,
+                right = x + 1,
+                bottom = centerY + 15,
+                value = 20,
+            )
+        }
+        fillRect(horizontalTape, width, left = 0, top = 322, right = 450, bottom = 328, value = 40)
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(verticalTape, horizontalTape),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+        assertTrue(detections[0] != null)
+        val horizontal = checkNotNull(detections[1]) { diagnostics.last() }
+
+        assertTrue(kotlin.math.abs(horizontal.angleFromVerticalDegrees) > 80.0)
+        assertTrue(horizontal.longSideFraction > 1.0)
+        assertTrue(horizontal.bounds.bottom < 0.85)
+        assertTrue(horizontal.nearFieldOffsetFraction > 0.30)
+    }
 
     @Test
     fun darkDoorEdgeAboveGrayBaseboardIsNotTape() {
@@ -170,6 +210,7 @@ class BlackTapeDetectorInstrumentedTest {
         width: Int,
         height: Int,
         mode: TapeDetectionMode? = null,
+        onDiagnostics: (String) -> Unit = {},
     ): List<TapeDetection?> {
         val outcomes = LinkedBlockingQueue<DetectionOutcome>()
         val detector = BlackTapeDetector(
@@ -185,6 +226,7 @@ class BlackTapeDetectorInstrumentedTest {
                     outcomes.poll(3, TimeUnit.SECONDS)
                         ?: throw AssertionError("detector did not finish")
                 outcome.failure?.let { throw AssertionError("detector failed", it) }
+                onDiagnostics(detector.diagnosticsSummary())
                 outcome.detection
             }
         } finally {

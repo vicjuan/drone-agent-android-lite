@@ -34,6 +34,7 @@ class BlackTapeDetector(
     private val closed = AtomicBoolean(false)
     private val lastAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
+    private var previousPathMedianWidthFraction: Double? = null
     @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
@@ -44,6 +45,7 @@ class BlackTapeDetector(
     private var luminanceBytes = ByteArray(0)
     @Volatile private var lastDetectionMode = TapeDetectionMode.PATH
     @Volatile private var lastPathSampleCount = 0
+    @Volatile private var lastPathAxis = "NONE"
     @Volatile private var lastFloorSeedCount = 0
     @Volatile private var lastFloorFraction = 0.0
     private val pathDirectionEstimator = TapePathDirectionEstimator()
@@ -97,6 +99,7 @@ class BlackTapeDetector(
         try {
             worker.execute {
                 previousBounds = null
+                previousPathMedianWidthFraction = null
                 consecutiveDetectionMisses = 0
             }
         } catch (error: RuntimeException) {
@@ -106,11 +109,12 @@ class BlackTapeDetector(
 
     fun diagnosticsSummary(): String =
         (
-            "mode=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
+            "mode=%s pathAxis=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
                 "floorSeeds=%d floor=%.2f rejects=invalid:%d area:%d aspect:%d length:%d " +
                 "width:%d edge:%d fill:%d floor:%d"
             ).format(
             lastDetectionMode,
+            lastPathAxis,
             lastPathSampleCount,
             lastOtsuThreshold,
             lastEffectiveThreshold,
@@ -151,6 +155,7 @@ class BlackTapeDetector(
         val mode = detectionMode
         lastDetectionMode = mode
         lastPathSampleCount = 0
+            lastPathAxis = "NONE"
         val closeKernel = Imgproc.getStructuringElement(
             if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
             if (mode == TapeDetectionMode.PATH) {
@@ -258,6 +263,11 @@ class BlackTapeDetector(
             consecutiveDetectionMisses = 0
             val rect = winner.bounds
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
+            if (!winner.horizontalFallback) {
+                previousPathMedianWidthFraction =
+                    winner.pathMedianWidthFraction ?: previousPathMedianWidthFraction
+            }
+            lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "VERTICAL"
             lastPathSampleCount = winner.pathSampleCount
             return TapeDetection(
                 sourceWidth = width,
@@ -431,7 +441,7 @@ class BlackTapeDetector(
         val pixelCount = candidateMask.total().toInt()
         if (candidateMaskBytes.size != pixelCount) candidateMaskBytes = ByteArray(pixelCount)
         candidateMask.get(0, 0, candidateMaskBytes)
-        val path = pathDirectionEstimator.estimate(
+        val verticalPath = pathDirectionEstimator.estimate(
             mask = candidateMaskBytes,
             frameWidth = candidateMask.cols(),
             frameHeight = candidateMask.rows(),
@@ -440,6 +450,18 @@ class BlackTapeDetector(
             right = bounds.x + bounds.width,
             bottom = bounds.y + bounds.height,
         )
+        val path = verticalPath ?: previousPathMedianWidthFraction?.let { trackedWidth ->
+            pathDirectionEstimator.estimateHorizontalFallback(
+                mask = candidateMaskBytes,
+                frameWidth = candidateMask.cols(),
+                frameHeight = candidateMask.rows(),
+                left = bounds.x,
+                top = bounds.y,
+                right = bounds.x + bounds.width,
+                bottom = bounds.y + bounds.height,
+                expectedMedianWidthFraction = trackedWidth,
+            )
+        }
         if (path == null) {
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
@@ -451,6 +473,10 @@ class BlackTapeDetector(
             pathBounds.right - pathBounds.left,
             pathBounds.bottom - pathBounds.top,
         )
+        if (path.horizontalFallback && !overlapsPrevious(refinedBounds)) {
+            rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
+            return null
+        }
         val pathAreaFraction =
             path.arcLengthFraction * path.medianWidthFraction *
                 frameShortSide * frameShortSide / frameArea
@@ -500,6 +526,8 @@ class BlackTapeDetector(
             nearFieldOffsetFraction =
                 (path.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
             pathSampleCount = path.sampleCount,
+            pathMedianWidthFraction = path.medianWidthFraction,
+            horizontalFallback = path.horizontalFallback,
         )
     }
 
@@ -613,7 +641,10 @@ class BlackTapeDetector(
 
     private fun registerDetectionMiss() {
         consecutiveDetectionMisses++
-        if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) previousBounds = null
+        if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) {
+            previousBounds = null
+            previousPathMedianWidthFraction = null
+        }
     }
 
     private fun expand(bounds: Rect, frameWidth: Int, frameHeight: Int): Rect {
@@ -643,6 +674,8 @@ class BlackTapeDetector(
         val longSideFraction: Double,
         val nearFieldOffsetFraction: Double,
         val pathSampleCount: Int = 0,
+        val pathMedianWidthFraction: Double? = null,
+        val horizontalFallback: Boolean = false,
     )
 
     private data class FloorContext(

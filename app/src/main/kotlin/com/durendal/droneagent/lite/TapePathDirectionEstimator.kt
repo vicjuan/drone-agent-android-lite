@@ -13,6 +13,7 @@ internal data class TapePathEstimate(
     val widthConsistency: Double,
     val sampleCount: Int,
     val bounds: TapePathBounds,
+    val horizontalFallback: Boolean = false,
 )
 
 internal data class TapePathBounds(
@@ -148,6 +149,264 @@ internal class TapePathDirectionEstimator {
             bounds = pathBounds,
         )
     }
+    /**
+     * Reacquires the same tracked ribbon after it rotates too far for row-wise tracing.
+     *
+     * This is deliberately unavailable without a trusted width from an earlier vertical trace.
+     * It scans columns in both directions and rejects runs whose thickness no longer matches
+     * that ribbon, preventing a long, thin floor seam from winning merely because it is horizontal.
+     */
+    fun estimateHorizontalFallback(
+        mask: ByteArray,
+        frameWidth: Int,
+        frameHeight: Int,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        expectedMedianWidthFraction: Double,
+    ): TapePathEstimate? {
+        require(mask.size >= frameWidth * frameHeight)
+        if (left !in 0 until right || top !in 0 until bottom) return null
+        if (right > frameWidth || bottom > frameHeight) return null
+
+        val frameShortSide = minOf(frameWidth, frameHeight).toDouble()
+        val expectedWidth = expectedMedianWidthFraction * frameShortSide
+        if (expectedWidth !in
+            frameShortSide * MIN_LOCAL_WIDTH_FRACTION..
+            frameShortSide * MAX_LOCAL_WIDTH_FRACTION
+        ) {
+            return null
+        }
+        val minimumTrackedWidth = expectedWidth * MIN_TRACKED_WIDTH_RATIO
+        val maximumTrackedWidth = expectedWidth * MAX_TRACKED_WIDTH_RATIO
+        val leftToRight = traceColumns(
+            mask = mask,
+            frameWidth = frameWidth,
+            left = left,
+            top = top,
+            right = right,
+            bottom = bottom,
+            step = 1,
+            minimumTrackedWidth = minimumTrackedWidth,
+            maximumTrackedWidth = maximumTrackedWidth,
+            expectedWidth = expectedWidth,
+        )
+        val rightToLeft = traceColumns(
+            mask = mask,
+            frameWidth = frameWidth,
+            left = left,
+            top = top,
+            right = right,
+            bottom = bottom,
+            step = -1,
+            minimumTrackedWidth = minimumTrackedWidth,
+            maximumTrackedWidth = maximumTrackedWidth,
+            expectedWidth = expectedWidth,
+        )
+        val trace = listOfNotNull(leftToRight, rightToLeft).maxByOrNull {
+            it.nearFieldCenterY + it.arcLength / frameShortSide
+        } ?: return null
+        val arcLengthFraction = trace.arcLength / frameShortSide
+        if (arcLengthFraction < MIN_ARC_LENGTH_FRACTION) return null
+
+        val sortedWidths = trace.widths.copyOf(trace.pointCount).apply { sort() }
+        val medianWidth = sortedWidths[trace.pointCount / 2]
+        if (medianWidth !in minimumTrackedWidth..maximumTrackedWidth) return null
+        val deviations =
+            DoubleArray(trace.pointCount) { abs(trace.widths[it] - medianWidth) }.apply { sort() }
+        val medianConsistency =
+            (1.0 - deviations[trace.pointCount / 2] / medianWidth).coerceIn(0.0, 1.0)
+        val lowerWidth =
+            sortedWidths[(trace.pointCount * WIDTH_LOWER_QUANTILE).toInt()]
+        val upperWidth =
+            sortedWidths[
+                (trace.pointCount * WIDTH_UPPER_QUANTILE).toInt()
+                    .coerceAtMost(trace.pointCount - 1)
+            ]
+        val widthConsistency = minOf(
+            medianConsistency,
+            (lowerWidth / upperWidth).coerceIn(0.0, 1.0),
+        )
+        if (widthConsistency < MIN_WIDTH_CONSISTENCY) return null
+
+        val targetArc = trace.arcLength * LOOKAHEAD_ARC_FRACTION
+        var lookaheadIndex = 0
+        while (
+            lookaheadIndex < trace.pointCount - 1 &&
+            trace.cumulativeArc[lookaheadIndex] < targetArc
+        ) {
+            lookaheadIndex++
+        }
+        val tangentSpan =
+            (trace.pointCount / 20).coerceIn(MIN_TANGENT_HALF_SPAN, MAX_TANGENT_HALF_SPAN)
+        val behind = (lookaheadIndex - tangentSpan).coerceAtLeast(0)
+        val ahead = (lookaheadIndex + tangentSpan).coerceAtMost(trace.pointCount - 1)
+        val deltaX = trace.pointsX[ahead] - trace.pointsX[behind]
+        val deltaY = trace.pointsY[ahead] - trace.pointsY[behind]
+        if (deltaX == 0.0 && deltaY == 0.0) return null
+
+        var pathTop = frameHeight
+        var pathBottom = 0
+        for (index in 0 until trace.pointCount) {
+            val runStart =
+                (trace.pointsY[index] - (trace.widths[index] - 1.0) / 2.0).roundToInt()
+            pathTop = minOf(pathTop, runStart)
+            pathBottom = maxOf(pathBottom, runStart + trace.widths[index].toInt())
+        }
+        val firstX = trace.pointsX[0].toInt()
+        val lastX = trace.pointsX[trace.pointCount - 1].toInt()
+        return TapePathEstimate(
+            nearFieldCenterX = trace.nearFieldCenterX,
+            lookaheadAngleFromVerticalDegrees =
+                TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY),
+            arcLengthFraction = arcLengthFraction,
+            medianWidthFraction = medianWidth / frameShortSide,
+            widthConsistency = widthConsistency,
+            sampleCount = trace.pointCount,
+            bounds = TapePathBounds(
+                left = minOf(firstX, lastX).coerceIn(left, right - 1),
+                top = pathTop.coerceIn(top, bottom - 1),
+                right = (maxOf(firstX, lastX) + 1).coerceIn(left + 1, right),
+                bottom = pathBottom.coerceIn(top + 1, bottom),
+            ),
+            horizontalFallback = true,
+        )
+    }
+
+    private fun traceColumns(
+        mask: ByteArray,
+        frameWidth: Int,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        step: Int,
+        minimumTrackedWidth: Double,
+        maximumTrackedWidth: Double,
+        expectedWidth: Double,
+    ): HorizontalTrace? {
+        val capacity = right - left
+        val pointsX = DoubleArray(capacity)
+        val pointsY = DoubleArray(capacity)
+        val widths = DoubleArray(capacity)
+        var pointCount = 0
+        var previousCenter = Double.NaN
+        var previousWidth = Double.NaN
+        var missingColumns = 0
+        var x = if (step > 0) left else right - 1
+        while (x in left until right) {
+            val run = nearestColumnRun(
+                mask = mask,
+                frameWidth = frameWidth,
+                x = x,
+                top = top,
+                bottom = bottom,
+                previousCenter = previousCenter,
+                previousWidth = previousWidth,
+                minimumTrackedWidth = minimumTrackedWidth,
+                maximumTrackedWidth = maximumTrackedWidth,
+                expectedWidth = expectedWidth,
+            )
+            if (run == null) {
+                if (pointCount > 0 && ++missingColumns > MAX_CONSECUTIVE_MISSING_COLUMNS) break
+            } else {
+                missingColumns = 0
+                previousCenter = run.center
+                previousWidth = run.width
+                pointsX[pointCount] = x.toDouble()
+                pointsY[pointCount] = run.center
+                widths[pointCount] = run.width
+                pointCount++
+            }
+            x += step
+        }
+        if (pointCount < MIN_SAMPLE_COUNT) return null
+
+        val cumulativeArc = DoubleArray(pointCount)
+        for (index in 1 until pointCount) {
+            cumulativeArc[index] = cumulativeArc[index - 1] + hypot(
+                pointsX[index] - pointsX[index - 1],
+                pointsY[index] - pointsY[index - 1],
+            )
+        }
+        val arcLength = cumulativeArc[pointCount - 1]
+        val anchorSamples = minOf(NEAR_FIELD_SAMPLE_COUNT, pointCount)
+        var nearFieldCenterX = 0.0
+        var nearFieldCenterY = 0.0
+        for (index in 0 until anchorSamples) {
+            nearFieldCenterX += pointsX[index]
+            nearFieldCenterY += pointsY[index]
+        }
+        return HorizontalTrace(
+            pointsX = pointsX,
+            pointsY = pointsY,
+            widths = widths,
+            cumulativeArc = cumulativeArc,
+            pointCount = pointCount,
+            arcLength = arcLength,
+            nearFieldCenterX = nearFieldCenterX / anchorSamples,
+            nearFieldCenterY = nearFieldCenterY / anchorSamples,
+        )
+    }
+
+    private fun nearestColumnRun(
+        mask: ByteArray,
+        frameWidth: Int,
+        x: Int,
+        top: Int,
+        bottom: Int,
+        previousCenter: Double,
+        previousWidth: Double,
+        minimumTrackedWidth: Double,
+        maximumTrackedWidth: Double,
+        expectedWidth: Double,
+    ): PixelRun? {
+        var best: PixelRun? = null
+        var y = top
+        while (y < bottom) {
+            while (y < bottom && mask[y * frameWidth + x].toInt() == 0) y++
+            if (y >= bottom) break
+            val runStart = y
+            while (y < bottom && mask[y * frameWidth + x].toInt() != 0) y++
+            val candidate = PixelRun(runStart, y)
+            if (candidate.width !in minimumTrackedWidth..maximumTrackedWidth) continue
+            val candidateCost =
+                if (previousCenter.isNaN()) {
+                    abs(candidate.width - expectedWidth)
+                } else {
+                    abs(candidate.center - previousCenter) +
+                        abs(candidate.width - previousWidth) * WIDTH_CHANGE_COST
+                }
+            val bestCost = best?.let {
+                if (previousCenter.isNaN()) {
+                    abs(it.width - expectedWidth)
+                } else {
+                    abs(it.center - previousCenter) +
+                        abs(it.width - previousWidth) * WIDTH_CHANGE_COST
+                }
+            }
+            if (
+                bestCost == null ||
+                candidateCost < bestCost ||
+                (candidateCost == bestCost && candidate.center > checkNotNull(best).center)
+            ) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    private data class HorizontalTrace(
+        val pointsX: DoubleArray,
+        val pointsY: DoubleArray,
+        val widths: DoubleArray,
+        val cumulativeArc: DoubleArray,
+        val pointCount: Int,
+        val arcLength: Double,
+        val nearFieldCenterX: Double,
+        val nearFieldCenterY: Double,
+    )
 
     private fun nearestRun(
         mask: ByteArray,
@@ -200,6 +459,9 @@ internal class TapePathDirectionEstimator {
         const val WIDTH_UPPER_QUANTILE = 0.90
         const val WIDTH_CHANGE_COST = 0.75
         const val MAX_CONSECUTIVE_MISSING_ROWS = 3
+        const val MAX_CONSECUTIVE_MISSING_COLUMNS = 3
+        const val MIN_TRACKED_WIDTH_RATIO = 0.60
+        const val MAX_TRACKED_WIDTH_RATIO = 1.60
         const val NEAR_FIELD_SAMPLE_COUNT = 8
         const val MIN_TANGENT_HALF_SPAN = 3
         const val MAX_TANGENT_HALF_SPAN = 12

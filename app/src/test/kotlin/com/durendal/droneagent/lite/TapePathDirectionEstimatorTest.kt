@@ -58,6 +58,65 @@ class TapePathDirectionEstimatorTest {
         assertTrue(estimate.nearFieldCenterX > 425.0)
         assertTrue(estimate.medianWidthFraction > 0.07)
     }
+    @Test
+    fun `horizontal fallback follows tracked tape width instead of a thin floor seam`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (x in 100 until 550) {
+            fillColumnRun(mask, x, centerY = 275.0, halfWidth = 15)
+        }
+        for (x in 0 until FRAME_WIDTH) {
+            fillColumnRun(mask, x, centerY = 325.0, halfWidth = 3)
+        }
+
+        val unanchored = estimator.estimate(
+            mask = mask,
+            frameWidth = FRAME_WIDTH,
+            frameHeight = FRAME_HEIGHT,
+            left = 0,
+            top = 0,
+            right = FRAME_WIDTH,
+            bottom = FRAME_HEIGHT,
+        )
+        val tracked = checkNotNull(
+            estimator.estimateHorizontalFallback(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 0,
+                top = 0,
+                right = FRAME_WIDTH,
+                bottom = FRAME_HEIGHT,
+                expectedMedianWidthFraction = 30.0 / FRAME_HEIGHT,
+            ),
+        )
+
+        assertEquals(null, unanchored)
+        assertTrue(tracked.horizontalFallback)
+        assertTrue(kotlin.math.abs(tracked.lookaheadAngleFromVerticalDegrees) > 80.0)
+        assertEquals(30.0 / FRAME_HEIGHT, tracked.medianWidthFraction, 0.01)
+        assertTrue(tracked.bounds.bottom < 310)
+    }
+
+    @Test
+    fun `horizontal fallback rejects a ribbon whose width no longer matches tracking`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (x in 100 until 550) {
+            fillColumnRun(mask, x, centerY = 275.0, halfWidth = 15)
+        }
+
+        val estimate = estimator.estimateHorizontalFallback(
+            mask = mask,
+            frameWidth = FRAME_WIDTH,
+            frameHeight = FRAME_HEIGHT,
+            left = 0,
+            top = 0,
+            right = FRAME_WIDTH,
+            bottom = FRAME_HEIGHT,
+            expectedMedianWidthFraction = 10.0 / FRAME_HEIGHT,
+        )
+
+        assertEquals(null, estimate)
+    }
 
     private fun estimateRibbon(curveDirection: Double): TapePathEstimate? {
         val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
@@ -85,6 +144,11 @@ class TapePathDirectionEstimatorTest {
         val left = (centerX - halfWidth).toInt().coerceAtLeast(0)
         val right = (centerX + halfWidth).toInt().coerceAtMost(FRAME_WIDTH)
         for (x in left until right) mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
+    }
+    private fun fillColumnRun(mask: ByteArray, x: Int, centerY: Double, halfWidth: Int) {
+        val top = (centerY - halfWidth).toInt().coerceAtLeast(0)
+        val bottom = (centerY + halfWidth).toInt().coerceAtMost(FRAME_HEIGHT)
+        for (y in top until bottom) mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
     }
 
     private companion object {
