@@ -13,7 +13,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
-import kotlin.math.hypot
 import kotlin.math.min
 
 /**
@@ -242,9 +241,9 @@ class BlackTapeDetector(
                         contour,
                         contourIndex,
                         contours,
-                        cleanedBlackMask,
+                        blackMask,
                         candidateMask,
-                        lab,
+                        rgb,
                         floorMask,
                         frameArea,
                         frameShortSide,
@@ -355,9 +354,9 @@ class BlackTapeDetector(
         contour: MatOfPoint,
         contourIndex: Int,
         contours: List<MatOfPoint>,
-        blackMask: Mat,
+        rawBlackMask: Mat,
         candidateMask: Mat,
-        lab: Mat,
+        rgb: Mat,
         floorMask: Mat,
         frameArea: Double,
         frameShortSide: Double,
@@ -371,9 +370,9 @@ class BlackTapeDetector(
         return scorePathCandidate(
             contourIndex = contourIndex,
             contours = contours,
-            blackMask = blackMask,
+            rawBlackMask = rawBlackMask,
             candidateMask = candidateMask,
-            lab = lab,
+            rgb = rgb,
             floorMask = floorMask,
             bounds = bounds,
             frameArea = frameArea,
@@ -385,9 +384,9 @@ class BlackTapeDetector(
     private fun scorePathCandidate(
         contourIndex: Int,
         contours: List<MatOfPoint>,
-        blackMask: Mat,
+        rawBlackMask: Mat,
         candidateMask: Mat,
-        lab: Mat,
+        rgb: Mat,
         floorMask: Mat,
         bounds: Rect,
         frameArea: Double,
@@ -395,8 +394,8 @@ class BlackTapeDetector(
         requireCurvature: Boolean,
     ): Candidate? {
 
-        if (candidateMask.empty() || candidateMask.size() != blackMask.size()) {
-            candidateMask.create(blackMask.rows(), blackMask.cols(), org.opencv.core.CvType.CV_8UC1)
+        if (candidateMask.empty() || candidateMask.size() != rawBlackMask.size()) {
+            candidateMask.create(rawBlackMask.rows(), rawBlackMask.cols(), org.opencv.core.CvType.CV_8UC1)
         }
         candidateMask.setTo(Scalar(0.0))
         Imgproc.drawContours(candidateMask, contours, contourIndex, Scalar(255.0), Imgproc.FILLED)
@@ -459,19 +458,16 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
             return null
         }
-        // Measure only thresholded dark pixels inside this contour. A closed tape loop's
-        // outer contour also encloses brown floor, which must not contaminate tape colour.
-        Core.bitwise_and(candidateMask, blackMask, candidateMask)
-        val candidateMeanLab = Core.mean(lab, candidateMask)
-        val candidateChroma =
-            hypot(candidateMeanLab.`val`[1] - LAB_NEUTRAL_CHROMA, candidateMeanLab.`val`[2] - LAB_NEUTRAL_CHROMA)
-        val excessiveChroma =
-            candidateChroma > MAX_NEUTRAL_TAPE_CHROMA &&
-                (
-                    candidateMeanLab.`val`[0] > MAX_COLOR_CAST_TAPE_LIGHTNESS ||
-                        candidateChroma > MAX_DARK_TAPE_CHROMA
-                    )
-        if (excessiveChroma) {
+        // Morphological closing bridges glare gaps with nearby floor pixels. Colour must
+        // therefore be measured only from pixels that were dark in the original mask.
+        Core.bitwise_and(candidateMask, rawBlackMask, candidateMask)
+        val candidateMeanRgb = Core.mean(rgb, candidateMask)
+        val maximumChannel =
+            max(candidateMeanRgb.`val`[0], max(candidateMeanRgb.`val`[1], candidateMeanRgb.`val`[2]))
+        val minimumChannel =
+            min(candidateMeanRgb.`val`[0], min(candidateMeanRgb.`val`[1], candidateMeanRgb.`val`[2]))
+        val channelBalance = if (maximumChannel > 0.0) minimumChannel / maximumChannel else 0.0
+        if (channelBalance < MIN_TAPE_CHANNEL_BALANCE) {
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal] += 1
             return null
         }
@@ -660,10 +656,7 @@ class BlackTapeDetector(
         const val MIN_PATH_CURVATURE_DEGREES = 8.0
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
-        const val LAB_NEUTRAL_CHROMA = 128.0
-        const val MAX_NEUTRAL_TAPE_CHROMA = 12.0
-        const val MAX_DARK_TAPE_CHROMA = 24.0
-        const val MAX_COLOR_CAST_TAPE_LIGHTNESS = 45.0
+        const val MIN_TAPE_CHANNEL_BALANCE = 0.40
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
         val FLOOR_SEED_X_FRACTIONS = doubleArrayOf(0.08, 0.20, 0.35, 0.50, 0.65, 0.80, 0.92)

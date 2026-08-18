@@ -214,8 +214,8 @@ class BlackTapeDetectorInstrumentedTest {
             height,
             direction = 1.0,
             red = 55,
-            green = 35,
-            blue = 15,
+            green = 38,
+            blue = 25,
         )
 
         val detection = detectSequence(listOf(frame), width, height).single()
