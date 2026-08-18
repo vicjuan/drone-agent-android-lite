@@ -2,6 +2,7 @@ package com.durendal.droneagent.lite
 
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /** One locally connected black-tape path, ordered from the camera-near end upward. */
 internal data class TapePathEstimate(
@@ -11,6 +12,14 @@ internal data class TapePathEstimate(
     val medianWidthFraction: Double,
     val widthConsistency: Double,
     val sampleCount: Int,
+    val bounds: TapePathBounds,
+)
+
+internal data class TapePathBounds(
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
 )
 
 /**
@@ -44,16 +53,28 @@ internal class TapePathDirectionEstimator {
         val widths = DoubleArray(bottom - top)
         var pointCount = 0
         var previousCenter = Double.NaN
+        var previousWidth = Double.NaN
         var missingRows = 0
 
         for (y in bottom - 1 downTo top) {
-            val run = nearestRun(mask, frameWidth, y, left, right, previousCenter)
-            if (run == null || run.width > maximumLocalWidth) {
+            val run =
+                nearestRun(
+                    mask,
+                    frameWidth,
+                    y,
+                    left,
+                    right,
+                    previousCenter,
+                    previousWidth,
+                    maximumLocalWidth,
+                )
+            if (run == null) {
                 if (pointCount > 0 && ++missingRows > MAX_CONSECUTIVE_MISSING_ROWS) break
                 continue
             }
             missingRows = 0
             previousCenter = run.center
+            previousWidth = run.width
             pointsX[pointCount] = run.center
             pointsY[pointCount] = y.toDouble()
             widths[pointCount] = run.width
@@ -78,7 +99,12 @@ internal class TapePathDirectionEstimator {
         if (medianWidthFraction !in MIN_LOCAL_WIDTH_FRACTION..MAX_LOCAL_WIDTH_FRACTION) return null
         val deviations = DoubleArray(pointCount) { abs(widths[it] - medianWidth) }.apply { sort() }
         val medianDeviation = deviations[pointCount / 2]
-        val widthConsistency = (1.0 - medianDeviation / medianWidth).coerceIn(0.0, 1.0)
+        val medianConsistency = (1.0 - medianDeviation / medianWidth).coerceIn(0.0, 1.0)
+        val lowerWidth = sortedWidths[(pointCount * WIDTH_LOWER_QUANTILE).toInt()]
+        val upperWidth =
+            sortedWidths[(pointCount * WIDTH_UPPER_QUANTILE).toInt().coerceAtMost(pointCount - 1)]
+        val rangeConsistency = (lowerWidth / upperWidth).coerceIn(0.0, 1.0)
+        val widthConsistency = minOf(medianConsistency, rangeConsistency)
         if (widthConsistency < MIN_WIDTH_CONSISTENCY) return null
 
         val targetArc = arcLength * LOOKAHEAD_ARC_FRACTION
@@ -97,6 +123,19 @@ internal class TapePathDirectionEstimator {
         var nearFieldCenterX = 0.0
         for (index in 0 until anchorSamples) nearFieldCenterX += pointsX[index]
         nearFieldCenterX /= anchorSamples
+        var pathLeft = frameWidth
+        var pathRight = 0
+        for (index in 0 until pointCount) {
+            val runStart = (pointsX[index] - (widths[index] - 1.0) / 2.0).roundToInt()
+            pathLeft = minOf(pathLeft, runStart)
+            pathRight = maxOf(pathRight, runStart + widths[index].toInt())
+        }
+        val pathBounds = TapePathBounds(
+            left = pathLeft.coerceIn(left, right - 1),
+            top = pointsY[pointCount - 1].toInt(),
+            right = pathRight.coerceIn(left + 1, right),
+            bottom = pointsY[0].toInt() + 1,
+        )
 
         return TapePathEstimate(
             nearFieldCenterX = nearFieldCenterX,
@@ -106,6 +145,7 @@ internal class TapePathDirectionEstimator {
             medianWidthFraction = medianWidthFraction,
             widthConsistency = widthConsistency,
             sampleCount = pointCount,
+            bounds = pathBounds,
         )
     }
 
@@ -116,6 +156,8 @@ internal class TapePathDirectionEstimator {
         left: Int,
         right: Int,
         previousCenter: Double,
+        previousWidth: Double,
+        maximumLocalWidth: Double,
     ): PixelRun? {
         var best: PixelRun? = null
         var x = left
@@ -125,14 +167,19 @@ internal class TapePathDirectionEstimator {
             val runStart = x
             while (x < right && mask[y * frameWidth + x].toInt() != 0) x++
             val candidate = PixelRun(runStart, x)
-            val candidateDistance =
-                if (previousCenter.isNaN()) abs(candidate.center - (left + right) / 2.0)
-                else abs(candidate.center - previousCenter)
-            val bestDistance = best?.let {
-                if (previousCenter.isNaN()) abs(it.center - (left + right) / 2.0)
-                else abs(it.center - previousCenter)
+            if (candidate.width > maximumLocalWidth) continue
+            if (previousCenter.isNaN()) {
+                if (best == null || candidate.width > best.width) best = candidate
+                continue
             }
-            if (bestDistance == null || candidateDistance < bestDistance) best = candidate
+            val candidateCost =
+                abs(candidate.center - previousCenter) +
+                    abs(candidate.width - previousWidth) * WIDTH_CHANGE_COST
+            val bestCost = best?.let {
+                abs(it.center - previousCenter) +
+                    abs(it.width - previousWidth) * WIDTH_CHANGE_COST
+            }
+            if (bestCost == null || candidateCost < bestCost) best = candidate
         }
         return best
     }
@@ -149,6 +196,9 @@ internal class TapePathDirectionEstimator {
         const val MIN_LOCAL_WIDTH_FRACTION = 0.025
         const val MAX_LOCAL_WIDTH_FRACTION = 0.20
         const val MIN_WIDTH_CONSISTENCY = 0.40
+        const val WIDTH_LOWER_QUANTILE = 0.10
+        const val WIDTH_UPPER_QUANTILE = 0.90
+        const val WIDTH_CHANGE_COST = 0.75
         const val MAX_CONSECUTIVE_MISSING_ROWS = 3
         const val NEAR_FIELD_SAMPLE_COUNT = 8
         const val MIN_TANGENT_HALF_SPAN = 3

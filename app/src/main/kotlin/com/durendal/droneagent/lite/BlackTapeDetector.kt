@@ -360,7 +360,6 @@ class BlackTapeDetector(
                 blackMask,
                 candidateMask,
                 floorMask,
-                contourArea,
                 bounds,
                 frameArea,
                 frameShortSide,
@@ -419,33 +418,10 @@ class BlackTapeDetector(
         blackMask: Mat,
         candidateMask: Mat,
         floorMask: Mat,
-        contourArea: Double,
         bounds: Rect,
         frameArea: Double,
         frameShortSide: Double,
     ): Candidate? {
-        val areaFraction = contourArea / frameArea
-        if (areaFraction !in MIN_PATH_AREA_FRACTION..MAX_PATH_AREA_FRACTION) {
-            rejectionCounts[TapeCandidateRejection.AREA.ordinal] += 1
-            return null
-        }
-        val overlapsPrevious = overlapsPrevious(bounds)
-        if (
-            !overlapsPrevious &&
-            (bounds.x <= HORIZONTAL_EDGE_MARGIN ||
-                bounds.x + bounds.width >= floorMask.cols() - HORIZONTAL_EDGE_MARGIN)
-        ) {
-            rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
-            return null
-        }
-        val context = floorContext(floorMask, bounds)
-        if (
-            context.surroundingFraction < MIN_PATH_SURROUNDING_FLOOR ||
-            context.minimumSideFraction < MIN_PATH_SIDE_FLOOR
-        ) {
-            rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal] += 1
-            return null
-        }
 
         if (candidateMask.empty() || candidateMask.size() != blackMask.size()) {
             candidateMask.create(blackMask.rows(), blackMask.cols(), org.opencv.core.CvType.CV_8UC1)
@@ -468,6 +444,37 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
+        val pathBounds = path.bounds
+        val refinedBounds = Rect(
+            pathBounds.left,
+            pathBounds.top,
+            pathBounds.right - pathBounds.left,
+            pathBounds.bottom - pathBounds.top,
+        )
+        val pathAreaFraction =
+            path.arcLengthFraction * path.medianWidthFraction *
+                frameShortSide * frameShortSide / frameArea
+        if (pathAreaFraction !in MIN_PATH_AREA_FRACTION..MAX_PATH_AREA_FRACTION) {
+            rejectionCounts[TapeCandidateRejection.AREA.ordinal] += 1
+            return null
+        }
+        val overlapsPrevious = overlapsPrevious(refinedBounds)
+        val spansFrameWidth =
+            refinedBounds.x <= HORIZONTAL_EDGE_MARGIN &&
+                refinedBounds.x + refinedBounds.width >=
+                floorMask.cols() - HORIZONTAL_EDGE_MARGIN
+        if (!overlapsPrevious && spansFrameWidth) {
+            rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal] += 1
+            return null
+        }
+        val context = floorContext(floorMask, refinedBounds)
+        if (
+            context.surroundingFraction < MIN_PATH_SURROUNDING_FLOOR ||
+            context.minimumSideFraction < MIN_PATH_SIDE_FLOOR
+        ) {
+            rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal] += 1
+            return null
+        }
         val minimumPathFraction =
             if (overlapsPrevious) MIN_TRACKED_PATH_FRACTION else MIN_PATH_FRACTION
         if (path.arcLengthFraction < minimumPathFraction) {
@@ -486,7 +493,7 @@ class BlackTapeDetector(
                 continuityConfidence * 0.10
             ).coerceIn(0.0, 1.0)
         return Candidate(
-            bounds = bounds,
+            bounds = refinedBounds,
             score = score,
             angleFromVerticalDegrees = path.lookaheadAngleFromVerticalDegrees,
             longSideFraction = path.arcLengthFraction,
@@ -555,9 +562,14 @@ class BlackTapeDetector(
         val rightFraction =
             if (rightWidth == 0) 0.0
             else maskFraction(floorMask, Rect(rightStart, bounds.y, rightWidth, bounds.height))
+        val minimumVisibleSideFraction = when {
+            leftWidth == 0 -> rightFraction
+            rightWidth == 0 -> leftFraction
+            else -> min(leftFraction, rightFraction)
+        }
         return FloorContext(
             surroundingFraction = surroundingFraction,
-            minimumSideFraction = min(leftFraction, rightFraction),
+            minimumSideFraction = minimumVisibleSideFraction,
         )
     }
 

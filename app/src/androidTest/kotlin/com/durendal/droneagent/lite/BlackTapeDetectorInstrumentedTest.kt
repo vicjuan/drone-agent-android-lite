@@ -91,6 +91,61 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun curvedTapeCanBeAcquiredWhileEnteringFromFrameEdge() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = 625.0 - 180.0 * forwardFraction
+            val left = (center - 15.0).toInt().coerceAtLeast(0)
+            val right = (center + 15.0).toInt().coerceAtMost(width)
+            fillRect(frame, width, left, y, right, y + 1, value = 20)
+        }
+
+        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
+
+        assertEquals(1.0, detection.bounds.right, 0.001)
+        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+    }
+
+    @Test
+    fun thickTapeWinsWhenItIntersectsAThinFloorSeam() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val nearFraction = y / (height - 1.0)
+            val junctionX = 360.0
+            val tapeCenter = junctionX + 80.0 * nearFraction
+            val seamCenter = junctionX + 40.0 * nearFraction
+            fillRect(
+                frame,
+                width,
+                (tapeCenter - 15.0).toInt(),
+                y,
+                (tapeCenter + 15.0).toInt(),
+                y + 1,
+                value = 20,
+            )
+            fillRect(
+                frame,
+                width,
+                (seamCenter - 3.0).toInt(),
+                y,
+                (seamCenter + 3.0).toInt(),
+                y + 1,
+                value = 70,
+            )
+        }
+
+        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
+
+        assertTrue(detection.nearFieldOffsetFraction > 0.15)
+        assertTrue(detection.bounds.right > 0.68)
+    }
+
+    @Test
     fun darkDoorEdgeAboveGrayBaseboardIsNotTape() {
         val width = 640
         val height = 360

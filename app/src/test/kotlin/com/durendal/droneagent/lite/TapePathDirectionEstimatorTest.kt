@@ -33,6 +33,32 @@ class TapePathDirectionEstimatorTest {
         assertEquals(0.0, estimate.lookaheadAngleFromVerticalDegrees, 0.1)
     }
 
+    @Test
+    fun `wide tape wins over a connected thin floor seam near image center`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (y in 0 until FRAME_HEIGHT) {
+            val nearFraction = y / (FRAME_HEIGHT - 1.0)
+            val junctionX = 360.0
+            fillRun(mask, y, junctionX + 80.0 * nearFraction, halfWidth = 15)
+            fillRun(mask, y, junctionX + 40.0 * nearFraction, halfWidth = 3)
+        }
+
+        val estimate = checkNotNull(
+            estimator.estimate(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 340,
+                top = 0,
+                right = 456,
+                bottom = FRAME_HEIGHT,
+            ),
+        )
+
+        assertTrue(estimate.nearFieldCenterX > 425.0)
+        assertTrue(estimate.medianWidthFraction > 0.07)
+    }
+
     private fun estimateRibbon(curveDirection: Double): TapePathEstimate? {
         val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
         for (y in 0 until FRAME_HEIGHT) {
@@ -53,6 +79,12 @@ class TapePathDirectionEstimatorTest {
             right = FRAME_WIDTH,
             bottom = FRAME_HEIGHT,
         )
+    }
+
+    private fun fillRun(mask: ByteArray, y: Int, centerX: Double, halfWidth: Int) {
+        val left = (centerX - halfWidth).toInt().coerceAtLeast(0)
+        val right = (centerX + halfWidth).toInt().coerceAtMost(FRAME_WIDTH)
+        for (x in left until right) mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
     }
 
     private companion object {
