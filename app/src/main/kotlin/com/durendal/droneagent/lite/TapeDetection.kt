@@ -76,6 +76,7 @@ internal enum class TapeCandidateRejection {
     AREA,
     ASPECT,
     LENGTH,
+    CURVATURE,
     WIDTH,
     HORIZONTAL_FRAME_EDGE,
     ORIENTED_FILL,

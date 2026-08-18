@@ -11,6 +11,7 @@ internal data class TapePathEstimate(
     val arcLengthFraction: Double,
     val medianWidthFraction: Double,
     val widthConsistency: Double,
+    val curvatureDegrees: Double,
     val sampleCount: Int,
     val bounds: TapePathBounds,
     val horizontalFallback: Boolean = false,
@@ -145,6 +146,7 @@ internal class TapePathDirectionEstimator {
             arcLengthFraction = arcLengthFraction,
             medianWidthFraction = medianWidthFraction,
             widthConsistency = widthConsistency,
+            curvatureDegrees = curvatureDegrees(pointsX, pointsY, pointCount),
             sampleCount = pointCount,
             bounds = pathBounds,
         )
@@ -263,6 +265,8 @@ internal class TapePathDirectionEstimator {
             arcLengthFraction = arcLengthFraction,
             medianWidthFraction = medianWidth / frameShortSide,
             widthConsistency = widthConsistency,
+            curvatureDegrees =
+                curvatureDegrees(trace.pointsX, trace.pointsY, trace.pointCount),
             sampleCount = trace.pointCount,
             bounds = TapePathBounds(
                 left = minOf(firstX, lastX).coerceIn(left, right - 1),
@@ -408,6 +412,25 @@ internal class TapePathDirectionEstimator {
         val nearFieldCenterY: Double,
     )
 
+    private fun curvatureDegrees(
+        pointsX: DoubleArray,
+        pointsY: DoubleArray,
+        pointCount: Int,
+    ): Double {
+        val tangentSpan = (pointCount / CURVATURE_TANGENT_DIVISOR)
+            .coerceIn(MIN_TANGENT_HALF_SPAN, MAX_CURVATURE_TANGENT_SPAN)
+        val nearAngle = TapeOrientation.deviationFromVerticalDegrees(
+            pointsX[tangentSpan] - pointsX[0],
+            pointsY[tangentSpan] - pointsY[0],
+        )
+        val farAngle = TapeOrientation.deviationFromVerticalDegrees(
+            pointsX[pointCount - 1] - pointsX[pointCount - 1 - tangentSpan],
+            pointsY[pointCount - 1] - pointsY[pointCount - 1 - tangentSpan],
+        )
+        val difference = abs(nearAngle - farAngle)
+        return minOf(difference, 180.0 - difference)
+    }
+
     private fun nearestRun(
         mask: ByteArray,
         frameWidth: Int,
@@ -464,6 +487,8 @@ internal class TapePathDirectionEstimator {
         const val MAX_TRACKED_WIDTH_RATIO = 1.60
         const val NEAR_FIELD_SAMPLE_COUNT = 8
         const val MIN_TANGENT_HALF_SPAN = 3
+        const val CURVATURE_TANGENT_DIVISOR = 8
+        const val MAX_CURVATURE_TANGENT_SPAN = 24
         const val MAX_TANGENT_HALF_SPAN = 12
     }
 }

@@ -17,6 +17,7 @@ class TapePathDirectionEstimatorTest {
         assertEquals(FRAME_WIDTH / 2.0, estimate.nearFieldCenterX, 2.0)
         assertTrue(estimate.lookaheadAngleFromVerticalDegrees > 10.0)
         assertTrue(estimate.arcLengthFraction > 0.9)
+        assertTrue(estimate.curvatureDegrees > 8.0)
     }
 
     @Test
@@ -31,6 +32,7 @@ class TapePathDirectionEstimatorTest {
         val estimate = checkNotNull(estimateRibbon(curveDirection = 0.0))
 
         assertEquals(0.0, estimate.lookaheadAngleFromVerticalDegrees, 0.1)
+        assertEquals(0.0, estimate.curvatureDegrees, 0.1)
     }
 
     @Test

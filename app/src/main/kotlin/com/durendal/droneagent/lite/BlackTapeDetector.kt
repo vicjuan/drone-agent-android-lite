@@ -111,7 +111,7 @@ class BlackTapeDetector(
         (
             "mode=%s pathAxis=%s pathSamples=%d otsu=%.1f effective=%.1f separation=%.1f contours=%d " +
                 "floorSeeds=%d floor=%.2f rejects=invalid:%d area:%d aspect:%d length:%d " +
-                "width:%d edge:%d fill:%d floor:%d"
+                "curve:%d width:%d edge:%d fill:%d floor:%d"
             ).format(
             lastDetectionMode,
             lastPathAxis,
@@ -126,6 +126,7 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.AREA.ordinal],
             rejectionCounts[TapeCandidateRejection.ASPECT.ordinal],
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal],
+            rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal],
             rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.ORIENTED_FILL.ordinal],
@@ -466,6 +467,10 @@ class BlackTapeDetector(
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
         }
+        if (path.curvatureDegrees < MIN_PATH_CURVATURE_DEGREES) {
+            rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal] += 1
+            return null
+        }
         val pathBounds = path.bounds
         val refinedBounds = Rect(
             pathBounds.left,
@@ -709,6 +714,7 @@ class BlackTapeDetector(
         const val MIN_PATH_SIDE_FLOOR = 0.30
         const val MIN_PATH_FRACTION = 0.20
         const val MIN_TRACKED_PATH_FRACTION = 0.12
+        const val MIN_PATH_CURVATURE_DEGREES = 8.0
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_PREVIOUS_OVERLAP = 0.20
