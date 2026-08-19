@@ -87,7 +87,7 @@ class TapeCaptureReplayInstrumentedTest {
             assertTrue("${mask.name} is empty", mask.pixels.any { it != 0.toByte() })
         }
         assertEquals("accepted", capture.metadata["detection"])
-        assertEquals("PATH", capture.metadata["detector.mode"])
+        assertEquals(REPLAY_TEST_MODE.name, capture.metadata["detector.mode"])
         assertTrue(
             capture.metadata.toString(),
             capture.metadata.containsKey("detector.diagnostics"),
@@ -96,6 +96,27 @@ class TapeCaptureReplayInstrumentedTest {
             capture.metadata.toString(),
             capture.metadata.containsKey("frame.acceptedAtNanos"),
         )
+    }
+
+    /**
+     * PATH is the mode that actually flies, and its accepts are curved. Straight
+     * mode alone would leave the replay guarantee unproven for every frame the
+     * aircraft records in the air.
+     */
+    @Test
+    fun aCurvedPathModeCaptureReplaysToTheLiveDetection() {
+        val width = 640
+        val height = 360
+        val frame = frameWithCurvedTape(width, height)
+
+        val live = detectWithCapture(frame, width, height, TapeDetectionMode.PATH)
+        val capture = singleStoredCapture()
+        assertArrayEquals(frame, capture.frame.pixels)
+        assertEquals("PATH", capture.metadata["detector.mode"])
+
+        val replayed = replay(capture, TapeDetectionMode.PATH)
+        assertNotNull("replay produced no detection", replayed)
+        assertSameDetection(live, replayed!!)
     }
 
     private fun assertSameDetection(expected: TapeDetection, actual: TapeDetection) {
@@ -115,7 +136,12 @@ class TapeCaptureReplayInstrumentedTest {
      * Runs one frame through a live detector with recording armed, then flushes
      * the recorder's window so the frame reaches storage.
      */
-    private fun detectWithCapture(frame: ByteArray, width: Int, height: Int): TapeDetection {
+    private fun detectWithCapture(
+        frame: ByteArray,
+        width: Int,
+        height: Int,
+        mode: TapeDetectionMode = REPLAY_TEST_MODE,
+    ): TapeDetection {
         val recorder = TapeCaptureRecorder(
             root = root,
             log = {},
@@ -132,6 +158,10 @@ class TapeCaptureReplayInstrumentedTest {
             captureFlightContext = { mapOf("gimbal.pitchDegrees" to "-90.0") },
         )
         return detector.use {
+            // A straight strip carries no curvature, which PATH mode requires,
+            // so the straight cases run in STRAIGHT. Replay must use the same mode
+            // or the comparison says nothing about the capture.
+            it.setDetectionMode(mode)
             recorder.arm()
             it.submitRgba(frame, 0, frame.size, width, height)
             val result = results.poll(20, TimeUnit.SECONDS)
@@ -143,8 +173,14 @@ class TapeCaptureReplayInstrumentedTest {
         }
     }
 
-    private fun replay(capture: TapeCapture): TapeDetection? =
-        BlackTapeDetector(onResult = {}).use { it.replay(capture) }
+    private fun replay(
+        capture: TapeCapture,
+        mode: TapeDetectionMode = REPLAY_TEST_MODE,
+    ): TapeDetection? =
+        BlackTapeDetector(onResult = {}).use {
+            it.setDetectionMode(mode)
+            it.replay(capture)
+        }
 
     private fun singleStoredCapture(): TapeCapture {
         val directories = TapeCaptureStore(root).captures()
@@ -172,6 +208,38 @@ class TapeCaptureReplayInstrumentedTest {
         return frame
     }
 
+    /** Brown board with one parabolic dark ribbon: the detector's PATH accept. */
+    private fun frameWithCurvedTape(width: Int, height: Int): ByteArray {
+        val frame = ByteArray(width * height * 4)
+        for (index in 0 until width * height) {
+            frame[index * 4] = 180.toByte()
+            frame[index * 4 + 1] = 120.toByte()
+            frame[index * 4 + 2] = 50.toByte()
+            frame[index * 4 + 3] = 255.toByte()
+        }
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            val left = (center - TAPE_HALF_WIDTH).toInt().coerceAtLeast(0)
+            val right = (center + TAPE_HALF_WIDTH).toInt().coerceAtMost(width)
+            for (x in left until right) {
+                val base = (y * width + x) * 4
+                frame[base] = 20
+                frame[base + 1] = 20
+                frame[base + 2] = 20
+            }
+        }
+        return frame
+    }
+
     /** LinkedBlockingQueue rejects nulls; a rejected frame is a real outcome. */
     private class Optional(val value: TapeDetection?)
+
+    private companion object {
+        val REPLAY_TEST_MODE = TapeDetectionMode.STRAIGHT
+
+        /** Matches the curve fixtures in BlackTapeDetectorInstrumentedTest. */
+        const val CURVE_DISPLACEMENT = 140.0
+        const val TAPE_HALF_WIDTH = 15.0
+    }
 }
