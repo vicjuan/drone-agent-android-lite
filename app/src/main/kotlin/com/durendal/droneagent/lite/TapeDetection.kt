@@ -76,6 +76,15 @@ data class TapeDetection(
      * the measurement stage knows and must state.
      */
     val lookahead: TapeLookahead?,
+    /**
+     * Whether the far end of the chain stops inside the frame. Only then may the
+     * mission layer treat shortening as an approaching end of tape; a chain cut
+     * off by the border says the tape left the view, which is the opposite.
+     */
+    val endpointCandidate: Boolean = false,
+    /** A closed loop has no end to reach and must never trigger a turnaround. */
+    val closedLoop: Boolean = false,
+    val centerline: TapeCenterlinePath? = null,
 ) {
     val quality: PathQuality
         get() = if (lookahead == null) PathQuality.NEAR_FIELD_ONLY else PathQuality.FULL_PATH
@@ -130,7 +139,9 @@ internal enum class TapeCandidateRejection {
     CHROMA,
     FLOOR_CONTEXT,
     NO_CENTERLINE,
+    NO_NEAR_FIELD_COMPONENT,
     INSUFFICIENT_LOOKAHEAD,
+    AMBIGUOUS_BRANCH,
     TEMPORAL_DISCONTINUITY,
     BRIDGE_REJECTED,
 }

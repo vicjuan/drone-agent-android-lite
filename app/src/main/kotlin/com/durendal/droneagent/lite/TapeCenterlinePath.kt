@@ -8,11 +8,11 @@ package com.durendal.droneagent.lite
  * scaled copy of the preview: the same numbers place the path correctly on any
  * view size, and the overlay never has to know the working resolution.
  *
- * This is the shadow result made visible. It carries no authority over the
- * aircraft — an operator seeing this line is seeing what the new geometry found,
- * not what the controller is following.
+ * This is the path the controller actually follows, so what an operator sees on
+ * the preview and what drives forward, right and yaw are the same geometry. An
+ * overlay that could disagree with the controller would be worse than no overlay.
  */
-internal class TapeShadowPath(
+class TapeCenterlinePath internal constructor(
     val sourceWidth: Int,
     val sourceHeight: Int,
     val xFractions: FloatArray,
@@ -23,6 +23,9 @@ internal class TapeShadowPath(
     val lookaheadYFraction: Float?,
     val quality: PathQuality,
     val rejection: String?,
+    val branchCount: Int = 0,
+    val closedLoop: Boolean = false,
+    val endpointCandidate: Boolean = false,
 ) {
     init {
         require(sourceWidth > 0 && sourceHeight > 0) { "source dimensions must be positive" }
@@ -46,15 +49,10 @@ internal class TapeShadowPath(
                 },
             )
             append("  ").append(pointCount).append("pt")
+            if (branchCount > 0) append("  BRANCH:").append(branchCount)
+            if (closedLoop) append("  LOOP")
+            if (endpointCandidate) append("  END")
             rejection?.let { append("  ").append(it) }
         }
 }
 
-/**
- * One frame's shadow output: the line for the flight log and the path for the
- * screen, built together so the two can never disagree about the same frame.
- */
-internal class TapeShadowResult(
-    val logLine: String,
-    val path: TapeShadowPath?,
-)

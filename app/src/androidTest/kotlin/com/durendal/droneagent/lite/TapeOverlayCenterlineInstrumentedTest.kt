@@ -14,21 +14,21 @@ import org.junit.runner.RunWith
 /**
  * Renders the overlay and inspects the pixels.
  *
- * The point of drawing the replacement centerline is that an operator can see it
- * on the aircraft's preview instead of reading a log. That claim is only worth
+ * The overlay draws the same centerline the controller follows, so what an
+ * operator sees is what the aircraft is steering by. That claim is only worth
  * making if something actually reaches the screen, so this draws the view for
  * real and looks for the line rather than trusting that the draw call was made.
  */
 @RunWith(AndroidJUnit4::class)
-class TapeOverlayShadowInstrumentedTest {
+class TapeOverlayCenterlineInstrumentedTest {
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
     fun aFullPathDrawsItsCenterlineAnchorAndLookahead() {
-        val bitmap = render(shadowPath(withLookahead = true))
+        val bitmap = render(centerlinePath(withLookahead = true))
 
-        val shadowPixels = shadowPixelPositions(bitmap)
+        val shadowPixels = centerlinePixelPositions(bitmap)
         assertTrue("no centerline was drawn at all", shadowPixels.size > 50)
         // The synthetic chain runs up the middle, so the line must appear across
         // most of the view's height rather than as one isolated blob.
@@ -46,8 +46,8 @@ class TapeOverlayShadowInstrumentedTest {
 
     @Test
     fun aNearFieldOnlyPathDrawsNoLookaheadMarker() {
-        val withTarget = shadowPixelPositions(render(shadowPath(withLookahead = true))).size
-        val withoutTarget = shadowPixelPositions(render(shadowPath(withLookahead = false))).size
+        val withTarget = centerlinePixelPositions(render(centerlinePath(withLookahead = true))).size
+        val withoutTarget = centerlinePixelPositions(render(centerlinePath(withLookahead = false))).size
 
         // The look-ahead marker is a ring, so dropping it must visibly remove
         // pixels. An operator has to be able to tell the two states apart.
@@ -61,9 +61,9 @@ class TapeOverlayShadowInstrumentedTest {
     fun theOverlayShowsTheCenterlineEvenWithNoAcceptedDetection() {
         val view = overlay()
         view.showDetection(null)
-        view.showShadowPath(shadowPath(withLookahead = true))
+        view.showCenterline(centerlinePath(withLookahead = true))
 
-        val shadowPixels = shadowPixelPositions(draw(view))
+        val shadowPixels = centerlinePixelPositions(draw(view))
 
         assertTrue("the centerline vanished when the old estimator found nothing", shadowPixels.isNotEmpty())
     }
@@ -72,11 +72,11 @@ class TapeOverlayShadowInstrumentedTest {
     fun theLabelReportsTheQualityAndTheReasonItIsNotFull() {
         assertEquals(
             "CENTERLINE FULL  40pt",
-            shadowPath(withLookahead = true).label,
+            centerlinePath(withLookahead = true).label,
         )
         assertEquals(
             "CENTERLINE NEAR ONLY  40pt  INSUFFICIENT_LOOKAHEAD",
-            shadowPath(withLookahead = false).label,
+            centerlinePath(withLookahead = false).label,
         )
     }
 
@@ -96,8 +96,8 @@ class TapeOverlayShadowInstrumentedTest {
         requireNotNull(measurement)
 
         val view = overlay()
-        view.showShadowPath(
-            TapeShadowPath(
+        view.showCenterline(
+            TapeCenterlinePath(
                 sourceWidth = VIEW_WIDTH,
                 sourceHeight = VIEW_HEIGHT,
                 xFractions = FloatArray(estimate.points.size) {
@@ -123,7 +123,7 @@ class TapeOverlayShadowInstrumentedTest {
         view.draw(Canvas(composite))
         // Internal storage: it is the only app-private location a shell can read
         // back with run-as, which is how this artefact leaves the device.
-        val output = File(context.filesDir, "shadow-preview.png")
+        val output = File(context.filesDir, "centerline-preview.png")
         output.outputStream().use { composite.compress(Bitmap.CompressFormat.PNG, 100, it) }
         assertTrue("composite was not written", output.length() > 0)
     }
@@ -159,9 +159,9 @@ class TapeOverlayShadowInstrumentedTest {
         return SegmentationMask(VIEW_WIDTH, VIEW_HEIGHT, tape)
     }
 
-    private fun render(path: TapeShadowPath): Bitmap {
+    private fun render(path: TapeCenterlinePath): Bitmap {
         val view = overlay()
-        view.showShadowPath(path)
+        view.showCenterline(path)
         return draw(view)
     }
 
@@ -179,7 +179,7 @@ class TapeOverlayShadowInstrumentedTest {
         }
 
     /** Tolerant of antialiasing: the overlay colour is the only strong magenta. */
-    private fun shadowPixelPositions(bitmap: Bitmap): List<Pair<Int, Int>> = buildList {
+    private fun centerlinePixelPositions(bitmap: Bitmap): List<Pair<Int, Int>> = buildList {
         for (y in 0 until bitmap.height) {
             for (x in 0 until bitmap.width) {
                 val pixel = bitmap.getPixel(x, y)
@@ -192,11 +192,11 @@ class TapeOverlayShadowInstrumentedTest {
     }
 
     /** A chain up the middle of the frame, as the extractor emits them. */
-    private fun shadowPath(withLookahead: Boolean): TapeShadowPath {
+    private fun centerlinePath(withLookahead: Boolean): TapeCenterlinePath {
         val pointCount = 40
         val xFractions = FloatArray(pointCount) { 0.5f }
         val yFractions = FloatArray(pointCount) { index -> 0.95f - index * 0.02f }
-        return TapeShadowPath(
+        return TapeCenterlinePath(
             sourceWidth = 640,
             sourceHeight = 360,
             xFractions = xFractions,

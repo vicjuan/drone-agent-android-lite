@@ -250,10 +250,6 @@ class MainActivity : Activity() {
                 },
                 captureRecorder = captureRecorder,
                 captureFlightContext = ::tapeCaptureFlightContext,
-                // The log line lets a disagreement be lined up with the capture
-                // that produced it; the path puts the same frame's result on the
-                // operator's screen.
-                onShadowComparison = ::handleShadowResult,
             )
         }.onFailure { error ->
             flightLog.write("OpenCV initialization failed: $error")
@@ -349,6 +345,9 @@ class MainActivity : Activity() {
                         nearFieldOffsetFraction = it.nearFieldOffsetFraction,
                         bounds = it.bounds,
                         lookahead = it.lookahead,
+                        quality = it.quality,
+                        endpointCandidate = it.endpointCandidate,
+                        closedLoop = it.closedLoop,
                         frameWidthPixels = it.sourceWidth,
                         frameHeightPixels = it.sourceHeight,
                         heightAboveGroundMeters = usableHeightMeters()?.takeIf { height ->
@@ -366,6 +365,9 @@ class MainActivity : Activity() {
             consecutiveTapeMisses = 0
         }
         tapeOverlay.showDetection(detection)
+        // The overlay draws the same centerline the controller steers by, so the
+        // two can never show different paths for one frame.
+        tapeOverlay.showCenterline(detection?.centerline)
         val detected = detection != null
         if (detected != tapeDetected || now - tapeLoggedAtNanos >= TAPE_LOG_PERIOD_NANOS) {
             tapeDetected = detected
@@ -389,13 +391,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun handleShadowResult(result: TapeShadowResult) {
-        flightLog.write(result.logLine)
-        runOnUiThread {
-            if (::tapeOverlay.isInitialized) tapeOverlay.showShadowPath(result.path)
-        }
-    }
-
     private fun handleTapeFrameStreamStale() {
         tapeDetector?.resetTracking()
         tapeTracking.observe(null, System.nanoTime())
@@ -412,6 +407,7 @@ class MainActivity : Activity() {
             consecutiveTapeMisses = 0
             tapeDetected = false
             tapeOverlay.showDetection(null)
+            tapeOverlay.showCenterline(null)
         }
     }
 
@@ -1345,6 +1341,7 @@ class MainActivity : Activity() {
                     consecutiveTapeMisses = 0
                     tapeDetected = false
                     tapeOverlay.showDetection(null)
+                    tapeOverlay.showCenterline(null)
                 }
             }
             // Re-assert both preview and RGBA listener across link transitions;

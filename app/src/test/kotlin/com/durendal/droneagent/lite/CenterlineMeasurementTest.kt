@@ -9,20 +9,19 @@ import org.junit.Test
 
 /**
  * The measurement layer decides whether a centerline may be pursued, so these
- * pin the two things a caller downstream cannot check for itself: that a short
- * chain yields no look-ahead point, and that the angles describe the tape rather
- * than the image axes.
+ * pin what a caller downstream cannot check for itself: that a short chain
+ * yields no look-ahead point, that the angles describe the tape rather than the
+ * image axes, and that the two turn quantities stay separate.
  */
 class CenterlineMeasurementTest {
 
     @Test
     fun `a straight vertical chain measures zero angle and a look-ahead ahead of the anchor`() {
-        val measurement = measure(verticalChain(pointCount = 120))
+        val measurement = requireNotNull(measure(verticalChain(pointCount = 120)))
 
-        assertNotNull(measurement)
-        requireNotNull(measurement)
         assertEquals(0.0, measurement.nearFieldAngleFromVerticalDegrees, 1.0)
-        assertEquals(0.0, measurement.curvatureDegrees, 1.0)
+        assertEquals(0.0, measurement.lookaheadHeadingChangeDegrees, 1.0)
+        assertEquals(0.0, measurement.totalPathTurnDegrees, 2.0)
         val lookahead = requireNotNull(measurement.lookahead)
         assertTrue(
             "look-ahead ${lookahead.yFraction} must sit ahead of anchor ${measurement.anchorYFraction}",
@@ -41,18 +40,15 @@ class CenterlineMeasurementTest {
         assertEquals(90.0, abs(horizontal.nearFieldAngleFromVerticalDegrees), 1.0)
         assertEquals(vertical.arcLengthFraction, horizontal.arcLengthFraction, 0.02)
         assertEquals(vertical.medianWidthFraction, horizontal.medianWidthFraction, 0.001)
+        assertEquals(vertical.totalPathTurnDegrees, horizontal.totalPathTurnDegrees, 2.0)
         assertNotNull(horizontal.lookahead)
     }
 
     @Test
     fun `a chain too short to aim at yields no look-ahead point`() {
-        val measurement = measure(verticalChain(pointCount = 12, stepPixels = 1.0))
+        val measurement = requireNotNull(measure(verticalChain(pointCount = 12, stepPixels = 1.0)))
 
-        assertNotNull(measurement)
-        assertNull(
-            "a stub of tape must not offer a look-ahead point",
-            requireNotNull(measurement).lookahead,
-        )
+        assertNull("a stub of tape must not offer a look-ahead point", measurement.lookahead)
     }
 
     @Test
@@ -61,12 +57,68 @@ class CenterlineMeasurementTest {
     }
 
     @Test
-    fun `a bend is reported as curvature between the near field and the look-ahead`() {
-        val measurement = requireNotNull(measure(bentChain()))
+    fun `a left and a right curve turn the same amount in opposite directions`() {
+        val left = requireNotNull(measure(arcChain(displacement = -160.0)))
+        val right = requireNotNull(measure(arcChain(displacement = 160.0)))
+
+        // Total turn is unsigned magnitude, so mirrored arcs must agree on it.
+        assertEquals(left.totalPathTurnDegrees, right.totalPathTurnDegrees, 3.0)
+        assertTrue("a curve must register turn", right.totalPathTurnDegrees > 20.0)
+        // The near-field angle is signed, and that is what tells them apart.
+        assertTrue(
+            "left=${left.nearFieldAngleFromVerticalDegrees} right=${right.nearFieldAngleFromVerticalDegrees}",
+            left.nearFieldAngleFromVerticalDegrees < right.nearFieldAngleFromVerticalDegrees,
+        )
+        assertTrue("a steady arc turns one way: ${'$'}{right.turnConsistency}", right.turnConsistency > 0.9)
+        assertTrue("a steady arc turns one way: ${'$'}{left.turnConsistency}", left.turnConsistency > 0.9)
+    }
+
+    @Test
+    fun `an S bend turns a lot in total but not consistently`() {
+        val sBend = requireNotNull(measure(sBendChain()))
 
         assertTrue(
-            "curvature=${measurement.curvatureDegrees} should register the bend",
-            measurement.curvatureDegrees > 15.0,
+            "an S bend reverses, so consistency must be low: ${sBend.turnConsistency}",
+            sBend.turnConsistency < 0.5,
+        )
+        assertTrue(
+            "an S bend is not a credible arc",
+            !TapePathQualityPolicy.isCredibleArc(sBend),
+        )
+    }
+
+    @Test
+    fun `a hairpin turns far and stays consistent`() {
+        val hairpin = requireNotNull(measure(hairpinChain()))
+
+        assertTrue(
+            "a hairpin should register a large total turn: ${hairpin.totalPathTurnDegrees}",
+            hairpin.totalPathTurnDegrees > 90.0,
+        )
+        assertTrue("a hairpin turns one way", hairpin.turnConsistency > 0.8)
+    }
+
+    @Test
+    fun `local look-ahead bend and whole-path turn are different quantities`() {
+        val gentleLongArc = requireNotNull(measure(arcChain(displacement = 160.0, pointCount = 200)))
+
+        // The look-ahead only reaches part way along, so the local bend must be
+        // strictly smaller than the turn of the whole visible chain. Collapsing
+        // them into one number is what made a wall edge look like an arc.
+        assertTrue(
+            "local=${gentleLongArc.lookaheadHeadingChangeDegrees} " +
+                "total=${gentleLongArc.totalPathTurnDegrees}",
+            gentleLongArc.lookaheadHeadingChangeDegrees < gentleLongArc.totalPathTurnDegrees,
+        )
+    }
+
+    @Test
+    fun `a straight chain is not a credible arc`() {
+        val straight = requireNotNull(measure(verticalChain(pointCount = 120)))
+
+        assertTrue(
+            "a straight run must fail the arc test",
+            !TapePathQualityPolicy.isCredibleArc(straight),
         )
     }
 
@@ -99,15 +151,33 @@ class CenterlineMeasurementTest {
             )
         }
 
-    /**
-     * A steady arc from the anchor onward, so the bend is inside the arc-length
-     * window the look-ahead actually reaches rather than beyond it.
-     */
-    private fun bentChain() = (0 until 120).map { index ->
-        val progress = index / 119.0
+    /** A steady parabolic arc, positive displacement bending toward image-right. */
+    private fun arcChain(displacement: Double, pointCount: Int = 120) =
+        (0 until pointCount).map { index ->
+            val progress = index / (pointCount - 1.0)
+            CenterlinePoint(
+                x = FRAME_WIDTH / 2.0 + displacement * progress * progress,
+                y = FRAME_HEIGHT - 1.0 - index * 2.0,
+                widthPixels = WIDTH_PIXELS,
+            )
+        }
+
+    /** Right then left: large accumulated motion, near-zero net turn. */
+    private fun sBendChain() = (0 until 160).map { index ->
+        val progress = index / 159.0
         CenterlinePoint(
-            x = FRAME_WIDTH / 2.0 + 160.0 * progress * progress,
+            x = FRAME_WIDTH / 2.0 + 90.0 * kotlin.math.sin(progress * 2.0 * Math.PI),
             y = FRAME_HEIGHT - 1.0 - index * 2.0,
+            widthPixels = WIDTH_PIXELS,
+        )
+    }
+
+    /** A half circle: the tape doubles back on itself inside the frame. */
+    private fun hairpinChain() = (0 until 140).map { index ->
+        val angle = Math.PI * index / 139.0
+        CenterlinePoint(
+            x = FRAME_WIDTH / 2.0 + 90.0 * (1.0 - kotlin.math.cos(angle)),
+            y = FRAME_HEIGHT - 40.0 - 90.0 * kotlin.math.sin(angle),
             widthPixels = WIDTH_PIXELS,
         )
     }
