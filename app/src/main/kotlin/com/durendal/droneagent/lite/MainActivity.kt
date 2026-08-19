@@ -152,6 +152,14 @@ class MainActivity : Activity() {
     private var selectedCameraPitchDegrees: Double? = null
     private var cameraPitchCommandPending = false
     private var cameraPitchCommandGeneration = 0L
+    private val cameraPitchCommandTimeoutRunnable = Runnable {
+        if (!cameraPitchCommandPending) return@Runnable
+        cameraPitchCommandGeneration += 1
+        cameraPitchCommandPending = false
+        selectedCameraPitchDegrees = null
+        flightLog.write("camera pitch command timed out")
+        render("鏡頭角度控制逾時，已解除鎖定，可再試一次")
+    }
     private val tapeTracking = TapeTrackingController()
     private var tapeTrackingAuthoritySeen = false
     private var tapeTrackingStartedAtNanos = 0L
@@ -525,6 +533,7 @@ class MainActivity : Activity() {
         }
         if (active) {
             cameraPitchCommandGeneration += 1
+            mainHandler.removeCallbacks(cameraPitchCommandTimeoutRunnable)
             cameraPitchCommandPending = false
             selectedCameraPitchDegrees = null
         }
@@ -559,6 +568,11 @@ class MainActivity : Activity() {
         cameraPitchCommandPending = true
         selectedCameraPitchDegrees = null
         render("鏡頭正在移至 %.0f°…".format(pitchDegrees))
+        mainHandler.removeCallbacks(cameraPitchCommandTimeoutRunnable)
+        mainHandler.postDelayed(
+            cameraPitchCommandTimeoutRunnable,
+            CAMERA_PITCH_COMMAND_TIMEOUT_MS,
+        )
         gimbal.rotateTo(
             pitchDegrees,
             0.0,
@@ -566,6 +580,7 @@ class MainActivity : Activity() {
         ) { error ->
             runOnUiThread {
                 if (commandGeneration != cameraPitchCommandGeneration) return@runOnUiThread
+                mainHandler.removeCallbacks(cameraPitchCommandTimeoutRunnable)
                 cameraPitchCommandPending = false
                 if (error == null) {
                     selectedCameraPitchDegrees = pitchDegrees
@@ -2326,6 +2341,8 @@ class MainActivity : Activity() {
         const val CAMERA_PITCH_80_DEGREES = -80.0
         const val CAMERA_PITCH_70_DEGREES = -70.0
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
+        // MSDK is given two seconds to rotate; one extra second allows callback delivery.
+        const val CAMERA_PITCH_COMMAND_TIMEOUT_MS = 3_000L
         const val TAPE_COMMAND_LOG_PERIOD_NANOS = 250_000_000L
 
         /** Registration retries before the operator has to press the button. */
