@@ -166,17 +166,32 @@ class TapeCaptureTest {
     }
 
     @Test
-    fun `a half written capture from an earlier run is purged rather than left occupying storage`() {
-        // What a process killed mid-write used to leave: planes on disk, no
-        // manifest, therefore invisible to both replay and the size ceiling.
-        val orphan = File(root, "000000007-loss").apply { mkdirs() }
-        File(orphan, "frame.raw.gz").writeBytes(ByteArray(4096))
+    fun `a scratch directory from a killed run is reclaimed`() {
+        val scratch = File(root, "incomplete-000000007-loss").apply { mkdirs() }
+        File(scratch, "frame.raw.gz").writeBytes(ByteArray(4096))
 
         val store = TapeCaptureStore(root)
 
-        assertFalse(orphan.exists())
+        assertFalse(scratch.exists())
         assertEquals(emptyList<String>(), store.captures().map { it.name })
-        assertEquals(0L, store.totalBytes())
+    }
+
+    @Test
+    fun `cleanup never touches a directory the store did not create`() {
+        // A cleanup that deletes every manifest-less directory would take out
+        // anything a caller keeps beside the captures. The store may only
+        // reclaim names it could have written itself.
+        val foreign = File(root, "flight-videos").apply { mkdirs() }
+        File(foreign, "clip.mp4").writeBytes(ByteArray(16))
+        val notOurScratch = File(root, "incomplete-notes").apply { mkdirs() }
+        val ourScratch = File(root, "incomplete-000000001-loss").apply { mkdirs() }
+
+        TapeCaptureStore(root)
+
+        assertTrue("an unrelated directory was deleted", foreign.isDirectory)
+        assertTrue(File(foreign, "clip.mp4").isFile)
+        assertTrue("a foreign incomplete- name was deleted", notOurScratch.isDirectory)
+        assertFalse("the store's own scratch survived", ourScratch.exists())
     }
 
     @Test

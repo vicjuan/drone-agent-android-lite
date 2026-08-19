@@ -2,6 +2,8 @@ package com.durendal.droneagent.lite
 
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
+import java.util.zip.Deflater
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -124,7 +126,17 @@ internal object TapeCaptureCodec {
 
     private fun writePlane(plane: TapeCapturePlane, directory: File) {
         File(directory, planeFileName(plane.name)).outputStream().use { fileStream ->
-            GZIPOutputStream(fileStream).use { it.write(plane.pixels) }
+            FastGzipOutputStream(fileStream).use { it.write(plane.pixels) }
+        }
+    }
+
+    private class FastGzipOutputStream(stream: OutputStream) : GZIPOutputStream(stream, BUFFER_BYTES) {
+        init {
+            def.setLevel(Deflater.BEST_SPEED)
+        }
+
+        private companion object {
+            const val BUFFER_BYTES = 64 * 1024
         }
     }
 
@@ -204,8 +216,10 @@ internal interface TapeCaptureSink {
  * Writes are atomic: a capture is assembled in a scratch directory and only
  * becomes visible by rename once every plane and the manifest are on disk. A
  * process killed mid-write therefore leaves no half-capture that replay would
- * read as real, and no files that the size ceiling cannot see. Whatever a
- * previous run did leave behind is purged when a store is constructed.
+ * read as real, and no files that the size ceiling cannot see. Scratch
+ * directories a killed run left behind are removed when a store is constructed,
+ * and only those: the store deletes what it can prove it created, never an
+ * unknown directory that happens to sit under the same root.
  */
 internal class TapeCaptureStore(
     private val root: File,
@@ -215,7 +229,7 @@ internal class TapeCaptureStore(
     init {
         require(maximumCaptures > 0) { "maximumCaptures must be > 0" }
         require(maximumTotalBytes > 0L) { "maximumTotalBytes must be > 0" }
-        purgeIncomplete()
+        purgeScratch()
     }
 
     /**
@@ -254,16 +268,23 @@ internal class TapeCaptureStore(
         (captures().mapNotNull { it.name.substringBefore('-').toLongOrNull() }.maxOrNull() ?: -1L) + 1L
 
     /**
-     * Removes anything under the root that is not a complete capture: scratch
-     * directories from a killed write, and directories left by an older build
-     * that published planes before their manifest. Either kind is invisible to
-     * [captures] and would otherwise occupy storage no ceiling accounts for.
+     * Removes scratch directories a killed write left behind.
+     *
+     * The match is deliberately narrow: this prefix plus a name this store's own
+     * [captureDirectoryName] could have produced. A recursive delete keyed on
+     * "has no manifest" would also destroy any unrelated directory a caller
+     * happened to put under the same root, which is far too much authority for
+     * a cleanup that exists to reclaim a few megabytes.
      */
-    private fun purgeIncomplete() {
+    private fun purgeScratch() {
         root.listFiles()
-            ?.filter { it.isDirectory && !File(it, TapeCaptureCodec.MANIFEST_NAME).isFile }
+            ?.filter { it.isDirectory && isScratchName(it.name) }
             ?.forEach { it.deleteRecursively() }
     }
+
+    private fun isScratchName(name: String): Boolean =
+        name.startsWith(INCOMPLETE_PREFIX) &&
+            CAPTURE_DIRECTORY_PATTERN.matches(name.removePrefix(INCOMPLETE_PREFIX))
 
     private fun completeDirectories(): List<File> =
         root.listFiles { file -> file.isDirectory && File(file, TapeCaptureCodec.MANIFEST_NAME).isFile }
@@ -303,5 +324,6 @@ internal class TapeCaptureStore(
         const val DEFAULT_MAXIMUM_TOTAL_BYTES = 256L * 1024 * 1024
         private const val MAXIMUM_REASON_LENGTH = 40
         private const val INCOMPLETE_PREFIX = "incomplete-"
+        private val CAPTURE_DIRECTORY_PATTERN = Regex("[0-9]{9}-[A-Za-z0-9-]{1,$MAXIMUM_REASON_LENGTH}")
     }
 }
