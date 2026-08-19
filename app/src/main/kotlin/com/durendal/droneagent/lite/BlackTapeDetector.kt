@@ -511,12 +511,16 @@ class BlackTapeDetector(
             return null
         }
         val context = floorContext(floorMask, refinedBounds)
-        val minimumSurroundingFloor =
-            if (path.horizontalFallback) MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR
-            else MIN_PATH_SURROUNDING_FLOOR
-        val minimumSideFloor =
-            if (path.horizontalFallback) MIN_HORIZONTAL_PATH_SIDE_FLOOR
-            else MIN_PATH_SIDE_FLOOR
+        val minimumSurroundingFloor = when {
+            path.horizontalFallback -> MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR
+            overlapsPrevious -> MIN_TRACKED_PATH_SURROUNDING_FLOOR
+            else -> MIN_PATH_SURROUNDING_FLOOR
+        }
+        val minimumSideFloor = when {
+            path.horizontalFallback -> MIN_HORIZONTAL_PATH_SIDE_FLOOR
+            overlapsPrevious -> MIN_TRACKED_PATH_SIDE_FLOOR
+            else -> MIN_PATH_SIDE_FLOOR
+        }
         if (
             context.surroundingFraction < minimumSurroundingFloor ||
             context.minimumSideFraction < minimumSideFloor
@@ -709,6 +713,8 @@ class BlackTapeDetector(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
+        const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
+        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.0
         const val MIN_PATH_CURVATURE_SMOOTHNESS = 0.08
         const val MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR = 0.0
         const val MIN_HORIZONTAL_PATH_SIDE_FLOOR = 0.0

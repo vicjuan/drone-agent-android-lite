@@ -98,6 +98,22 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun trackedCurvedTapeSurvivesAChangeToTwoDifferentFloorMaterials() {
+        val width = 640
+        val height = 360
+        val uniformFloor = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(uniformFloor, width, height, direction = 1.0, value = 20)
+        val splitFloor = stripedSplitFloorWithCurvedTape(width, height)
+
+        val isolated = detectSequence(listOf(splitFloor), width, height).single()
+        val tracked = detectSequence(listOf(uniformFloor, splitFloor), width, height)
+
+        assertEquals(null, isolated)
+        assertTrue(tracked[0] != null)
+        assertTrue(tracked[1] != null)
+    }
+
+    @Test
     fun curvedTapeCanBeAcquiredWhileEnteringFromFrameEdge() {
         val width = 640
         val height = 360
@@ -404,6 +420,39 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(null, detection)
     }
+    private fun stripedSplitFloorWithCurvedTape(
+        width: Int,
+        height: Int,
+    ): ByteArray {
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height step 8) {
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = y,
+                right = width / 2,
+                bottom = (y + 4).coerceAtMost(height),
+                red = 130,
+                green = 130,
+                blue = 130,
+            )
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = (y + 4).coerceAtMost(height),
+                right = width / 2,
+                bottom = (y + 8).coerceAtMost(height),
+                red = 220,
+                green = 220,
+                blue = 220,
+            )
+        }
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+        return frame
+    }
+
     private fun rainbowFrame(
         width: Int,
         height: Int,

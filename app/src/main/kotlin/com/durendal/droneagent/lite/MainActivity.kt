@@ -698,10 +698,7 @@ class MainActivity : Activity() {
 
 
             val decision = tapeTracking.tick(now)
-            if (
-                activeTapeTrackingMode == TapeTrackingMode.STRAIGHT &&
-                decision.endpointReached
-            ) {
+            if (decision.endpointReached) {
                 beginTapeTurnaround()
                 return
             }
@@ -750,13 +747,17 @@ class MainActivity : Activity() {
                 val trackingName = tapeTrackingName(activeTapeTrackingMode)
                 val status = when (decision.phase) {
                     TapeTrackingPhase.RECENTERING -> "$trackingName：循跡資料穩定中"
+                    TapeTrackingPhase.RECOVERING_AFTER_TURN ->
+                        "$trackingName：回轉完成，低速前移重新取得膠帶"
                     TapeTrackingPhase.TRACKING ->
                         "$trackingName（Pure Pursuit 前視點導引）"
                     TapeTrackingPhase.ALIGNING_CURVE ->
                         "$trackingName：急彎原地對準中"
+                    TapeTrackingPhase.REACQUIRING_PATH ->
+                        "$trackingName：等待可信路徑重新出現"
                     TapeTrackingPhase.VERIFYING_ENDPOINT ->
-                        "疑似膠帶末端：低速前進確認中"
-                    TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"
+                        "$trackingName：疑似末端，低速前進確認中"
+                    TapeTrackingPhase.TURNING -> "$trackingName：確認末端，向右旋轉 180°"
                     TapeTrackingPhase.DISABLED -> "$trackingName 已停止"
                 }
                 holdStatus = status
@@ -782,8 +783,8 @@ class MainActivity : Activity() {
         if (mode == TapeTrackingMode.CIRCULAR) "圓形黑膠帶追蹤" else "直線黑膠帶追蹤"
 
     private fun beginTapeTurnaround() {
-        check(activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) {
-            "Circular tape tracking has no physical endpoint turnaround"
+        check(activeTapeTrackingMode != null) {
+            "Tape endpoint turnaround requires an active tracking mode"
         }
         val heading = aircraftHeadingDegrees
         if (heading == null || aircraftHeadingAtNanos == 0L) {

@@ -352,7 +352,7 @@ class TapeTrackingControllerTest {
     @Test
     fun `sharp curve alignment rotates in place without lateral translation`() {
         val controller = circularTrackingController()
-        controller.observe(observation(-82.0, 0.8, 0.45), seconds(2))
+        controller.observe(observation(-82.0, 0.8, 0.25), seconds(2))
 
         val first = controller.tick(seconds(2))
         val accelerated = controller.tick(seconds(2) + 250_000_000L)
@@ -413,6 +413,91 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, hovering.forwardSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, hovering.rightSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, hovering.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `distant edge candidate cannot take control after a detection gap`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+
+        val edgeCandidates = listOf(
+            rightEdgeObservation(67.4, 0.34),
+            rightEdgeObservation(8.0, 0.21),
+            rightEdgeObservation(-71.6, 0.21),
+            rightEdgeObservation(-60.9, 1.56),
+        )
+        edgeCandidates.forEachIndexed { index, candidate ->
+            val now = seconds(6) + index * 250_000_000L
+            controller.observe(candidate, now)
+            val decision = controller.tick(now)
+
+            assertEquals(TapeTrackingPhase.REACQUIRING_PATH, decision.phase)
+            assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+            assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+            assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+        }
+    }
+
+    @Test
+    fun `initial edge candidate cannot take circular control`() {
+        val controller = circularTrackingController()
+
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(2))
+        val decision = controller.tick(seconds(2))
+
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `three consistent centered candidates reacquire a new circular path`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(80.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(6))
+        assertEquals(
+            TapeTrackingPhase.REACQUIRING_PATH,
+            controller.tick(seconds(6)).phase,
+        )
+
+        val centeredCandidates = listOf(
+            observation(6.0, 0.75, 0.06),
+            observation(5.0, 0.77, 0.04),
+            observation(4.0, 0.79, 0.05),
+        )
+        var reacquired: TapeTrackingDecision? = null
+        centeredCandidates.forEachIndexed { index, candidate ->
+            val now = seconds(7) + index * 250_000_000L
+            controller.observe(candidate, now)
+            reacquired = controller.tick(now)
+            if (index < centeredCandidates.lastIndex) {
+                assertEquals(TapeTrackingPhase.REACQUIRING_PATH, reacquired?.phase)
+            }
+        }
+
+        val decision = checkNotNull(reacquired)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND,
+            decision.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `plausible continuation resumes immediately after a detection gap`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+
+        controller.observe(observation(20.0, 0.82, 0.05), seconds(4))
+        val resumed = controller.tick(seconds(4))
+
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
     }
 
 
@@ -607,6 +692,175 @@ class TapeTrackingControllerTest {
         assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
     }
 
+    @Test
+    fun `stable circular path disappearance triggers a low speed endpoint probe and turnaround`() {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        repeat(3) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+
+        val probing = controller.tick(seconds(3) + 500_000_000L)
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, probing.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND,
+            probing.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+
+        repeat(3) { index ->
+            controller.observe(null, seconds(5) + index * 250_000_000L)
+        }
+        val turning = controller.tick(seconds(5) + 500_000_000L)
+
+        assertTrue(turning.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, turning.phase)
+
+        controller.resumeAfterTurn(seconds(6))
+        assertEquals(TapeTrackingPhase.RECENTERING, controller.tick(seconds(6)).phase)
+        val recovery = controller.tick(seconds(8))
+        assertEquals(TapeTrackingPhase.RECOVERING_AFTER_TURN, recovery.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND,
+            recovery.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `post turn recovery advances past a false edge candidate`() {
+        val controller = circularControllerAfterEndpointTurn()
+        val recovery = controller.tick(seconds(8))
+        assertEquals(TapeTrackingPhase.RECOVERING_AFTER_TURN, recovery.phase)
+
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(8) + 250_000_000L)
+        val ignoringEdge = controller.tick(seconds(8) + 250_000_000L)
+
+        assertEquals(TapeTrackingPhase.RECOVERING_AFTER_TURN, ignoringEdge.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND,
+            ignoringEdge.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+        assertEquals(0.0, ignoringEdge.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, ignoringEdge.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `three centered path observations end post turn recovery`() {
+        val controller = circularControllerAfterEndpointTurn()
+        controller.tick(seconds(8))
+        val centeredPath = observation(
+            angleDegrees = 5.0,
+            longSideFraction = 0.40,
+            nearFieldOffsetFraction = 0.02,
+            bounds = NormalizedRect(0.45, 0.10, 0.58, 0.58),
+            lookaheadXFraction = 0.52,
+            lookaheadYFraction = 0.25,
+        )
+
+        repeat(3) { index ->
+            controller.observe(centeredPath, seconds(8) + (index + 1) * 250_000_000L)
+        }
+        val tracking = controller.tick(seconds(8) + 750_000_000L)
+
+        assertEquals(TapeTrackingPhase.TRACKING, tracking.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND,
+            tracking.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `post turn recovery stops after its bounded forward search`() {
+        val controller = circularControllerAfterEndpointTurn()
+        controller.tick(seconds(8))
+
+        val stopped = controller.tick(
+            seconds(8) + TapeTrackingController.CIRCULAR_POST_TURN_RECOVERY_NANOS,
+        )
+
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, stopped.phase)
+        assertEquals(0.0, stopped.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `false edge after a qualified circular path starts endpoint verification`() {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        controller.observe(null, seconds(3))
+
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(3) + 250_000_000L)
+        val decision = controller.tick(seconds(3) + 250_000_000L)
+
+        assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, decision.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND,
+            decision.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `circular endpoint probe is cancelled when the tracked path returns`() {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        repeat(3) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(seconds(3) + 500_000_000L).phase,
+        )
+
+        controller.observe(observation(5.0, 0.82, 0.03), seconds(4))
+        val resumed = controller.tick(seconds(4))
+
+        assertFalse(resumed.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+
+    private fun circularControllerAfterEndpointTurn(): TapeTrackingController {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        repeat(3) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+        repeat(3) { index ->
+            controller.observe(null, seconds(5) + index * 250_000_000L)
+        }
+        assertTrue(controller.tick(seconds(5) + 500_000_000L).endpointReached)
+        controller.resumeAfterTurn(seconds(6))
+        assertEquals(TapeTrackingPhase.RECENTERING, controller.tick(seconds(6)).phase)
+        return controller
+    }
 
     private fun circularTrackingController(): TapeTrackingController =
         TapeTrackingController().also {
@@ -658,6 +912,18 @@ class TapeTrackingControllerTest {
         frameWidthPixels = 1600,
         frameHeightPixels = 900,
         heightAboveGroundMeters = heightAboveGroundMeters,
+    )
+
+    private fun rightEdgeObservation(
+        angleDegrees: Double,
+        longSideFraction: Double,
+    ): TapeTrackingObservation = observation(
+        angleDegrees = angleDegrees,
+        longSideFraction = longSideFraction,
+        nearFieldOffsetFraction = 0.493,
+        bounds = NormalizedRect(0.90, 0.64, 1.0, 0.83),
+        lookaheadXFraction = 0.966,
+        lookaheadYFraction = 0.714,
     )
 
     private fun verticalBounds(
