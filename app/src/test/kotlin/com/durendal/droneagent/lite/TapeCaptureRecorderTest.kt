@@ -213,6 +213,56 @@ class TapeCaptureRecorderTest {
         assertEquals(1, recorder.failedCaptureCount)
     }
 
+    @Test
+    fun `a capture being written still counts as pending`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val writer = Executors.newSingleThreadExecutor()
+        val recorder = TapeCaptureRecorder(
+            root = root,
+            log = { logLines.add(it) },
+            leadingFrameCount = 8,
+            trailingFrameCount = 0,
+            maximumPendingWrites = 8,
+            store = BlockingSink(TapeCaptureStore(root), entered, release),
+            writer = writer,
+        )
+        recorder.arm()
+        repeat(3) { recorder.offer(capture(it)) }
+
+        recorder.trigger("loss")
+        assertTrue("writer never started", entered.await(20, TimeUnit.SECONDS))
+
+        // One capture is inside the sink and two are queued behind it. Counting
+        // only the queue here would report 2 and lose the one being written.
+        assertEquals(3, recorder.pendingCaptureCount)
+        assertEquals(0, recorder.savedCaptureCount)
+
+        release.countDown()
+        writer.shutdown()
+        assertTrue(writer.awaitTermination(20, TimeUnit.SECONDS))
+        assertEquals(0, recorder.pendingCaptureCount)
+        assertEquals(3, recorder.savedCaptureCount)
+    }
+
+    /** Holds the first save open so the in-flight capture is observable. */
+    private class BlockingSink(
+        private val delegate: TapeCaptureSink,
+        private val entered: CountDownLatch,
+        private val release: CountDownLatch,
+    ) : TapeCaptureSink by delegate {
+        private var first = true
+
+        override fun save(capture: TapeCapture, sequence: Long, reason: String): File {
+            if (first) {
+                first = false
+                entered.countDown()
+                release.await(20, TimeUnit.SECONDS)
+            }
+            return delegate.save(capture, sequence, reason)
+        }
+    }
+
     private fun recorder(leading: Int = 4, trailing: Int = 4) = TapeCaptureRecorder(
         root = root,
         log = logLines::add,

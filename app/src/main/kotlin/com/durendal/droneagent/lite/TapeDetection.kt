@@ -52,9 +52,9 @@ data class TapeLookahead(
 /**
  * A black-tape candidate expressed in source-frame proportions.
  *
- * [quality] is derived from [lookahead] rather than stored, so a caller cannot
- * claim [PathQuality.FULL_PATH] for a path it could not follow ahead, and there
- * is no default that quietly promotes an under-specified detection. That
+ * [quality] is derived from [lookahead] rather than stored, and [lookahead] has
+ * no default, so a caller cannot claim [PathQuality.FULL_PATH] for a path it
+ * could not follow ahead, nor arrive at one by omission. That
  * equivalence is the contract itself: a trustworthy look-ahead point is exactly
  * what separates a path the controller may pursue from one it may only align to.
  */
@@ -68,7 +68,14 @@ data class TapeDetection(
     val nearFieldOffsetFraction: Double,
     val anchorXFraction: Double = bounds.centerX,
     val anchorYFraction: Double = bounds.bottom,
-    val lookahead: TapeLookahead? = TapeLookahead(bounds.centerX, bounds.top),
+    /**
+     * Deliberately has no default. A default derived from [bounds] would hand
+     * every forgetful caller a made-up look-ahead point and, with it,
+     * [PathQuality.FULL_PATH] — the exact silent promotion this contract exists
+     * to prevent. Whether the path was followed far enough to aim at is a fact
+     * the measurement stage knows and must state.
+     */
+    val lookahead: TapeLookahead?,
 ) {
     val quality: PathQuality
         get() = if (lookahead == null) PathQuality.NEAR_FIELD_ONLY else PathQuality.FULL_PATH

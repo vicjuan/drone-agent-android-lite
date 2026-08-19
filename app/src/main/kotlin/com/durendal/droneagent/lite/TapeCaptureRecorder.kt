@@ -37,7 +37,7 @@ internal class TapeCaptureRecorder(
     private val leadingFrameCount: Int = DEFAULT_LEADING_FRAME_COUNT,
     private val trailingFrameCount: Int = DEFAULT_TRAILING_FRAME_COUNT,
     private val maximumPendingWrites: Int = DEFAULT_MAXIMUM_PENDING_WRITES,
-    private val store: TapeCaptureStore = TapeCaptureStore(root),
+    private val store: TapeCaptureSink = TapeCaptureStore(root),
     private val writer: Executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "LiteTapeCapture").apply { isDaemon = true }
     },
@@ -58,6 +58,7 @@ internal class TapeCaptureRecorder(
     private val leadingFrames = ArrayDeque<TapeCapture>()
     private val pendingWrites = ArrayDeque<PendingWrite>()
     private var writerRunning = false
+    private var writeInFlight = false
     private var pendingTrailingFrames = 0
     private var pendingReason = ""
     private var nextSequence = UNSEEDED_SEQUENCE
@@ -79,9 +80,14 @@ internal class TapeCaptureRecorder(
     /** Captures the writer accepted but storage refused. */
     val failedCaptureCount: Int get() = failedCount.get()
 
-    /** Captures accepted into the queue and not yet resolved either way. */
+    /**
+     * Captures accepted and not yet resolved: those still queued plus the one
+     * the writer is currently saving. Counting only the queue would let a
+     * capture vanish from every counter while it is being written, so
+     * saved + failed + dropped + pending always equals what was accepted.
+     */
     val pendingCaptureCount: Int
-        @Synchronized get() = pendingWrites.size
+        @Synchronized get() = pendingWrites.size + if (writeInFlight) 1 else 0
 
     private class PendingWrite(
         val capture: TapeCapture,
@@ -187,14 +193,21 @@ internal class TapeCaptureRecorder(
     private fun drainPendingWrites() {
         while (true) {
             val next = synchronized(this) {
-                pendingWrites.pollFirst().also { if (it == null) writerRunning = false }
-            } ?: return
-            runCatching { store.save(next.capture, next.sequence, next.reason) }
-                .onSuccess { savedCount.incrementAndGet() }
-                .onFailure {
-                    failedCount.incrementAndGet()
-                    log("tape capture write failed seq=${next.sequence}: ${it.message}")
+                pendingWrites.pollFirst().also {
+                    writeInFlight = it != null
+                    if (it == null) writerRunning = false
                 }
+            } ?: return
+            val outcome = runCatching { store.save(next.capture, next.sequence, next.reason) }
+            // The outcome counter and the in-flight flag move together, so a
+            // capture is never absent from every counter and never in two.
+            synchronized(this) {
+                if (outcome.isSuccess) savedCount.incrementAndGet() else failedCount.incrementAndGet()
+                writeInFlight = false
+            }
+            outcome.exceptionOrNull()?.let {
+                log("tape capture write failed seq=${next.sequence}: ${it.message}")
+            }
         }
     }
 

@@ -7,6 +7,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -181,18 +182,64 @@ class TapeCaptureTest {
     @Test
     fun `a failed write leaves nothing behind and does not block the next capture`() {
         val store = TapeCaptureStore(root)
-        val blocked = File(root, "000000000-loss").apply { mkdirs() }
-        // A directory that cannot be replaced: publishing must fail, not
-        // half-succeed.
-        File(blocked, "capture.txt").mkdirs()
-
-        val goodDirectory = store.save(capture(), sequence = 1, reason = "loss")
-
-        assertTrue(goodDirectory.isDirectory)
-        assertEquals(listOf("000000001-loss"), store.captures().map { it.name })
-        assertTrue(
-            root.listFiles()?.none { it.name.startsWith("incomplete-") } ?: true,
+        store.save(capture(), sequence = 0, reason = "loss")
+        // A root the process cannot write into is the controllable stand-in for
+        // a full or failing filesystem: the scratch directory cannot be created,
+        // so the write fails at the first step.
+        assertTrue("could not make the store root read-only", root.setWritable(false))
+        assertFalse(
+            "the environment did not enforce the read-only root",
+            File(root, "probe").mkdirs(),
         )
+
+        assertThrows(IOException::class.java) {
+            store.save(capture(), sequence = 1, reason = "loss")
+        }
+
+        assertTrue(root.setWritable(true))
+        assertEquals(
+            "a failed write must leave no scratch directory",
+            emptyList<String>(),
+            root.listFiles()?.map { it.name }?.filter { it.startsWith("incomplete-") }.orEmpty(),
+        )
+        assertEquals(listOf("000000000-loss"), store.captures().map { it.name })
+
+        val recovered = store.save(capture(), sequence = 2, reason = "loss")
+
+        assertTrue(recovered.isDirectory)
+        assertEquals(
+            listOf("000000000-loss", "000000002-loss"),
+            store.captures().map { it.name },
+        )
+        assertNotNull(TapeCaptureCodec.read(recovered))
+    }
+
+    @Test
+    fun `a write that fails while publishing removes the scratch it built`() {
+        val store = TapeCaptureStore(root)
+        // An existing capture directory that cannot be replaced. The scratch
+        // directory is written in full and only the final publish fails, so this
+        // is the case where there really is a half-built capture to clean up.
+        val occupied = File(root, "000000000-loss").apply { mkdirs() }
+        File(occupied, TapeCaptureCodec.MANIFEST_NAME).writeText("planes=\n")
+        assertTrue("could not make the destination unreplaceable", occupied.setWritable(false))
+
+        assertThrows(IOException::class.java) {
+            store.save(
+                capture(maskNames = listOf("blackMask")),
+                sequence = 0,
+                reason = "loss",
+            )
+        }
+
+        assertTrue(occupied.setWritable(true))
+        assertEquals(
+            "a failed publish must leave no scratch directory",
+            emptyList<String>(),
+            root.listFiles()?.map { it.name }?.filter { it.startsWith("incomplete-") }.orEmpty(),
+        )
+        // The occupant is untouched: a failed write must not damage what is there.
+        assertEquals("planes=\n", File(occupied, TapeCaptureCodec.MANIFEST_NAME).readText())
     }
 
     private fun capture(

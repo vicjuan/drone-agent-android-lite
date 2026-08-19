@@ -175,6 +175,25 @@ internal object TapeCaptureCodec {
 }
 
 /**
+ * Where a [TapeCaptureRecorder] puts finished captures.
+ *
+ * The recorder's resource-safety guarantees — a bounded backlog, a detector
+ * thread that never waits for storage, counters that never lose a capture — are
+ * properties of the recorder under a slow or failing sink. Naming the narrow
+ * contract it actually depends on is what makes those properties observable
+ * without a real filesystem that happens to be slow.
+ */
+internal interface TapeCaptureSink {
+    fun save(capture: TapeCapture, sequence: Long, reason: String): File
+
+    fun captures(): List<File>
+
+    fun totalBytes(): Long
+
+    fun nextSequence(): Long
+}
+
+/**
  * A size-bounded directory of captures, newest kept.
  *
  * Evidence is worthless if collecting it fills the aircraft's storage mid-flight,
@@ -192,7 +211,7 @@ internal class TapeCaptureStore(
     private val root: File,
     private val maximumCaptures: Int = DEFAULT_MAXIMUM_CAPTURES,
     private val maximumTotalBytes: Long = DEFAULT_MAXIMUM_TOTAL_BYTES,
-) {
+) : TapeCaptureSink {
     init {
         require(maximumCaptures > 0) { "maximumCaptures must be > 0" }
         require(maximumTotalBytes > 0L) { "maximumTotalBytes must be > 0" }
@@ -203,7 +222,7 @@ internal class TapeCaptureStore(
      * Writes [capture] under a directory named by [sequence] and [reason], then
      * evicts until the store is inside both limits. Returns the directory.
      */
-    fun save(capture: TapeCapture, sequence: Long, reason: String): File {
+    override fun save(capture: TapeCapture, sequence: Long, reason: String): File {
         val directory = File(root, captureDirectoryName(sequence, reason))
         val scratch = File(root, "$INCOMPLETE_PREFIX${directory.name}")
         scratch.deleteRecursively()
@@ -222,16 +241,16 @@ internal class TapeCaptureStore(
     }
 
     /** Capture directories, oldest first by sequence. */
-    fun captures(): List<File> = completeDirectories().sortedBy { it.name }
+    override fun captures(): List<File> = completeDirectories().sortedBy { it.name }
 
-    fun totalBytes(): Long = captures().sumOf { directorySize(it) }
+    override fun totalBytes(): Long = captures().sumOf { directorySize(it) }
 
     /**
      * One past the highest sequence already on disk, so a new recording session
      * appends to the store instead of overwriting the previous session's
      * directories. Unparsable names are ignored rather than resetting the count.
      */
-    fun nextSequence(): Long =
+    override fun nextSequence(): Long =
         (captures().mapNotNull { it.name.substringBefore('-').toLongOrNull() }.maxOrNull() ?: -1L) + 1L
 
     /**
