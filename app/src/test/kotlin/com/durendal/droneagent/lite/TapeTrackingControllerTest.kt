@@ -488,6 +488,38 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `stable near-edge path reacquires laterally without moving forward`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(4))
+        assertEquals(
+            TapeTrackingPhase.REACQUIRING_PATH,
+            controller.tick(seconds(4)).phase,
+        )
+
+        val nearEdgePath = observation(
+            angleDegrees = 20.0,
+            longSideFraction = 1.10,
+            nearFieldOffsetFraction = -0.48,
+            bounds = NormalizedRect(0.0, 0.05, 0.90, 1.0),
+            lookaheadXFraction = 0.75,
+            lookaheadYFraction = 0.30,
+        )
+        var reacquired: TapeTrackingDecision? = null
+        repeat(3) { index ->
+            val now = seconds(5) + index * 250_000_000L
+            controller.observe(nearEdgePath, now)
+            reacquired = controller.tick(now)
+        }
+
+        val decision = checkNotNull(reacquired)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertTrue(decision.rightSpeedMetersPerSecond < 0.0)
+    }
+
+    @Test
     fun `plausible continuation requires two consistent detections after a gap`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))

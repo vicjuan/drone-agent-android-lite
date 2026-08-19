@@ -564,7 +564,12 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
-        if (abs(observation.nearFieldOffsetFraction) > REACQUISITION_ENTRY_OFFSET_FRACTION) {
+        val centeredPath =
+            abs(observation.nearFieldOffsetFraction) <= REACQUISITION_ENTRY_OFFSET_FRACTION
+        val connectedNearEdgePath =
+            observation.longSideFraction >= CIRCULAR_REACQUISITION_MIN_PATH_FRACTION &&
+                observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+        if (!centeredPath && !connectedNearEdgePath) {
             resetCircularReacquisitionCandidate()
             return
         }
@@ -1127,6 +1132,7 @@ internal class TapeTrackingController {
         const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
         const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
+        const val CIRCULAR_REACQUISITION_MIN_PATH_FRACTION = 0.60
         const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
         const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
         const val REACQUISITION_CONFIRMATION_COUNT = 3
