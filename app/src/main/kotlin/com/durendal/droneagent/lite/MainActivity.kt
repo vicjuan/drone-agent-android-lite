@@ -73,6 +73,8 @@ class MainActivity : Activity() {
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var cameraDownButton: PillButton
+    private lateinit var cameraPitch80Button: PillButton
+    private lateinit var cameraPitch70Button: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var leftPad: StickPadView
@@ -147,6 +149,9 @@ class MainActivity : Activity() {
 
     /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
     private var gimbalActive = false
+    private var selectedCameraPitchDegrees: Double? = null
+    private var cameraPitchCommandPending = false
+    private var cameraPitchCommandGeneration = 0L
     private val tapeTracking = TapeTrackingController()
     private var tapeTrackingAuthoritySeen = false
     private var tapeTrackingStartedAtNanos = 0L
@@ -395,7 +400,9 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
-        cameraDownButton = PillButton("攝影機向下", StickPadView.CYAN) { moveCameraDown() }
+        cameraDownButton = PillButton("鏡頭 -90°", StickPadView.CYAN) {
+            moveCameraToPitch(CAMERA_DOWN_PITCH_DEGREES)
+        }
         tapeTrackingButton =
             PillButton("直線黑膠帶追蹤", StickPadView.GREEN) { toggleTapeTracking() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
@@ -419,7 +426,15 @@ class MainActivity : Activity() {
         gravity = Gravity.START
         circularTapeTrackingButton =
             PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
-        addView(circularTapeTrackingButton, actionParams())
+        cameraPitch80Button = PillButton("鏡頭 -80°", StickPadView.CYAN) {
+            moveCameraToPitch(CAMERA_PITCH_80_DEGREES)
+        }
+        cameraPitch70Button = PillButton("鏡頭 -70°", StickPadView.CYAN) {
+            moveCameraToPitch(CAMERA_PITCH_70_DEGREES)
+        }
+        addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
+        addView(cameraPitch80Button, actionParams(marginEnd = dp(10)))
+        addView(cameraPitch70Button, actionParams())
     }
 
     private fun actionParams(marginStart: Int = 0, marginEnd: Int = 0) =
@@ -508,6 +523,11 @@ class MainActivity : Activity() {
         if (active && tapeTracking.enabled) {
             stopTapeTracking("攝影機搖桿已接管，黑膠帶追蹤已停止", release = true)
         }
+        if (active) {
+            cameraPitchCommandGeneration += 1
+            cameraPitchCommandPending = false
+            selectedCameraPitchDegrees = null
+        }
         if (active != gimbalActive) {
             gimbalActive = active
             flightLog.write(
@@ -518,24 +538,41 @@ class MainActivity : Activity() {
         gimbal.setInput(x, y)
     }
 
-    private fun moveCameraDown() {
-        flightLog.write("press: camera down registered=$registered connected=$aircraftConnected")
+    private fun moveCameraToPitch(pitchDegrees: Double) {
+        flightLog.write(
+            "press: camera pitch=%.0f registered=$registered connected=$aircraftConnected".format(
+                pitchDegrees,
+            ),
+        )
+        if (cameraPitchCommandPending) {
+            render("鏡頭角度切換中，請稍候")
+            return
+        }
         if (!registered || !aircraftConnected) {
             render("飛機未連線，無法控制攝影機")
             return
         }
         if (tapeTracking.enabled) {
-            stopTapeTracking("攝影機手動向下，黑膠帶追蹤已停止", release = true)
+            stopTapeTracking("攝影機角度變更，黑膠帶追蹤已停止", release = true)
         }
+        val commandGeneration = ++cameraPitchCommandGeneration
+        cameraPitchCommandPending = true
+        selectedCameraPitchDegrees = null
+        render("鏡頭正在移至 %.0f°…".format(pitchDegrees))
         gimbal.rotateTo(
-            CAMERA_DOWN_PITCH_DEGREES,
+            pitchDegrees,
             0.0,
             CAMERA_RECENTER_DURATION_SECONDS,
         ) { error ->
             runOnUiThread {
+                if (commandGeneration != cameraPitchCommandGeneration) return@runOnUiThread
+                cameraPitchCommandPending = false
                 if (error == null) {
-                    flightLog.write("camera down accepted")
-                    render("攝影機已盡量朝下")
+                    selectedCameraPitchDegrees = pitchDegrees
+                    flightLog.write("camera pitch=%.0f accepted".format(pitchDegrees))
+                    render("鏡頭已移至 %.0f°".format(pitchDegrees))
+                } else {
+                    render("鏡頭角度控制失敗：$error")
                 }
             }
         }
@@ -564,7 +601,8 @@ class MainActivity : Activity() {
         val trackingName = tapeTrackingName(mode)
         flightLog.write(
             "press: tape tracking mode=$mode registered=$registered connected=$aircraftConnected " +
-                "flying=$flying owned=$stickOwned",
+                "flying=$flying owned=$stickOwned cameraPitch=" +
+                (selectedCameraPitchDegrees?.let { "%.0f".format(it) } ?: "unknown"),
         )
         if (!registered || !aircraftConnected || !flying) {
             render("飛機未在空中，無法啟動$trackingName")
@@ -957,7 +995,10 @@ class MainActivity : Activity() {
         val turning = headingTurn != null
         holdButton.available =
             ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
-        cameraDownButton.available = ready
+        val cameraPitchAvailable = ready && !cameraPitchCommandPending
+        cameraDownButton.available = cameraPitchAvailable
+        cameraPitch80Button.available = cameraPitchAvailable
+        cameraPitch70Button.available = cameraPitchAvailable
         val tapeTrackingCanStart = ready && flying && !turning && !holdingHeight
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
@@ -2282,6 +2323,8 @@ class MainActivity : Activity() {
         const val TAPE_MISSES_TO_CLEAR = 3
         const val TAPE_TRACKING_TICK_MS = 100L
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
+        const val CAMERA_PITCH_80_DEGREES = -80.0
+        const val CAMERA_PITCH_70_DEGREES = -70.0
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
         const val TAPE_COMMAND_LOG_PERIOD_NANOS = 250_000_000L
 
