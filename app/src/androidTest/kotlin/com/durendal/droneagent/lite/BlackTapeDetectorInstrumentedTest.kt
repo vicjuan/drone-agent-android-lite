@@ -45,6 +45,59 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun curvedPathRemainsContinuousAcrossBrightGlareBands() {
+        val width = 640
+        val height = 360
+        val cleanFrame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(cleanFrame, width, height, direction = 1.0, value = 20)
+        val frame = cleanFrame.copyOf()
+        for (y in 145 until 160) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                frame,
+                width,
+                left = (center - TAPE_HALF_WIDTH).toInt(),
+                top = y,
+                right = (center + TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                value = 220,
+            )
+        }
+        for (y in 185 until 200) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                frame,
+                width,
+                left = (center - TAPE_HALF_WIDTH).toInt(),
+                top = y,
+                right = (center + TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                value = 220,
+            )
+        }
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(cleanFrame, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+        assertTrue(detections[0] != null)
+        val detection = checkNotNull(detections[1]) { diagnostics.last() }
+
+        assertTrue(
+            "expected a continuous path, actual=$detection diagnostics=${diagnostics.last()}",
+            detection.longSideFraction > 0.9,
+        )
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.03)
+        assertTrue(detection.lookaheadXFraction > detection.anchorXFraction)
+    }
+
+    @Test
     fun trackedTapeRemainsDetectableAsOnlyItsShortTerminalSegmentRemains() {
         val width = 640
         val height = 360
@@ -209,6 +262,7 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 70.0)
         assertTrue(detection.longSideFraction > 0.50)
     }
+
 
     @Test
     fun horizontalCurvedTapeCanBeAcquiredWithoutPreviousDetection() {
