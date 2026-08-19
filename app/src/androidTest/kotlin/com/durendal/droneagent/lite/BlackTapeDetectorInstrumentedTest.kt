@@ -151,34 +151,34 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun trackedCurvedTapeSurvivesAChangeToTwoDifferentFloorMaterials() {
+    fun trackedTapeIsRejectedWhenEitherSideLeavesCorrugatedBoard() {
         val width = 640
         val height = 360
-        val uniformFloor = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
-        fillCurvedRibbon(uniformFloor, width, height, direction = 1.0, value = 20)
-        val splitFloor = stripedSplitFloorWithCurvedTape(width, height)
+        val uniformBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(uniformBoard, width, height, direction = 1.0, value = 20)
+        val boardBesideGrayFloor = stripedSplitFloorWithCurvedTape(width, height)
 
-        val isolated = detectSequence(listOf(splitFloor), width, height).single()
-        val tracked = detectSequence(listOf(uniformFloor, splitFloor), width, height)
+        val tracked = detectSequence(listOf(uniformBoard, boardBesideGrayFloor), width, height)
 
-        assertEquals(null, isolated)
         assertTrue(tracked[0] != null)
-        assertTrue(tracked[1] != null)
+        assertEquals(null, tracked[1])
     }
     @Test
     fun selectingTheCurrentPathModePreservesTheTrackedCandidate() {
         val width = 640
         val height = 360
-        val uniformFloor = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
-        fillCurvedRibbon(uniformFloor, width, height, direction = 1.0, value = 20)
-        val splitFloor = stripedSplitFloorWithCurvedTape(width, height)
+        val fullTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(fullTape, width, left = 305, top = 0, right = 335, bottom = height, value = 20)
+        val terminalTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(terminalTape, width, left = 305, top = 300, right = 335, bottom = height, value = 20)
 
         val tracked = detectSequence(
-            frames = listOf(uniformFloor, splitFloor),
+            frames = listOf(fullTape, terminalTape),
             width = width,
             height = height,
+            mode = TapeDetectionMode.STRAIGHT,
             beforeFrame = { index, detector ->
-                if (index == 1) detector.setDetectionMode(TapeDetectionMode.PATH)
+                if (index == 1) detector.setDetectionMode(TapeDetectionMode.STRAIGHT)
             },
         )
 

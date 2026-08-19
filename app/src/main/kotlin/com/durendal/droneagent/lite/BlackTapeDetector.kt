@@ -773,12 +773,11 @@ class BlackTapeDetector(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
-        // A path already connected to the previous winner may cross a floor-material
-        // boundary, leaving one side with no matching floor. Keep the surrounding-floor
-        // guard, but deliberately disable the per-side floor guard only during the
-        // bounded previous-selection window (PREVIOUS_SELECTION_MISS_LIMIT).
+        // A tracked path may cross a floor-material boundary, so surrounding coverage
+        // stays relaxed. Both visible sides must still be corrugated board; otherwise
+        // a board edge or a seam on the adjacent floor becomes a plausible continuation.
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
-        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.0
+        const val MIN_TRACKED_PATH_SIDE_FLOOR = MIN_PATH_SIDE_FLOOR
         const val MIN_PATH_CURVATURE_SMOOTHNESS = 0.08
         const val MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR = 0.0
         const val MIN_HORIZONTAL_PATH_SIDE_FLOOR = 0.0
