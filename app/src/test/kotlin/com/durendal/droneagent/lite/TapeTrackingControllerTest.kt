@@ -520,6 +520,59 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `short centered floor features cannot reacquire a circular path`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(4))
+
+        val floorFeature = observation(
+            angleDegrees = 50.0,
+            longSideFraction = 0.35,
+            nearFieldOffsetFraction = 0.01,
+            bounds = NormalizedRect(0.46, 0.58, 0.56, 0.73),
+            lookaheadXFraction = 0.51,
+            lookaheadYFraction = 0.67,
+        )
+        repeat(4) { index ->
+            val now = seconds(5) + index * 250_000_000L
+            controller.observe(floorFeature, now)
+            val decision = controller.tick(now)
+            assertEquals(TapeTrackingPhase.REACQUIRING_PATH, decision.phase)
+            assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+            assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+            assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+        }
+    }
+
+    @Test
+    fun `long connected path after a gap cannot become a circular endpoint`() {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        controller.observe(null, seconds(3))
+
+        val shiftedPath = observation(
+            angleDegrees = 60.0,
+            longSideFraction = 1.60,
+            nearFieldOffsetFraction = 0.35,
+            bounds = NormalizedRect(0.10, 0.51, 0.74, 1.0),
+            lookaheadXFraction = 0.65,
+            lookaheadYFraction = 0.65,
+        )
+        controller.observe(shiftedPath, seconds(3) + 250_000_000L)
+        val decision = controller.tick(seconds(3) + 250_000_000L)
+
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertFalse(decision.endpointReached)
+    }
+
+    @Test
     fun `plausible continuation requires two consistent detections after a gap`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))

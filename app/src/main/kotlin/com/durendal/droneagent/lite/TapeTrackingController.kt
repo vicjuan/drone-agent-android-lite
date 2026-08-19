@@ -425,7 +425,10 @@ internal class TapeTrackingController {
         }
         if (circularDetectionGap && previousObservation != null) {
             if (!isPlausibleCircularContinuation(observation, previousObservation)) {
-                if (circularEndpointQualified) {
+                if (
+                    circularEndpointQualified &&
+                    !isCredibleCircularReacquisitionPath(observation)
+                ) {
                     beginCircularEndpointVerification(nowNanos)
                     registerEndpointMiss(nowNanos)
                 } else {
@@ -564,12 +567,7 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
-        val centeredPath =
-            abs(observation.nearFieldOffsetFraction) <= REACQUISITION_ENTRY_OFFSET_FRACTION
-        val connectedNearEdgePath =
-            observation.longSideFraction >= CIRCULAR_REACQUISITION_MIN_PATH_FRACTION &&
-                observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
-        if (!centeredPath && !connectedNearEdgePath) {
+        if (!isCredibleCircularReacquisitionPath(observation)) {
             resetCircularReacquisitionCandidate()
             return
         }
@@ -689,6 +687,17 @@ internal class TapeTrackingController {
                 observation.angleFromVerticalDegrees,
                 reference.angleFromVerticalDegrees,
             ) <= REACQUISITION_MAX_ANGLE_JUMP_DEGREES
+
+    private fun isCredibleCircularReacquisitionPath(
+        observation: TapeTrackingObservation,
+    ): Boolean {
+        if (observation.longSideFraction < CIRCULAR_REACQUISITION_MIN_PATH_FRACTION) {
+            return false
+        }
+        return abs(observation.nearFieldOffsetFraction) <=
+            REACQUISITION_ENTRY_OFFSET_FRACTION ||
+            observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+    }
 
     private fun isConsistentCircularReacquisition(
         observation: TapeTrackingObservation,
