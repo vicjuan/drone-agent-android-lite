@@ -72,10 +72,8 @@ class MainActivity : Activity() {
     private lateinit var landButton: PillButton
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
-    private lateinit var sequenceButton: PillButton
     private lateinit var cameraDownButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
-    private lateinit var circleButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
@@ -338,17 +336,26 @@ class MainActivity : Activity() {
     private fun handleTapeDetection(detection: TapeDetection?) = runOnUiThread {
         if (tapeEndpointTurn) return@runOnUiThread
         val now = System.nanoTime()
-        tapeTracking.observe(
-            detection?.let {
-                TapeTrackingObservation(
-                    angleFromVerticalDegrees = it.angleFromVerticalDegrees,
-                    longSideFraction = it.longSideFraction,
-                    nearFieldOffsetFraction = it.nearFieldOffsetFraction,
-                    bounds = it.bounds,
-                )
-            },
-            now,
-        )
+        if (tapeTracking.enabled) {
+            tapeTracking.observe(
+                detection?.let {
+                    TapeTrackingObservation(
+                        angleFromVerticalDegrees = it.angleFromVerticalDegrees,
+                        longSideFraction = it.longSideFraction,
+                        nearFieldOffsetFraction = it.nearFieldOffsetFraction,
+                        bounds = it.bounds,
+                        lookaheadXFraction = it.lookaheadXFraction,
+                        lookaheadYFraction = it.lookaheadYFraction,
+                        frameWidthPixels = it.sourceWidth,
+                        frameHeightPixels = it.sourceHeight,
+                        heightAboveGroundMeters = usableHeightMeters()?.takeIf { height ->
+                            height.isFinite() && height > 0.0
+                        },
+                    )
+                },
+                now,
+            )
+        }
         if (detection == null) {
             consecutiveTapeMisses += 1
             if (consecutiveTapeMisses < TAPE_MISSES_TO_CLEAR) return@runOnUiThread
@@ -415,9 +422,9 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
-        sequenceButton = PillButton("持續來回", StickPadView.GREEN) { startShuttle() }
         cameraDownButton = PillButton("攝影機向下", StickPadView.CYAN) { moveCameraDown() }
-        tapeTrackingButton = PillButton("黑膠帶追蹤", StickPadView.GREEN) { toggleTapeTracking() }
+        tapeTrackingButton =
+            PillButton("直線黑膠帶追蹤", StickPadView.GREEN) { toggleTapeTracking() }
         registerButton = PillButton("重新註冊", StickPadView.AMBER) {
             registerAttempts = 0
             requestRegistration("操作者手動")
@@ -425,7 +432,6 @@ class MainActivity : Activity() {
         addView(registerButton, actionParams(marginEnd = dp(10)))
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
-        addView(sequenceButton, actionParams(marginEnd = dp(10)))
         addView(cameraDownButton, actionParams(marginEnd = dp(10)))
         addView(tapeTrackingButton, actionParams(marginEnd = dp(10)))
         addView(
@@ -438,10 +444,8 @@ class MainActivity : Activity() {
     private fun buildExperimentActionRow(): ViewGroup = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.START
-        circleButton = PillButton("低速右繞一圈", StickPadView.GREEN) { toggleCircleFlight() }
         circularTapeTrackingButton =
             PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
-        addView(circleButton, actionParams(marginEnd = dp(10)))
         addView(circularTapeTrackingButton, actionParams())
     }
 
@@ -578,11 +582,7 @@ class MainActivity : Activity() {
     private fun toggleTapeTracking(mode: TapeTrackingMode) {
         when {
             tapeTracking.enabled && activeTapeTrackingMode == mode ->
-                stopTapeTracking(
-                    "${tapeTrackingName(mode)}已由操作者停止",
-                    release = true,
-                    centerCamera = true,
-                )
+                stopTapeTracking("${tapeTrackingName(mode)}已由操作者停止", release = true)
             tapeTracking.enabled -> render("另一個黑膠帶追蹤模式正在使用中")
             tapeTrackingStartPending -> render("正在切換飛機避障模式，請稍候")
             else -> startTapeTracking(mode)
@@ -659,7 +659,7 @@ class MainActivity : Activity() {
                         commandedTapeRightSpeed = 0.0
                         tapeCommandLoggedAtNanos = 0L
                         if (mode == TapeTrackingMode.STRAIGHT) {
-                            tapeTrackingButton.text = "停止黑膠帶追蹤"
+                            tapeTrackingButton.text = "停止直線黑膠帶追蹤"
                         } else {
                             circularTapeTrackingButton.text = "停止圓形黑膠帶追蹤"
                         }
@@ -696,8 +696,8 @@ class MainActivity : Activity() {
                 }
             }
 
+
             val decision = tapeTracking.tick(now)
-            decision.gimbalTarget?.let(::applyTapeTrackingGimbalTarget)
             if (
                 activeTapeTrackingMode == TapeTrackingMode.STRAIGHT &&
                 decision.endpointReached
@@ -712,7 +712,7 @@ class MainActivity : Activity() {
                 if (ownsAuthority) decision.rightSpeedMetersPerSecond else 0.0
             if (requestedForwardSpeed != 0.0 || requestedRightSpeed != 0.0) {
                 tapeTrackingStopReason()?.let { reason ->
-                    stopTapeTracking(reason, release = true, centerCamera = true)
+                    stopTapeTracking(reason, release = true)
                     return
                 }
             }
@@ -735,8 +735,9 @@ class MainActivity : Activity() {
                             "angle=${decision.controlledAngleDegrees.logNumber(1)} " +
                             "rawOffset=${decision.rawOffsetFraction.logNumber(3)} " +
                             "offset=${decision.controlledOffsetFraction.logNumber(3)} " +
-                            "offsetRate=%+.3f yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
+                            "offsetRate=%+.3f ppYaw=%+.1f yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
                                 decision.offsetRatePerSecond,
+                                decision.purePursuitYawRateDegreesPerSecond,
                                 yawRate,
                                 requestedForwardSpeed,
                                 requestedRightSpeed,
@@ -748,9 +749,11 @@ class MainActivity : Activity() {
                 renderedTapeTrackingPhase = decision.phase
                 val trackingName = tapeTrackingName(activeTapeTrackingMode)
                 val status = when (decision.phase) {
-                    TapeTrackingPhase.RECENTERING -> "$trackingName：攝影機復位中"
+                    TapeTrackingPhase.RECENTERING -> "$trackingName：循跡資料穩定中"
                     TapeTrackingPhase.TRACKING ->
-                        "$trackingName（底部錨點置中、前視切線轉向）"
+                        "$trackingName（Pure Pursuit 前視點導引）"
+                    TapeTrackingPhase.ALIGNING_CURVE ->
+                        "$trackingName：急彎原地對準中"
                     TapeTrackingPhase.VERIFYING_ENDPOINT ->
                         "疑似膠帶末端：低速前進確認中"
                     TapeTrackingPhase.TURNING -> "確認膠帶末端：向右旋轉 180°"
@@ -763,9 +766,20 @@ class MainActivity : Activity() {
             mainHandler.postDelayed(this, TAPE_TRACKING_TICK_MS)
         }
     }
+    private fun zeroTapeTrackingCommands(preserveTurnYaw: Boolean) {
+        if (!preserveTurnYaw) {
+            virtualStick.setYawRate(0.0)
+            commandedTapeYawRate = 0.0
+        }
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
+        commandedTapeForwardSpeed = 0.0
+        commandedTapeRightSpeed = 0.0
+    }
+
+
 
     private fun tapeTrackingName(mode: TapeTrackingMode? = activeTapeTrackingMode): String =
-        if (mode == TapeTrackingMode.CIRCULAR) "圓形黑膠帶追蹤" else "黑膠帶追蹤"
+        if (mode == TapeTrackingMode.CIRCULAR) "圓形黑膠帶追蹤" else "直線黑膠帶追蹤"
 
     private fun beginTapeTurnaround() {
         check(activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) {
@@ -776,7 +790,6 @@ class MainActivity : Activity() {
             stopTapeTracking(
                 "已確認膠帶末端，但沒有機頭方向資料，追蹤已停止",
                 release = true,
-                centerCamera = true,
             )
             return
         }
@@ -795,31 +808,10 @@ class MainActivity : Activity() {
         armHeadingTurn(TurnDirection.RIGHT, heading)
     }
 
-    private fun applyTapeTrackingGimbalTarget(target: TrackingGimbalTarget) {
-        check(target == TrackingGimbalTarget.DOWN_CENTER)
-        flightLog.write("tape tracking gimbal=DOWN_CENTER")
-        gimbal.rotateTo(
-            CAMERA_DOWN_PITCH_DEGREES,
-            0.0,
-            CAMERA_RECENTER_DURATION_SECONDS,
-        ) { error ->
-            if (error != null) {
-                runOnUiThread {
-                    if (tapeTracking.enabled) {
-                        stopTapeTracking(
-                            "雲台復位失敗，黑膠帶追蹤已停止：$error",
-                            release = true,
-                        )
-                    }
-                }
-            }
-        }
-    }
 
     private fun stopTapeTracking(
         message: String,
         release: Boolean,
-        centerCamera: Boolean = false,
     ) {
         val wasActive =
             tapeTrackingStartPending || tapeTracking.enabled ||
@@ -836,7 +828,6 @@ class MainActivity : Activity() {
         tapeDetector?.setDetectionMode(TapeDetectionMode.PATH)
         tapeTrackingStartPending = false
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
-        gimbal.setInput(0.0, 0.0)
         virtualStick.setYawRate(0.0)
         virtualStick.setForwardOnly(0.0)
         commandedTapeYawRate = 0.0
@@ -847,12 +838,9 @@ class MainActivity : Activity() {
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
         tapeCommandLoggedAtNanos = 0L
         activeTapeTrackingMode = null
-        if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "黑膠帶追蹤"
+        if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "直線黑膠帶追蹤"
         if (::circularTapeTrackingButton.isInitialized) {
             circularTapeTrackingButton.text = "圓形黑膠帶追蹤"
-        }
-        if (centerCamera && registered && aircraftConnected) {
-            applyTapeTrackingGimbalTarget(TrackingGimbalTarget.DOWN_CENTER)
         }
         if (!wasActive) {
             render(message)
@@ -1020,9 +1008,6 @@ class MainActivity : Activity() {
         holdButton.available =
             ready && flying && !holdingHeight && !turning && !circling && !sequencing &&
                 !tapeTracking.enabled
-        sequenceButton.available =
-            ready && flying && !nudging && !turning && !circling && !holdingHeight &&
-                !sequencing && !tapeTracking.enabled
         cameraDownButton.available = ready
         val tapeTrackingCanStart =
             ready && flying && !nudging && !turning && !circling && !holdingHeight && !sequencing
@@ -1032,10 +1017,6 @@ class MainActivity : Activity() {
         circularTapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
-        circleButton.available =
-            circling || circleStartPending ||
-                (ready && flying && !nudging && !turning && !holdingHeight && !sequencing &&
-                    !tapeTracking.enabled)
         // Sticks stay live during the shuttle: any deflection is an explicit
         // operator takeover and cancels automation before applying that input.
         leftPad.isEnabled = ready && flying
@@ -1582,6 +1563,8 @@ class MainActivity : Activity() {
         driveHeadingTurn()
     }
 
+
+
     private fun publishHeight(meters: Double?, source: HeightSource = HeightSource.ALTITUDE) {
         if (meters == null) {
             if (source == heightSource) {
@@ -1658,7 +1641,6 @@ class MainActivity : Activity() {
             circleAuthoritySeen =
                 stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
             circleRenderedProgressBucket = -1
-            circleButton.text = "停止低速繞圈"
             flightLog.write(
                 "slow circle started direction=RIGHT speed=$CIRCLE_FORWARD_SPEED_MPS " +
                     "yaw=$CIRCLE_YAW_RATE_DPS radius=$CIRCLE_RADIUS_METERS",
@@ -1745,7 +1727,6 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(circleTickRunnable)
         virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setYawRate(0.0)
-        if (::circleButton.isInitialized) circleButton.text = "低速右繞一圈"
         holdStatus = message
         flightLog.write(message)
         if (
@@ -1965,7 +1946,6 @@ class MainActivity : Activity() {
             stopTapeTracking(
                 "$message，黑膠帶追蹤已停止",
                 release = release,
-                centerCamera = true,
             )
             return
         }
@@ -2035,7 +2015,7 @@ class MainActivity : Activity() {
             stopCircleFlight("降落操作取消低速繞圈", release = false)
         }
         if (tapeTracking.enabled) {
-            stopTapeTracking("降落操作取消黑膠帶追蹤", release = false, centerCamera = true)
+            stopTapeTracking("降落操作取消黑膠帶追蹤", release = false)
         }
         holdStatus = ""
         if (!stickOwned) {

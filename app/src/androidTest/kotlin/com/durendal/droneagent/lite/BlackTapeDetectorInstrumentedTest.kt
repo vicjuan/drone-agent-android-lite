@@ -77,7 +77,8 @@ class BlackTapeDetectorInstrumentedTest {
             ).single(),
         )
 
-        assertTrue(detection.angleFromVerticalDegrees > 10.0)
+        assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
+        assertTrue(detection.lookaheadXFraction > detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
         assertTrue(detection.longSideFraction > 0.9)
     }
@@ -91,7 +92,8 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
 
-        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+        assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
+        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
     }
 
@@ -111,7 +113,8 @@ class BlackTapeDetectorInstrumentedTest {
         val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
 
         assertEquals(1.0, detection.bounds.right, 0.001)
-        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+        assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
+        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
     }
 
     @Test
@@ -202,7 +205,7 @@ class BlackTapeDetectorInstrumentedTest {
                 diagnostics.single()
             }
 
-        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 80.0)
+        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 70.0)
         assertTrue(detection.longSideFraction > 1.0)
     }
 
@@ -217,6 +220,7 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertTrue(detection.anchorXFraction > 0.75)
         assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
+        assertTrue(detection.lookaheadXFraction > 0.5)
     }
 
     @Test
@@ -285,7 +289,7 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detections[0] != null)
         val horizontal = checkNotNull(detections[1]) { diagnostics.last() }
 
-        assertTrue(kotlin.math.abs(horizontal.angleFromVerticalDegrees) > 80.0)
+        assertTrue(kotlin.math.abs(horizontal.angleFromVerticalDegrees) > 70.0)
         assertTrue(horizontal.longSideFraction > 1.0)
         assertTrue(horizontal.bounds.bottom < 0.85)
         assertTrue(horizontal.nearFieldOffsetFraction > 0.30)

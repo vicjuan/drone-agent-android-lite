@@ -1,12 +1,16 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.sqrt
+import kotlin.math.tan
 import kotlin.math.sign
 
 internal enum class TapeTrackingPhase {
     DISABLED,
     RECENTERING,
     TRACKING,
+    ALIGNING_CURVE,
     VERIFYING_ENDPOINT,
     TURNING,
 }
@@ -17,20 +21,28 @@ internal enum class TapeTrackingMode {
 }
 
 
-internal enum class TrackingGimbalTarget {
-    DOWN_CENTER,
-}
 
 internal data class TapeTrackingObservation(
     val angleFromVerticalDegrees: Double,
     val longSideFraction: Double,
     val nearFieldOffsetFraction: Double,
     val bounds: NormalizedRect,
+    val lookaheadXFraction: Double,
+    val lookaheadYFraction: Double,
+    val frameWidthPixels: Int,
+    val frameHeightPixels: Int,
+    val heightAboveGroundMeters: Double?,
 ) {
     init {
         require(angleFromVerticalDegrees in -90.0..90.0)
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
+        require(lookaheadXFraction in 0.0..1.0)
+        require(lookaheadYFraction in 0.0..1.0)
+        require(frameWidthPixels > 0 && frameHeightPixels > 0)
+        require(heightAboveGroundMeters == null || (
+            heightAboveGroundMeters.isFinite() && heightAboveGroundMeters > 0.0
+        ))
     }
 }
 
@@ -39,20 +51,20 @@ internal data class TapeTrackingDecision(
     val yawRateDegreesPerSecond: Double,
     val forwardSpeedMetersPerSecond: Double = 0.0,
     val rightSpeedMetersPerSecond: Double = 0.0,
-    val gimbalTarget: TrackingGimbalTarget? = null,
     val endpointReached: Boolean = false,
     val rawAngleDegrees: Double? = null,
     val controlledAngleDegrees: Double? = null,
     val rawOffsetFraction: Double? = null,
     val controlledOffsetFraction: Double? = null,
     val offsetRatePerSecond: Double = 0.0,
+    val purePursuitYawRateDegreesPerSecond: Double = 0.0,
 )
 
 /**
  * Timing and steering policy for black-tape tracking: it owns the tracking phase,
  * the smoothed measurements and the output slew limits, and answers every tick with
- * a [TapeTrackingDecision]. Aircraft and gimbal commands remain in MainActivity, so
- * this state machine can be tested without the DJI SDK.
+ * a [TapeTrackingDecision]. Aircraft commands remain in MainActivity, so this state machine
+ * can be tested without the DJI SDK.
  */
 internal class TapeTrackingController {
     var enabled: Boolean = false
@@ -66,6 +78,10 @@ internal class TapeTrackingController {
     private var rawHorizontalOffsetFraction: Double? = null
     private var controlledAngleDegrees: Double? = null
     private var controlledHorizontalOffsetFraction: Double? = null
+    private var controlledLookaheadXFraction: Double? = null
+    private var controlledLookaheadYFraction: Double? = null
+    private var lookaheadFrameAspectRatio: Double? = null
+    private var heightAboveGroundMeters: Double? = null
     private var offsetRatePerSecond = 0.0
     private var recenterUntilNanos = 0L
     private var consecutiveEndpointDetections = 0
@@ -73,13 +89,13 @@ internal class TapeTrackingController {
     private var longestObservedTapeFraction = 0.0
     private var endpointQualificationArmed = true
     private var endpointPending = false
-    private var pendingGimbalTarget: TrackingGimbalTarget? = null
     private var awaitingPostTurnDetection = false
     private var postTurnRecoveryUntilNanos = 0L
     private var endpointVerificationStartedAtNanos = 0L
     private var consecutiveEndpointMisses = 0
     private var endpointReferenceBounds: NormalizedRect? = null
     private var lateralCorrectionActive = false
+    private var consecutiveCurveAlignmentDetections = 0
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
@@ -104,7 +120,6 @@ internal class TapeTrackingController {
         endpointVerificationStartedAtNanos = 0L
         endpointReferenceBounds = null
         consecutiveEndpointMisses = 0
-        pendingGimbalTarget = null
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
     }
@@ -117,6 +132,7 @@ internal class TapeTrackingController {
             nowNanos + RECENTER_DURATION_NANOS + POST_TURN_RECOVERY_NANOS
         beginRecentering(nowNanos)
     }
+
 
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
@@ -140,11 +156,7 @@ internal class TapeTrackingController {
         }
         when (phase) {
             TapeTrackingPhase.TRACKING -> {
-                updateControlMeasurements(
-                    observation.angleFromVerticalDegrees,
-                    observation.nearFieldOffsetFraction,
-                    nowNanos,
-                )
+                updateControlMeasurements(observation, nowNanos)
                 lastDetectionAtNanos = nowNanos
                 awaitingPostTurnDetection = false
                 longestObservedTapeFraction =
@@ -203,11 +215,7 @@ internal class TapeTrackingController {
                 }
                 endpointReferenceBounds = observation.bounds
                 consecutiveEndpointMisses = 0
-                updateControlMeasurements(
-                    observation.angleFromVerticalDegrees,
-                    observation.nearFieldOffsetFraction,
-                    nowNanos,
-                )
+                updateControlMeasurements(observation, nowNanos)
                 lastDetectionAtNanos = nowNanos
                 if (
                     observation.longSideFraction >=
@@ -223,6 +231,7 @@ internal class TapeTrackingController {
 
             TapeTrackingPhase.DISABLED,
             TapeTrackingPhase.RECENTERING,
+            TapeTrackingPhase.ALIGNING_CURVE,
             TapeTrackingPhase.TURNING,
             -> Unit
         }
@@ -251,10 +260,9 @@ internal class TapeTrackingController {
             clearControlMeasurements()
         }
 
-        val target = pendingGimbalTarget
-        pendingGimbalTarget = null
         if (
             (phase != TapeTrackingPhase.TRACKING &&
+                phase != TapeTrackingPhase.ALIGNING_CURVE &&
                 phase != TapeTrackingPhase.VERIFYING_ENDPOINT) ||
             nowNanos - lastDetectionAtNanos > DETECTION_COMMAND_STALE_NANOS ||
             controlledAngleDegrees == null ||
@@ -266,14 +274,28 @@ internal class TapeTrackingController {
                 yawRateDegreesPerSecond = 0.0,
                 forwardSpeedMetersPerSecond =
                     if (mode == TapeTrackingMode.CIRCULAR) 0.0 else desiredForwardSpeed(nowNanos),
-                gimbalTarget = target,
             )
         }
+        if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
+            val targetYawRate = desiredCurveAlignmentYawRate()
+            val (yawRate, _) = applyOutputLimits(
+                targetYawRate,
+                targetRightSpeed = 0.0,
+                nowNanos,
+            )
+            return decision(
+                phase = phase,
+                yawRateDegreesPerSecond = yawRate,
+            )
+        }
+
 
         // Establish the anchor correction state before yaw selection so a
         // displaced rail translates first instead of spending the frame spinning.
         val targetRightSpeed = desiredRightSpeed()
-        val targetYawRate = desiredYawRate()
+        val targetForwardSpeed = desiredForwardSpeed(nowNanos)
+        val purePursuitYawRate = desiredPurePursuitYawRate(targetForwardSpeed)
+        val targetYawRate = desiredYawRate(purePursuitYawRate)
         val (yawRate, rightSpeed) = applyOutputLimits(
             targetYawRate,
             targetRightSpeed,
@@ -282,9 +304,9 @@ internal class TapeTrackingController {
         return decision(
             phase = phase,
             yawRateDegreesPerSecond = yawRate,
-            forwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos),
+            forwardSpeedMetersPerSecond = targetForwardSpeed,
             rightSpeedMetersPerSecond = rightSpeed,
-            gimbalTarget = target,
+            purePursuitYawRateDegreesPerSecond = purePursuitYawRate,
         )
     }
 
@@ -292,13 +314,51 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation?,
         nowNanos: Long,
     ) {
-        if (observation == null || phase != TapeTrackingPhase.TRACKING) return
-        updateControlMeasurements(
-            observation.angleFromVerticalDegrees,
-            observation.nearFieldOffsetFraction,
-            nowNanos,
-        )
+        if (phase != TapeTrackingPhase.TRACKING &&
+            phase != TapeTrackingPhase.ALIGNING_CURVE
+        ) {
+            return
+        }
+        if (observation == null) {
+            if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
+                consecutiveCurveAlignmentDetections = 0
+                clearControlMeasurements()
+            }
+            return
+        }
+
+        updateControlMeasurements(observation, nowNanos)
         lastDetectionAtNanos = nowNanos
+        val angle = controlledAngleDegrees ?: return
+        when (phase) {
+            TapeTrackingPhase.TRACKING -> {
+                if (abs(angle) >= CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES) {
+                    phase = TapeTrackingPhase.ALIGNING_CURVE
+                    consecutiveCurveAlignmentDetections = 0
+                    lateralCorrectionActive = false
+                    resetAppliedCommands()
+                }
+            }
+
+            TapeTrackingPhase.ALIGNING_CURVE -> {
+                if (abs(angle) <= CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES) {
+                    consecutiveCurveAlignmentDetections += 1
+                    if (
+                        consecutiveCurveAlignmentDetections >=
+                        CURVE_ALIGNMENT_CONFIRMATION_COUNT
+                    ) {
+                        phase = TapeTrackingPhase.TRACKING
+                        consecutiveCurveAlignmentDetections = 0
+                        lateralCorrectionActive = false
+                        resetAppliedCommands()
+                    }
+                } else {
+                    consecutiveCurveAlignmentDetections = 0
+                }
+            }
+
+            else -> Unit
+        }
     }
 
 
@@ -334,7 +394,6 @@ internal class TapeTrackingController {
     private fun beginRecentering(nowNanos: Long) {
         phase = TapeTrackingPhase.RECENTERING
         clearControlMeasurements()
-        pendingGimbalTarget = TrackingGimbalTarget.DOWN_CENTER
         recenterUntilNanos = nowNanos + RECENTER_DURATION_NANOS
         resetAppliedCommands()
     }
@@ -353,19 +412,27 @@ internal class TapeTrackingController {
     }
 
     private fun updateControlMeasurements(
-        angleDegrees: Double,
-        horizontalOffsetFraction: Double,
+        observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
-        rawAngleDegrees = angleDegrees
-        rawHorizontalOffsetFraction = horizontalOffsetFraction
+        rawAngleDegrees = observation.angleFromVerticalDegrees
+        rawHorizontalOffsetFraction = observation.nearFieldOffsetFraction
         val previousOffset = controlledHorizontalOffsetFraction
         val nextAngle = controlledAngleDegrees?.let {
-            axialExponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
-        } ?: angleDegrees
+            axialExponentialAverage(it, observation.angleFromVerticalDegrees, STABILIZED_FILTER_ALPHA)
+        } ?: observation.angleFromVerticalDegrees
         val nextOffset = previousOffset?.let {
-            exponentialAverage(it, horizontalOffsetFraction, STABILIZED_FILTER_ALPHA)
-        } ?: horizontalOffsetFraction
+            exponentialAverage(it, observation.nearFieldOffsetFraction, STABILIZED_FILTER_ALPHA)
+        } ?: observation.nearFieldOffsetFraction
+        controlledLookaheadXFraction = controlledLookaheadXFraction?.let {
+            exponentialAverage(it, observation.lookaheadXFraction, STABILIZED_FILTER_ALPHA)
+        } ?: observation.lookaheadXFraction
+        controlledLookaheadYFraction = controlledLookaheadYFraction?.let {
+            exponentialAverage(it, observation.lookaheadYFraction, STABILIZED_FILTER_ALPHA)
+        } ?: observation.lookaheadYFraction
+        lookaheadFrameAspectRatio =
+            observation.frameWidthPixels.toDouble() / observation.frameHeightPixels
+        heightAboveGroundMeters = observation.heightAboveGroundMeters
         val elapsedNanos = nowNanos - lastControlObservationAtNanos
         offsetRatePerSecond =
             if (previousOffset != null && lastControlObservationAtNanos != 0L && elapsedNanos > 0L) {
@@ -384,12 +451,17 @@ internal class TapeTrackingController {
         rawHorizontalOffsetFraction = null
         controlledAngleDegrees = null
         controlledHorizontalOffsetFraction = null
+        controlledLookaheadXFraction = null
+        controlledLookaheadYFraction = null
+        lookaheadFrameAspectRatio = null
+        heightAboveGroundMeters = null
         offsetRatePerSecond = 0.0
         lastControlObservationAtNanos = 0L
         lateralCorrectionActive = false
     }
 
     private fun resetControlState() {
+        consecutiveCurveAlignmentDetections = 0
         clearControlMeasurements()
         resetAppliedCommands()
     }
@@ -400,12 +472,11 @@ internal class TapeTrackingController {
         lastCommandAtNanos = 0L
     }
 
-    private fun desiredYawRate(): Double {
+    private fun desiredYawRate(purePursuitYawRate: Double): Double {
         val angle = controlledAngleDegrees ?: return 0.0
         val deadZone =
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_DEAD_ZONE_DEGREES
             else YAW_DEAD_ZONE_DEGREES
-        if (abs(angle) <= deadZone) return 0.0
         val modeMaximumYawRate = when {
             mode == TapeTrackingMode.CIRCULAR ->
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
@@ -422,7 +493,48 @@ internal class TapeTrackingController {
         val gain =
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_PROPORTIONAL_GAIN
             else YAW_PROPORTIONAL_GAIN
-        return (angle * gain).coerceIn(-maximumYawRate, maximumYawRate)
+        val angleFeedback = if (abs(angle) <= deadZone) 0.0 else angle * gain
+        return (purePursuitYawRate + angleFeedback)
+            .coerceIn(-maximumYawRate, maximumYawRate)
+    }
+    private fun desiredCurveAlignmentYawRate(): Double {
+        val angle = controlledAngleDegrees ?: return 0.0
+        return (angle * CIRCULAR_YAW_PROPORTIONAL_GAIN).coerceIn(
+            -CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
+            CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
+        )
+    }
+
+
+    /**
+     * Ground-plane Pure Pursuit from the detected target point. The white overlay cross is the
+     * image-space aircraft reference; image-up is forward and image-right is positive yaw.
+     *
+     * Height and the Mini 4 Pro camera's diagonal FOV provide the metric scale. If either the
+     * height or a forward target is unavailable, the angle feedback remains the safe fallback.
+     */
+    private fun desiredPurePursuitYawRate(forwardSpeedMetersPerSecond: Double): Double {
+        if (forwardSpeedMetersPerSecond <= 0.0) return 0.0
+        val lookaheadX = controlledLookaheadXFraction ?: return 0.0
+        val lookaheadY = controlledLookaheadYFraction ?: return 0.0
+        val aspectRatio = lookaheadFrameAspectRatio ?: return 0.0
+        val height = heightAboveGroundMeters?.takeIf {
+            it >= PURE_PURSUIT_MIN_HEIGHT_METERS
+        } ?: return 0.0
+        val verticalHalfFovTangent =
+            CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
+        val groundFrameHeightMeters = 2.0 * height * verticalHalfFovTangent
+        val lateralMeters =
+            (lookaheadX - PURE_PURSUIT_TARGET_X_FRACTION) *
+                aspectRatio * groundFrameHeightMeters
+        val forwardMeters =
+            (PURE_PURSUIT_TARGET_Y_FRACTION - lookaheadY) * groundFrameHeightMeters
+        if (forwardMeters <= 0.0) return 0.0
+        val lookaheadDistanceMeters = hypot(lateralMeters, forwardMeters)
+        if (lookaheadDistanceMeters < PURE_PURSUIT_MIN_LOOKAHEAD_METERS) return 0.0
+        val curvaturePerMeter =
+            2.0 * lateralMeters / (lookaheadDistanceMeters * lookaheadDistanceMeters)
+        return Math.toDegrees(forwardSpeedMetersPerSecond * curvaturePerMeter)
     }
 
     private fun desiredRightSpeed(): Double {
@@ -544,8 +656,8 @@ internal class TapeTrackingController {
         yawRateDegreesPerSecond: Double,
         forwardSpeedMetersPerSecond: Double = 0.0,
         rightSpeedMetersPerSecond: Double = 0.0,
-        gimbalTarget: TrackingGimbalTarget? = null,
         endpointReached: Boolean = false,
+        purePursuitYawRateDegreesPerSecond: Double = 0.0,
     ): TapeTrackingDecision {
         check(!endpointReached || mode == TapeTrackingMode.STRAIGHT) {
             "Only straight tape tracking can report a physical endpoint"
@@ -555,13 +667,13 @@ internal class TapeTrackingController {
             yawRateDegreesPerSecond = yawRateDegreesPerSecond,
             forwardSpeedMetersPerSecond = forwardSpeedMetersPerSecond,
             rightSpeedMetersPerSecond = rightSpeedMetersPerSecond,
-            gimbalTarget = gimbalTarget,
             endpointReached = endpointReached,
             rawAngleDegrees = rawAngleDegrees,
             controlledAngleDegrees = controlledAngleDegrees,
             rawOffsetFraction = rawHorizontalOffsetFraction,
             controlledOffsetFraction = controlledHorizontalOffsetFraction,
             offsetRatePerSecond = offsetRatePerSecond,
+            purePursuitYawRateDegreesPerSecond = purePursuitYawRateDegreesPerSecond,
         )
     }
 
@@ -643,8 +755,18 @@ internal class TapeTrackingController {
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.03
         const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.10
         const val CIRCULAR_STABLE_ANGLE_DEGREES = 8.0
+        const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
+        const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0
+        const val CURVE_ALIGNMENT_CONFIRMATION_COUNT = 3
         const val CIRCULAR_MAX_MOVING_ANGLE_DEGREES = 45.0
         const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = 0.25
+        const val PURE_PURSUIT_TARGET_X_FRACTION = 0.5
+        const val PURE_PURSUIT_TARGET_Y_FRACTION = 0.94
+        const val PURE_PURSUIT_MIN_HEIGHT_METERS = 0.30
+        const val PURE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.10
+        const val CAMERA_VIDEO_DIAGONAL_FOV_DEGREES = 75.0
+        val CAMERA_DIAGONAL_HALF_FOV_TANGENT =
+            tan(Math.toRadians(CAMERA_VIDEO_DIAGONAL_FOV_DEGREES) / 2.0)
         private const val NANOS_PER_SECOND = 1_000_000_000.0
         private const val INITIAL_COMMAND_INTERVAL_SECONDS = 0.1
         private const val MAX_COMMAND_INTERVAL_SECONDS = 0.25

@@ -15,6 +15,9 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+internal fun gimbalPitchRateForInput(input: Double, maxRateDegreesPerSecond: Double): Double =
+    input.coerceIn(-1.0, 1.0) * maxRateDegreesPerSecond
+
 /**
  * Two-axis camera-gimbal control: a fixed-rate speed stream for the analogue pad,
  * plus [rotateTo] for the absolute poses autonomous tracking needs.
@@ -35,7 +38,7 @@ class GimbalSession(
     /** Input is normalized to [-1, 1], with positive y tilting the camera up. */
     fun setInput(x: Double, y: Double) {
         val nextYaw = x.coerceIn(-1.0, 1.0) * MAX_RATE_DEGREES_PER_SECOND
-        val nextPitch = y.coerceIn(-1.0, 1.0) * MAX_RATE_DEGREES_PER_SECOND
+        val nextPitch = gimbalPitchRateForInput(y, MAX_RATE_DEGREES_PER_SECOND)
         val wasMoving = pitchRate != 0.0 || yawRate != 0.0
         pitchRate = nextPitch
         yawRate = nextYaw

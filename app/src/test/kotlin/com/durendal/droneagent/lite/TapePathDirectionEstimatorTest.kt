@@ -13,6 +13,10 @@ class TapePathDirectionEstimatorTest {
 
         assertEquals(FRAME_WIDTH / 2.0, estimate.nearFieldCenterX, 2.0)
         assertTrue(estimate.lookaheadAngleFromVerticalDegrees > 10.0)
+        assertTrue(
+            kotlin.math.abs(estimate.nearFieldAngleFromVerticalDegrees) <
+                estimate.lookaheadAngleFromVerticalDegrees,
+        )
         assertTrue(estimate.nearFieldCenterY > FRAME_HEIGHT * 0.95)
         assertTrue(estimate.lookaheadCenterY < estimate.nearFieldCenterY)
         assertTrue(estimate.arcLengthFraction > 0.9)
@@ -31,6 +35,7 @@ class TapePathDirectionEstimatorTest {
         val estimate = checkNotNull(estimateRibbon(curveDirection = 0.0))
 
         assertEquals(0.0, estimate.lookaheadAngleFromVerticalDegrees, 0.1)
+        assertEquals(0.0, estimate.nearFieldAngleFromVerticalDegrees, 0.1)
         assertEquals(0.0, estimate.curvatureDegrees, 0.1)
     }
 
@@ -203,6 +208,14 @@ class TapePathDirectionEstimatorTest {
             )
 
         assertTrue(acquired.nearFieldCenterX > 450.0)
+        assertTrue(kotlin.math.abs(acquired.nearFieldAngleFromVerticalDegrees) < 45.0)
+        assertTrue(acquired.lookaheadCenterX > FRAME_WIDTH / 2.0)
+        assertTrue(
+            kotlin.math.hypot(
+                acquired.lookaheadCenterX - acquired.nearFieldCenterX,
+                acquired.lookaheadCenterY - acquired.nearFieldCenterY,
+            ) <= FRAME_HEIGHT * 0.41,
+        )
         assertTrue(acquired.lookaheadCenterX < acquired.nearFieldCenterX)
         assertEquals(acquired.nearFieldCenterX, continued.nearFieldCenterX, 1.0)
     }

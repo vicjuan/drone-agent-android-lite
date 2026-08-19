@@ -214,7 +214,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `turn completion resets endpoint baseline and recenters camera`() {
+    fun `turn completion resets endpoint baseline before tracking resumes`() {
         val controller = trackingController()
         enterEndpointVerification(controller)
         confirmEndpointDisappearance(controller, seconds(6))
@@ -222,7 +222,6 @@ class TapeTrackingControllerTest {
         controller.resumeAfterTurn(seconds(7))
         val recenter = controller.tick(seconds(7))
         assertEquals(TapeTrackingPhase.RECENTERING, recenter.phase)
-        assertEquals(TrackingGimbalTarget.DOWN_CENTER, recenter.gimbalTarget)
         assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(9)).phase)
         controller.observe(observation(0.0, 0.35), seconds(9))
         val resumed = controller.tick(seconds(9))
@@ -248,6 +247,7 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, waiting.forwardSpeedMetersPerSecond, 0.0)
         assertTrue(controller.enabled)
     }
+
 
     @Test
     fun `temporary detection loss never requests an endpoint turn`() {
@@ -350,40 +350,74 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `displaced anchor translates even while lookahead is nearly horizontal`() {
+    fun `sharp curve alignment rotates in place without lateral translation`() {
         val controller = circularTrackingController()
         controller.observe(observation(-82.0, 0.8, 0.45), seconds(2))
 
         val first = controller.tick(seconds(2))
         val accelerated = controller.tick(seconds(2) + 250_000_000L)
 
-        assertEquals(0.020, first.rightSpeedMetersPerSecond, 0.001)
-        assertTrue(accelerated.rightSpeedMetersPerSecond >= 0.069)
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, first.phase)
+        assertEquals(0.0, first.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, first.rightSpeedMetersPerSecond, 0.0)
+        assertTrue(first.yawRateDegreesPerSecond < 0.0)
         assertTrue(
-            kotlin.math.abs(accelerated.yawRateDegreesPerSecond) <=
+            kotlin.math.abs(accelerated.yawRateDegreesPerSecond) >
                 TapeTrackingController.ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND,
         )
-        assertEquals(0.0, accelerated.forwardSpeedMetersPerSecond, 0.0)
+        assertTrue(
+            kotlin.math.abs(accelerated.yawRateDegreesPerSecond) <=
+                TapeTrackingController.CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
+        )
     }
 
     @Test
-    fun `centered anchor releases translation and restores full circular yaw`() {
+    fun `sharp curve alignment requires three stable detections before moving`() {
         val controller = circularTrackingController()
-        controller.observe(observation(-82.0, 0.8, 0.45), seconds(2))
-        var decision = controller.tick(seconds(2))
-        repeat(7) { index ->
-            val now = seconds(2) + (index + 1) * 250_000_000L
-            controller.observe(observation(-82.0, 0.8, 0.0), now)
-            decision = controller.tick(now)
+        controller.observe(observation(46.0, 0.8), seconds(2))
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, controller.tick(seconds(2)).phase)
+
+        val samples = listOf(
+            seconds(2) + 250_000_000L,
+            seconds(2) + 500_000_000L,
+            seconds(2) + 750_000_000L,
+        )
+        samples.forEach { now ->
+            controller.observe(observation(0.0, 0.8), now)
+            assertEquals(TapeTrackingPhase.ALIGNING_CURVE, controller.tick(now).phase)
         }
 
-        assertTrue(decision.yawRateDegreesPerSecond < -2.0)
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.001)
+        val alignedAt = seconds(3)
+        controller.observe(observation(0.0, 0.8), alignedAt)
+        val resumed = controller.tick(alignedAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND,
+            resumed.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+    }
+
+    @Test
+    fun `sharp curve alignment hovers immediately when detection is lost`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(55.0, 0.8), seconds(2))
+        assertTrue(controller.tick(seconds(2)).yawRateDegreesPerSecond > 0.0)
+
+        val missingAt = seconds(2) + 250_000_000L
+        controller.observe(null, missingAt)
+        val hovering = controller.tick(missingAt)
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, hovering.phase)
+        assertEquals(0.0, hovering.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, hovering.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, hovering.yawRateDegreesPerSecond, 0.0)
     }
 
 
     @Test
-    fun `circular mode follows the lookahead tangent at experiment speed`() {
+    fun `circular mode follows the local tangent at experiment speed`() {
         val controller = circularTrackingController()
 
         controller.observe(observation(12.0, 0.8, 0.05), seconds(2))
@@ -400,6 +434,31 @@ class TapeTrackingControllerTest {
             decision.forwardSpeedMetersPerSecond,
             0.0,
         )
+    }
+
+    @Test
+    fun `circular mode advances into a hairpin using pure pursuit`() {
+        val controller = circularTrackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 1.8,
+                lookaheadXFraction = 0.28,
+                lookaheadYFraction = 0.55,
+                heightAboveGroundMeters = 0.5,
+            ),
+            seconds(2),
+        )
+
+        val decision = controller.tick(seconds(2))
+
+        assertEquals(
+            TapeTrackingController.CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND,
+            decision.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+        assertTrue(decision.purePursuitYawRateDegreesPerSecond < 0.0)
+        assertTrue(decision.yawRateDegreesPerSecond < 0.0)
     }
 
     @Test
@@ -420,6 +479,84 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, stale.forwardSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, stale.rightSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, stale.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `pure pursuit turns toward an offset forward target while tangent is aligned`() {
+        val rightController = trackingController()
+        rightController.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookaheadXFraction = 0.65,
+                lookaheadYFraction = 0.60,
+                heightAboveGroundMeters = 0.5,
+            ),
+            seconds(2),
+        )
+        val right = rightController.tick(seconds(2))
+
+        val leftController = trackingController()
+        leftController.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookaheadXFraction = 0.35,
+                lookaheadYFraction = 0.60,
+                heightAboveGroundMeters = 0.5,
+            ),
+            seconds(2),
+        )
+        val left = leftController.tick(seconds(2))
+
+        assertTrue(right.purePursuitYawRateDegreesPerSecond > 0.0)
+        assertTrue(right.yawRateDegreesPerSecond > 0.0)
+        assertEquals(
+            -right.purePursuitYawRateDegreesPerSecond,
+            left.purePursuitYawRateDegreesPerSecond,
+            1e-9,
+        )
+        assertTrue(left.yawRateDegreesPerSecond < 0.0)
+    }
+
+    @Test
+    fun `pure pursuit is neutral for a centered target`() {
+        val controller = trackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookaheadXFraction = 0.5,
+                lookaheadYFraction = 0.60,
+                heightAboveGroundMeters = 0.5,
+            ),
+            seconds(2),
+        )
+
+        val decision = controller.tick(seconds(2))
+
+        assertEquals(0.0, decision.purePursuitYawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `missing height falls back to tangent feedback without fake metric curvature`() {
+        val controller = trackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookaheadXFraction = 0.65,
+                lookaheadYFraction = 0.60,
+                heightAboveGroundMeters = null,
+            ),
+            seconds(2),
+        )
+
+        val decision = controller.tick(seconds(2))
+
+        assertEquals(0.0, decision.purePursuitYawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
     }
 
     @Test
@@ -474,7 +611,6 @@ class TapeTrackingControllerTest {
     private fun circularTrackingController(): TapeTrackingController =
         TapeTrackingController().also {
             it.start(0L, TapeTrackingMode.CIRCULAR)
-            assertEquals(TrackingGimbalTarget.DOWN_CENTER, it.tick(0L).gimbalTarget)
             assertEquals(TapeTrackingPhase.TRACKING, it.tick(seconds(2)).phase)
         }
 
@@ -501,7 +637,6 @@ class TapeTrackingControllerTest {
 
     private fun trackingController(): TapeTrackingController = TapeTrackingController().also {
         it.start(0L)
-        assertEquals(TrackingGimbalTarget.DOWN_CENTER, it.tick(0L).gimbalTarget)
         assertEquals(TapeTrackingPhase.TRACKING, it.tick(seconds(2)).phase)
     }
 
@@ -510,11 +645,19 @@ class TapeTrackingControllerTest {
         longSideFraction: Double,
         nearFieldOffsetFraction: Double = 0.0,
         bounds: NormalizedRect = verticalBounds(longSideFraction, nearFieldOffsetFraction),
+        lookaheadXFraction: Double = 0.5,
+        lookaheadYFraction: Double = 0.60,
+        heightAboveGroundMeters: Double? = null,
     ) = TapeTrackingObservation(
         angleFromVerticalDegrees = angleDegrees,
         longSideFraction = longSideFraction,
         nearFieldOffsetFraction = nearFieldOffsetFraction,
         bounds = bounds,
+        lookaheadXFraction = lookaheadXFraction,
+        lookaheadYFraction = lookaheadYFraction,
+        frameWidthPixels = 1600,
+        frameHeightPixels = 900,
+        heightAboveGroundMeters = heightAboveGroundMeters,
     )
 
     private fun verticalBounds(

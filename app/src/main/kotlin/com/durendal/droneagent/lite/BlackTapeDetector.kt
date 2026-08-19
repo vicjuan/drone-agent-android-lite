@@ -544,7 +544,7 @@ class BlackTapeDetector(
         return Candidate(
             bounds = refinedBounds,
             score = score,
-            angleFromVerticalDegrees = path.lookaheadAngleFromVerticalDegrees,
+            angleFromVerticalDegrees = path.nearFieldAngleFromVerticalDegrees,
             longSideFraction = path.arcLengthFraction,
             nearFieldOffsetFraction =
                 (path.nearFieldCenterX / floorMask.cols() - 0.5).coerceIn(-0.5, 0.5),
