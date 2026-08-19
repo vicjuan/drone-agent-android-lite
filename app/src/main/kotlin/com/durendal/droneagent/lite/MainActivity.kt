@@ -250,6 +250,9 @@ class MainActivity : Activity() {
                 },
                 captureRecorder = captureRecorder,
                 captureFlightContext = ::tapeCaptureFlightContext,
+                // Shadow lines go to the flight log so a disagreement can be
+                // lined up with the capture that produced it by frame sequence.
+                onShadowComparison = flightLog::write,
             )
         }.onFailure { error ->
             flightLog.write("OpenCV initialization failed: $error")

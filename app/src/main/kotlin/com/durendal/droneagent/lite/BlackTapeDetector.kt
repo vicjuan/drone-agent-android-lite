@@ -28,6 +28,10 @@ class BlackTapeDetector internal constructor(
     // frame and its masks, but only the Activity knows gimbal pose and height.
     private val captureRecorder: TapeCaptureRecorder? = null,
     private val captureFlightContext: () -> Map<String, String> = ::emptyMap,
+    // Shadow comparison of the replacement centerline against the estimator that
+    // flies today. Temporary by design: it exists to justify the cutover and is
+    // deleted with the old estimator, never kept as a permanent second track.
+    private val onShadowComparison: ((String) -> Unit)? = null,
 ) : AutoCloseable {
 
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -62,6 +66,11 @@ class BlackTapeDetector internal constructor(
     // the single detector thread, so a plain field is the whole synchronisation.
     private var capturePlanes: MutableList<TapeCapturePlane>? = null
     private var capturePlaneBytes = ByteArray(0)
+    private val centerlineExtractor = CenterlineExtractor()
+    private var shadowMaskBytes = ByteArray(0)
+    private var shadowTape = BooleanArray(0)
+    private var pendingShadowLine: String? = null
+    private var frameSequence = 0L
 
     init {
         check(OpenCVLoader.initLocal()) { "OpenCV native runtime failed to initialize" }
@@ -184,15 +193,31 @@ class BlackTapeDetector internal constructor(
         height: Int,
         frameNanos: Long,
     ): TapeDetection? {
+        frameSequence++
         val capturing = captureRecorder?.isArmed == true
         capturePlanes = if (capturing) ArrayList() else null
-        val verdict = detectFrame(rgbaBytes, width, height)
+        pendingShadowLine = null
+        val startedAtNanos = System.nanoTime()
+        val verdict = detectFrame(rgbaBytes, width, height, frameNanos)
+        val frameNanosElapsed = System.nanoTime() - startedAtNanos
         if (capturing) offerCapture(rgbaBytes, width, height, frameNanos, verdict)
         capturePlanes = null
+        // Emitted here, not inside the pipeline, because only the caller knows
+        // what the whole frame cost — which is the number the 250 ms intake
+        // interval is actually spent against.
+        pendingShadowLine?.let { line ->
+            onShadowComparison?.invoke("$line frameMs=%.1f".format(frameNanosElapsed / 1_000_000.0))
+        }
+        pendingShadowLine = null
         return verdict
     }
 
-    private fun detectFrame(rgbaBytes: ByteArray, width: Int, height: Int): TapeDetection? {
+    private fun detectFrame(
+        rgbaBytes: ByteArray,
+        width: Int,
+        height: Int,
+        frameNanos: Long,
+    ): TapeDetection? {
         val source = Mat(height, width, org.opencv.core.CvType.CV_8UC4)
         val resized = Mat()
         val rgb = Mat()
@@ -398,6 +423,7 @@ class BlackTapeDetector internal constructor(
             previousAnchorYFraction = winner.anchorYFraction
             lastPathAxis = if (winner.horizontalFallback) "HORIZONTAL_FALLBACK" else "CENTERLINE"
             lastPathSampleCount = winner.pathSampleCount
+            runShadowComparison(winner, contours, candidateMask, frameNanos)
             return TapeDetection(
                 sourceWidth = width,
                 sourceHeight = height,
@@ -659,6 +685,7 @@ class BlackTapeDetector internal constructor(
                 continuityConfidence * 0.10
             ).coerceIn(0.0, 1.0)
         return Candidate(
+            contourIndex = contourIndex,
             bounds = refinedBounds,
             score = score,
             angleFromVerticalDegrees = path.nearFieldAngleFromVerticalDegrees,
@@ -760,6 +787,79 @@ class BlackTapeDetector internal constructor(
      * pipeline and cheap when capture is off, so the pipeline reads the same
      * whether or not an operator is collecting evidence.
      */
+    /**
+     * Runs the replacement centerline over the winner's own mask and logs both
+     * results against one frame identifier.
+     *
+     * The mask is rebuilt from the winning contour rather than reusing the last
+     * candidate scored, because the last candidate scored is whichever contour
+     * happened to come last, not the one that won. Nothing here can influence
+     * the returned detection: this is the evidence that justifies the cutover,
+     * not a second path into the controller.
+     */
+    private fun runShadowComparison(
+        winner: Candidate,
+        contours: List<MatOfPoint>,
+        candidateMask: Mat,
+        frameNanos: Long,
+    ) {
+        if (onShadowComparison == null) return
+        val startedAtNanos = System.nanoTime()
+        candidateMask.setTo(Scalar(0.0))
+        Imgproc.drawContours(candidateMask, contours, winner.contourIndex, Scalar(255.0), Imgproc.FILLED)
+        val width = candidateMask.cols()
+        val height = candidateMask.rows()
+        val pixelCount = width * height
+        if (shadowMaskBytes.size < pixelCount) shadowMaskBytes = ByteArray(pixelCount)
+        // SegmentationMask requires an exactly sized array and never copies it,
+        // so the scratch array is reallocated only when the analysis resolution
+        // changes and is wrapped fresh each frame.
+        if (shadowTape.size != pixelCount) shadowTape = BooleanArray(pixelCount)
+        candidateMask.get(0, 0, shadowMaskBytes)
+        for (index in 0 until pixelCount) shadowTape[index] = shadowMaskBytes[index] != 0.toByte()
+        val maskNanos = System.nanoTime() - startedAtNanos
+
+        val extractStartedAtNanos = System.nanoTime()
+        // A fresh wrapper each frame: SegmentationMask counts its tape pixels
+        // once at construction, so a reused instance would keep reporting the
+        // count it was built with and the extractor would see an empty mask.
+        val estimate = centerlineExtractor.extract(SegmentationMask(width, height, shadowTape))
+        val extractNanos = System.nanoTime() - extractStartedAtNanos
+        val measureStartedAtNanos = System.nanoTime()
+        val measurement = CenterlineMeasurement.measure(estimate, width, height)
+        val measureNanos = System.nanoTime() - measureStartedAtNanos
+
+        pendingShadowLine =
+            formatShadowComparison(
+                frameSequence = frameSequence,
+                frameNanos = frameNanos,
+                oldAnchorXFraction = winner.anchorXFraction,
+                oldAnchorYFraction = winner.anchorYFraction,
+                oldLookaheadXFraction = winner.lookaheadXFraction,
+                oldLookaheadYFraction = winner.lookaheadYFraction,
+                oldNearFieldAngleDegrees = winner.angleFromVerticalDegrees,
+                oldArcLengthFraction = winner.longSideFraction,
+                oldMedianWidthFraction = winner.pathMedianWidthFraction,
+                oldCurvatureDegrees = winner.pathCurvatureDegrees,
+                oldHorizontalFallback = winner.horizontalFallback,
+                oldSampleCount = winner.pathSampleCount,
+                newPointCount = estimate.points.size,
+                newConfidence = estimate.confidence,
+                newSupport = estimate.components.support,
+                newWidthConsistency = estimate.components.widthConsistency,
+                newContinuity = estimate.components.continuity,
+                newFitResidual = estimate.components.fitResidual,
+                newTerminus = estimate.topology.distalTerminus,
+                newDistalBorderDistancePixels = estimate.topology.distalBorderDistancePixels,
+                newBranchCount = estimate.topology.branchCount,
+                newClosedLoop = estimate.topology.closedLoop,
+                newMeasurement = measurement,
+                maskNanos = maskNanos,
+                extractNanos = extractNanos,
+                measureNanos = measureNanos,
+            )
+    }
+
     private fun recordCapturePlane(name: String, mat: Mat) {
         val planes = capturePlanes ?: return
         if (mat.empty() || mat.channels() != 1) return
@@ -787,6 +887,7 @@ class BlackTapeDetector internal constructor(
         val recorder = captureRecorder ?: return
         val planes = capturePlanes ?: return
         val metadata = LinkedHashMap<String, String>()
+        metadata["frame.sequence"] = frameSequence.toString()
         metadata["frame.acceptedAtNanos"] = frameNanos.toString()
         metadata["detector.mode"] = lastDetectionMode.name
         metadata["detector.diagnostics"] = diagnosticsSummary()
@@ -861,6 +962,7 @@ class BlackTapeDetector internal constructor(
     }
 
     private data class Candidate(
+        val contourIndex: Int,
         val bounds: Rect,
         val score: Double,
         val angleFromVerticalDegrees: Double,
