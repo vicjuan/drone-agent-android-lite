@@ -26,7 +26,7 @@ class BlackTapeDetectorInstrumentedTest {
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
         assertEquals(0.5, detection.anchorXFraction, 0.01)
         assertTrue(detection.anchorYFraction > 0.95)
-        assertTrue(detection.lookaheadYFraction < detection.anchorYFraction)
+        assertTrue(detection.lookaheadY < detection.anchorYFraction)
     }
 
     @Test
@@ -94,7 +94,7 @@ class BlackTapeDetectorInstrumentedTest {
             detection.longSideFraction > 0.9,
         )
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.03)
-        assertTrue(detection.lookaheadXFraction > detection.anchorXFraction)
+        assertTrue(detection.lookaheadX > detection.anchorXFraction)
     }
 
     @Test
@@ -131,7 +131,7 @@ class BlackTapeDetectorInstrumentedTest {
         )
 
         assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
-        assertTrue(detection.lookaheadXFraction > detection.anchorXFraction)
+        assertTrue(detection.lookaheadX > detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
         assertTrue(detection.longSideFraction > 0.9)
     }
@@ -146,7 +146,7 @@ class BlackTapeDetectorInstrumentedTest {
         val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
 
         assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
-        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
     }
 
@@ -204,7 +204,7 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(1.0, detection.bounds.right, 0.001)
         assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
-        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
     }
 
     @Test
@@ -310,8 +310,8 @@ class BlackTapeDetectorInstrumentedTest {
             )
 
         assertTrue(detection.anchorXFraction > 0.75)
-        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
-        assertTrue(detection.lookaheadXFraction > 0.5)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
+        assertTrue(detection.lookaheadX > 0.5)
     }
 
     @Test
@@ -329,7 +329,7 @@ class BlackTapeDetectorInstrumentedTest {
             ).map(::checkNotNull)
 
         assertTrue(detections.all { it.anchorXFraction > 0.75 })
-        assertTrue(detections.all { it.lookaheadXFraction < it.anchorXFraction })
+        assertTrue(detections.all { it.lookaheadX < it.anchorXFraction })
     }
 
     @Test
@@ -386,7 +386,7 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(horizontal.nearFieldOffsetFraction > 0.30)
         assertTrue(horizontal.anchorXFraction > 0.75)
         assertTrue(horizontal.anchorYFraction > 0.75)
-        assertTrue(horizontal.lookaheadXFraction < horizontal.anchorXFraction)
+        assertTrue(horizontal.lookaheadX < horizontal.anchorXFraction)
     }
     @Test
     fun veryDarkTapeRemainsDetectableUnderWarmColourCast() {
@@ -613,6 +613,16 @@ class BlackTapeDetectorInstrumentedTest {
         val detection: TapeDetection?,
         val failure: Throwable?,
     )
+
+    /**
+     * Every detector case here expects a path good enough to steer by, so a
+     * missing look-ahead is a failure of the case rather than a value to skip.
+     */
+    private val TapeDetection.lookaheadX: Double
+        get() = requireNotNull(lookaheadXFraction) { "expected a FULL_PATH look-ahead point" }
+
+    private val TapeDetection.lookaheadY: Double
+        get() = requireNotNull(lookaheadYFraction) { "expected a FULL_PATH look-ahead point" }
 
     private fun rgbaFrame(
         width: Int,

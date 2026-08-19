@@ -97,11 +97,22 @@ class TapeOverlayView(context: Context) : View(context) {
 
         val anchorX = previewLeft + (result.anchorXFraction * previewWidth).toFloat()
         val anchorY = previewTop + (result.anchorYFraction * previewHeight).toFloat()
-        val lookaheadX = previewLeft + (result.lookaheadXFraction * previewWidth).toFloat()
-        val lookaheadY = previewTop + (result.lookaheadYFraction * previewHeight).toFloat()
         val targetX = previewLeft + previewWidth / 2f
         val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION
-        canvas.drawLine(anchorX, anchorY, lookaheadX, lookaheadY, railPaint)
+        // A near-field-only path has no trustworthy look-ahead. Drawing a rail to
+        // a made-up point would show the operator guidance the controller is not
+        // allowed to use, so the rail simply disappears with the evidence.
+        val lookaheadXFraction = result.lookaheadXFraction
+        val lookaheadYFraction = result.lookaheadYFraction
+        if (lookaheadXFraction != null && lookaheadYFraction != null) {
+            canvas.drawLine(
+                anchorX,
+                anchorY,
+                previewLeft + (lookaheadXFraction * previewWidth).toFloat(),
+                previewTop + (lookaheadYFraction * previewHeight).toFloat(),
+                railPaint,
+            )
+        }
         canvas.drawCircle(anchorX, anchorY, anchorRadius, anchorPaint)
         canvas.drawLine(
             targetX - targetRadius,
