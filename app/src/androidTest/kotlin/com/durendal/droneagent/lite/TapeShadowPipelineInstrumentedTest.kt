@@ -25,6 +25,7 @@ import org.junit.runner.RunWith
 class TapeShadowPipelineInstrumentedTest {
 
     private val shadowLines = mutableListOf<String>()
+    private val shadowPaths = mutableListOf<TapeShadowPath?>()
     private val results = LinkedBlockingQueue<Optional>()
 
     @Test
@@ -39,7 +40,10 @@ class TapeShadowPipelineInstrumentedTest {
         val detector = BlackTapeDetector(
             onResult = { results.put(Optional(it)) },
             onError = { results.put(Optional(null)) },
-            onShadowComparison = { line -> synchronized(shadowLines) { shadowLines += line } },
+            onShadowComparison = { result ->
+                synchronized(shadowLines) { shadowLines += result.logLine }
+                synchronized(shadowPaths) { shadowPaths += result.path }
+            },
         )
 
         detector.use { active ->
@@ -55,6 +59,19 @@ class TapeShadowPipelineInstrumentedTest {
                 frameMillis += outcome.frameMillis
                 failures += verdict(scenario, outcome)
             }
+        }
+
+        // The overlay can only show what the detector actually hands it, so a
+        // FULL_PATH frame that produced no drawable path is a defect in the seam
+        // between them, not a cosmetic issue.
+        val paths = synchronized(shadowPaths) { shadowPaths.filterNotNull() }
+        assertTrue("the shadow produced no drawable path at all", paths.isNotEmpty())
+        paths.forEach { path ->
+            assertTrue("a drawable path needs at least two points", path.pointCount >= 2)
+            assertTrue(
+                "FULL_PATH must carry a look-ahead marker",
+                path.quality != PathQuality.FULL_PATH || path.lookaheadXFraction != null,
+            )
         }
 
         val shadowSorted = steadyStateMillis.sorted()

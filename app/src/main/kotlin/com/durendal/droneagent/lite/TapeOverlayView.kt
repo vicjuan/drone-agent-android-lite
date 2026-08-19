@@ -35,6 +35,22 @@ class TapeOverlayView(context: Context) : View(context) {
         color = Color.argb(210, 0, 0, 0)
         style = Paint.Style.FILL
     }
+    // The replacement centerline, drawn in its own colour so an operator can see
+    // at a glance which line is the shadow and which is the path being flown.
+    private val shadowPathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = SHADOW_COLOR
+        style = Paint.Style.STROKE
+        strokeWidth = density(2f)
+    }
+    private val shadowAnchorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = SHADOW_COLOR
+        style = Paint.Style.FILL
+    }
+    private val shadowLookaheadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = SHADOW_COLOR
+        style = Paint.Style.STROKE
+        strokeWidth = density(2f)
+    }
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = density(14f)
@@ -50,6 +66,7 @@ class TapeOverlayView(context: Context) : View(context) {
     private val targetRadius = density(10f)
     private val searchLabelLeft = density(16f)
     private val searchLabelTop = density(72f)
+    private val shadowLabelTop = density(108f)
     private val labelBaselineOffset = labelPadding - labelPaint.fontMetrics.top
     private val labelTextHeight = labelPaint.fontMetrics.run { bottom - top }
     private val searchLabelWidth = labelPaint.measureText(SEARCH_LABEL)
@@ -57,8 +74,13 @@ class TapeOverlayView(context: Context) : View(context) {
     private val detectionBounds = RectF()
     private val labelBounds = RectF()
 
+    // Reused across draws: the polyline is rebuilt every frame at camera rate and
+    // Canvas.drawLines wants consecutive x0,y0,x1,y1 pairs.
+    private var shadowSegments = FloatArray(0)
+
     private var detection: TapeDetection? = null
     private var detectionLabel = ""
+    private var shadowPath: TapeShadowPath? = null
 
     fun showDetection(value: TapeDetection?) {
         detection = value
@@ -71,10 +93,17 @@ class TapeOverlayView(context: Context) : View(context) {
         postInvalidateOnAnimation()
     }
 
+    /** Shows what the replacement geometry found. Never what the aircraft follows. */
+    internal fun showShadowPath(value: TapeShadowPath?) {
+        shadowPath = value
+        postInvalidateOnAnimation()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val result = detection
         if (result == null) {
+            drawShadowPath(canvas)
             drawSearchStatus(canvas)
             return
         }
@@ -127,9 +156,65 @@ class TapeOverlayView(context: Context) : View(context) {
             targetPaint,
         )
 
+        drawShadowPath(canvas)
+
         val labelTop =
             (detectionBounds.top - labelTextHeight - labelPadding * 2).coerceAtLeast(0f)
         drawLabel(canvas, detectionLabel, detectionBounds.left, labelTop, labelPaint.measureText(detectionLabel))
+    }
+
+    /**
+     * Draws the extracted chain, its anchor and its look-ahead target. A path
+     * with no look-ahead draws no target: the absence is the point, and inventing
+     * a marker would show guidance the geometry did not produce.
+     */
+    private fun drawShadowPath(canvas: Canvas) {
+        val path = shadowPath ?: return
+        val previewScale = min(
+            width / path.sourceWidth.toFloat(),
+            height / path.sourceHeight.toFloat(),
+        )
+        val previewWidth = path.sourceWidth * previewScale
+        val previewHeight = path.sourceHeight * previewScale
+        val previewLeft = (width - previewWidth) / 2f
+        val previewTop = (height - previewHeight) / 2f
+
+        if (path.pointCount >= 2) {
+            val segmentValues = (path.pointCount - 1) * 4
+            if (shadowSegments.size != segmentValues) shadowSegments = FloatArray(segmentValues)
+            for (index in 0 until path.pointCount - 1) {
+                val offset = index * 4
+                shadowSegments[offset] = previewLeft + path.xFractions[index] * previewWidth
+                shadowSegments[offset + 1] = previewTop + path.yFractions[index] * previewHeight
+                shadowSegments[offset + 2] = previewLeft + path.xFractions[index + 1] * previewWidth
+                shadowSegments[offset + 3] = previewTop + path.yFractions[index + 1] * previewHeight
+            }
+            canvas.drawLines(shadowSegments, shadowPathPaint)
+        }
+
+        canvas.drawCircle(
+            previewLeft + path.anchorXFraction * previewWidth,
+            previewTop + path.anchorYFraction * previewHeight,
+            anchorRadius,
+            shadowAnchorPaint,
+        )
+        val lookaheadX = path.lookaheadXFraction
+        val lookaheadY = path.lookaheadYFraction
+        if (lookaheadX != null && lookaheadY != null) {
+            canvas.drawCircle(
+                previewLeft + lookaheadX * previewWidth,
+                previewTop + lookaheadY * previewHeight,
+                targetRadius,
+                shadowLookaheadPaint,
+            )
+        }
+        drawLabel(
+            canvas,
+            path.label,
+            searchLabelLeft,
+            shadowLabelTop,
+            labelPaint.measureText(path.label),
+        )
     }
 
     private fun drawSearchStatus(canvas: Canvas) {
@@ -151,6 +236,7 @@ class TapeOverlayView(context: Context) : View(context) {
 
     private companion object {
         val DETECTED_COLOR = Color.rgb(0, 230, 118)
+        val SHADOW_COLOR = Color.rgb(255, 82, 200)
         const val TRACKING_TARGET_Y_FRACTION = 0.94f
         const val SEARCH_LABEL = "OpenCV • 搜尋黑膠帶"
     }

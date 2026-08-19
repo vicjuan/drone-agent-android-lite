@@ -31,7 +31,7 @@ class BlackTapeDetector internal constructor(
     // Shadow comparison of the replacement centerline against the estimator that
     // flies today. Temporary by design: it exists to justify the cutover and is
     // deleted with the old estimator, never kept as a permanent second track.
-    private val onShadowComparison: ((String) -> Unit)? = null,
+    private val onShadowComparison: ((TapeShadowResult) -> Unit)? = null,
 ) : AutoCloseable {
 
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -70,6 +70,7 @@ class BlackTapeDetector internal constructor(
     private var shadowMaskBytes = ByteArray(0)
     private var shadowTape = BooleanArray(0)
     private var pendingShadowLine: String? = null
+    private var pendingShadowPath: TapeShadowPath? = null
     private var frameSequence = 0L
 
     init {
@@ -197,6 +198,7 @@ class BlackTapeDetector internal constructor(
         val capturing = captureRecorder?.isArmed == true
         capturePlanes = if (capturing) ArrayList() else null
         pendingShadowLine = null
+        pendingShadowPath = null
         val startedAtNanos = System.nanoTime()
         val verdict = detectFrame(rgbaBytes, width, height, frameNanos)
         val frameNanosElapsed = System.nanoTime() - startedAtNanos
@@ -206,9 +208,15 @@ class BlackTapeDetector internal constructor(
         // what the whole frame cost — which is the number the 250 ms intake
         // interval is actually spent against.
         pendingShadowLine?.let { line ->
-            onShadowComparison?.invoke("$line frameMs=%.1f".format(frameNanosElapsed / 1_000_000.0))
+            onShadowComparison?.invoke(
+                TapeShadowResult(
+                    logLine = "$line frameMs=%.1f".format(frameNanosElapsed / 1_000_000.0),
+                    path = pendingShadowPath,
+                ),
+            )
         }
         pendingShadowLine = null
+        pendingShadowPath = null
         return verdict
     }
 
@@ -829,6 +837,7 @@ class BlackTapeDetector internal constructor(
         val measurement = CenterlineMeasurement.measure(estimate, width, height)
         val measureNanos = System.nanoTime() - measureStartedAtNanos
 
+        pendingShadowPath = shadowPath(estimate, measurement, width, height)
         pendingShadowLine =
             formatShadowComparison(
                 frameSequence = frameSequence,
@@ -858,6 +867,43 @@ class BlackTapeDetector internal constructor(
                 extractNanos = extractNanos,
                 measureNanos = measureNanos,
             )
+    }
+
+    /**
+     * Projects the extracted chain into frame proportions for the overlay. The
+     * points are copied because the extractor reuses its own buffers between
+     * frames and the UI thread reads this after the detector has moved on.
+     */
+    private fun shadowPath(
+        estimate: CenterlineEstimate,
+        measurement: CenterlinePathMeasurement?,
+        width: Int,
+        height: Int,
+    ): TapeShadowPath? {
+        if (estimate.points.isEmpty() || measurement == null) return null
+        val pointCount = estimate.points.size
+        val xFractions = FloatArray(pointCount)
+        val yFractions = FloatArray(pointCount)
+        estimate.points.forEachIndexed { index, point ->
+            xFractions[index] = (point.x / width).toFloat().coerceIn(0f, 1f)
+            yFractions[index] = (point.y / height).toFloat().coerceIn(0f, 1f)
+        }
+        return TapeShadowPath(
+            sourceWidth = width,
+            sourceHeight = height,
+            xFractions = xFractions,
+            yFractions = yFractions,
+            anchorXFraction = measurement.anchorXFraction.toFloat(),
+            anchorYFraction = measurement.anchorYFraction.toFloat(),
+            lookaheadXFraction = measurement.lookahead?.xFraction?.toFloat(),
+            lookaheadYFraction = measurement.lookahead?.yFraction?.toFloat(),
+            quality = if (measurement.lookahead == null) {
+                PathQuality.NEAR_FIELD_ONLY
+            } else {
+                PathQuality.FULL_PATH
+            },
+            rejection = shadowRejectionReason(pointCount, measurement),
+        )
     }
 
     private fun recordCapturePlane(name: String, mat: Mat) {

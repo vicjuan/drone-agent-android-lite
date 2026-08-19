@@ -250,9 +250,10 @@ class MainActivity : Activity() {
                 },
                 captureRecorder = captureRecorder,
                 captureFlightContext = ::tapeCaptureFlightContext,
-                // Shadow lines go to the flight log so a disagreement can be
-                // lined up with the capture that produced it by frame sequence.
-                onShadowComparison = flightLog::write,
+                // The log line lets a disagreement be lined up with the capture
+                // that produced it; the path puts the same frame's result on the
+                // operator's screen.
+                onShadowComparison = ::handleShadowResult,
             )
         }.onFailure { error ->
             flightLog.write("OpenCV initialization failed: $error")
@@ -385,6 +386,13 @@ class MainActivity : Activity() {
                     )
                 } ?: "black tape not detected ${tapeDetector?.diagnosticsSummary().orEmpty()}",
             )
+        }
+    }
+
+    private fun handleShadowResult(result: TapeShadowResult) {
+        flightLog.write(result.logLine)
+        runOnUiThread {
+            if (::tapeOverlay.isInitialized) tapeOverlay.showShadowPath(result.path)
         }
     }
 
