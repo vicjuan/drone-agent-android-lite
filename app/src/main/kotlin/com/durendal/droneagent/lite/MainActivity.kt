@@ -73,8 +73,8 @@ class MainActivity : Activity() {
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var cameraDownButton: PillButton
-    private lateinit var cameraPitch80Button: PillButton
-    private lateinit var cameraPitch70Button: PillButton
+    private lateinit var cameraPitch65Button: PillButton
+    private lateinit var cameraPitch60Button: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var leftPad: StickPadView
@@ -434,15 +434,15 @@ class MainActivity : Activity() {
         gravity = Gravity.START
         circularTapeTrackingButton =
             PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
-        cameraPitch80Button = PillButton("鏡頭 -80°", StickPadView.CYAN) {
-            moveCameraToPitch(CAMERA_PITCH_80_DEGREES)
+        cameraPitch65Button = PillButton("鏡頭 -65°", StickPadView.CYAN) {
+            moveCameraToPitch(CAMERA_PITCH_65_DEGREES)
         }
-        cameraPitch70Button = PillButton("鏡頭 -70°", StickPadView.CYAN) {
-            moveCameraToPitch(CAMERA_PITCH_70_DEGREES)
+        cameraPitch60Button = PillButton("鏡頭 -60°", StickPadView.CYAN) {
+            moveCameraToPitch(CAMERA_PITCH_60_DEGREES)
         }
         addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
-        addView(cameraPitch80Button, actionParams(marginEnd = dp(10)))
-        addView(cameraPitch70Button, actionParams())
+        addView(cameraPitch65Button, actionParams(marginEnd = dp(10)))
+        addView(cameraPitch60Button, actionParams())
     }
 
     private fun actionParams(marginStart: Int = 0, marginEnd: Int = 0) =
@@ -672,7 +672,10 @@ class MainActivity : Activity() {
                             },
                         )
                         val now = System.nanoTime()
-                        tapeTracking.start(now, mode)
+                        // Meeting-room runs use a physically closed loop. Keep endpoint
+                        // detection active for diagnostics, but do not arm a 180° turn.
+                        val endpointTurnEnabled = mode != TapeTrackingMode.CIRCULAR
+                        tapeTracking.start(now, mode, endpointTurnEnabled)
                         tapeTrackingStartedAtNanos = now
                         tapeTrackingAuthoritySeen =
                             stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
@@ -686,7 +689,10 @@ class MainActivity : Activity() {
                         } else {
                             circularTapeTrackingButton.text = "停止圓形黑膠帶追蹤"
                         }
-                        flightLog.write("tape tracking started mode=$mode avoidance=CLOSE")
+                        flightLog.write(
+                            "tape tracking started mode=$mode avoidance=CLOSE " +
+                                "endpointTurnEnabled=$endpointTurnEnabled",
+                        )
                         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
                         mainHandler.post(tapeTrackingTickRunnable)
                     }
@@ -1012,8 +1018,8 @@ class MainActivity : Activity() {
             ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
         val cameraPitchAvailable = ready && !cameraPitchCommandPending
         cameraDownButton.available = cameraPitchAvailable
-        cameraPitch80Button.available = cameraPitchAvailable
-        cameraPitch70Button.available = cameraPitchAvailable
+        cameraPitch65Button.available = cameraPitchAvailable
+        cameraPitch60Button.available = cameraPitchAvailable
         val tapeTrackingCanStart = ready && flying && !turning && !holdingHeight
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
@@ -2338,8 +2344,8 @@ class MainActivity : Activity() {
         const val TAPE_MISSES_TO_CLEAR = 3
         const val TAPE_TRACKING_TICK_MS = 100L
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
-        const val CAMERA_PITCH_80_DEGREES = -80.0
-        const val CAMERA_PITCH_70_DEGREES = -70.0
+        const val CAMERA_PITCH_65_DEGREES = -65.0
+        const val CAMERA_PITCH_60_DEGREES = -60.0
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
         // MSDK is given two seconds to rotate; one extra second allows callback delivery.
         const val CAMERA_PITCH_COMMAND_TIMEOUT_MS = 3_000L

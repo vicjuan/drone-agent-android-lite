@@ -903,6 +903,34 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `closed loop experiment ignores circular endpoint disappearance`() {
+        val controller = TapeTrackingController()
+        controller.start(
+            nowNanos = 0L,
+            mode = TapeTrackingMode.CIRCULAR,
+            endpointTurnEnabled = false,
+        )
+        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(2)).phase)
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        repeat(4) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+
+        val decision = controller.tick(seconds(4))
+
+        assertFalse(decision.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
     fun `false edge after a qualified circular path starts endpoint verification`() {
         val controller = circularTrackingController()
         repeat(3) { index ->

@@ -112,10 +112,16 @@ internal class TapeTrackingController {
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
     private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
+    private var endpointTurnEnabled = true
 
-    fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
+    fun start(
+        nowNanos: Long,
+        mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT,
+        endpointTurnEnabled: Boolean = true,
+    ) {
         enabled = true
         this.mode = mode
+        this.endpointTurnEnabled = endpointTurnEnabled
         resetLeg()
         awaitingPostTurnDetection = false
         beginRecentering(nowNanos)
@@ -134,6 +140,7 @@ internal class TapeTrackingController {
         consecutiveEndpointMisses = 0
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
+        endpointTurnEnabled = true
     }
 
     fun resumeAfterTurn(nowNanos: Long) {
@@ -635,6 +642,11 @@ internal class TapeTrackingController {
         lastAcceptedCircularObservation = observation
         circularDetectionGap = false
         consecutiveEndpointMisses = 0
+        if (!endpointTurnEnabled) {
+            consecutiveCircularEndpointReadyDetections = 0
+            circularEndpointQualified = false
+            return
+        }
         val endpointReady =
             observation.longSideFraction >= CIRCULAR_ENDPOINT_READY_MIN_FRACTION &&
                 observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION &&
