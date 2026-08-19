@@ -488,16 +488,42 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `plausible continuation resumes immediately after a detection gap`() {
+    fun `plausible continuation requires two consistent detections after a gap`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
         controller.observe(null, seconds(3))
 
         controller.observe(observation(20.0, 0.82, 0.05), seconds(4))
-        val resumed = controller.tick(seconds(4))
+        val awaitingConfirmation = controller.tick(seconds(4))
+        assertEquals(TapeTrackingPhase.TRACKING, awaitingConfirmation.phase)
+        assertEquals(0.0, awaitingConfirmation.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, awaitingConfirmation.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, awaitingConfirmation.yawRateDegreesPerSecond, 0.0)
 
+        controller.observe(observation(19.0, 0.81, 0.04), seconds(4) + 250_000_000L)
+        val resumed = controller.tick(seconds(4) + 250_000_000L)
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
+    fun `detection loss restarts gap continuation confirmation`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(observation(20.0, 0.82, 0.05), seconds(4))
+        controller.observe(null, seconds(4) + 250_000_000L)
+
+        controller.observe(observation(19.0, 0.81, 0.04), seconds(5))
+        val restarted = controller.tick(seconds(5))
+        assertEquals(0.0, restarted.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, restarted.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, restarted.yawRateDegreesPerSecond, 0.0)
+
+        controller.observe(observation(20.0, 0.82, 0.05), seconds(5) + 250_000_000L)
+        assertTrue(
+            controller.tick(seconds(5) + 250_000_000L).forwardSpeedMetersPerSecond > 0.0,
+        )
     }
 
 
@@ -658,23 +684,6 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, waiting.forwardSpeedMetersPerSecond, 0.0)
     }
 
-    @Test
-    fun `circular path reacquisition resumes directly after a miss`() {
-        val controller = circularTrackingController()
-        controller.observe(observation(9.0, 0.75, 0.03), seconds(2))
-        controller.observe(null, seconds(2) + 250_000_000L)
-        assertEquals(
-            TapeTrackingPhase.TRACKING,
-            controller.tick(seconds(2) + 250_000_000L).phase,
-        )
-
-        controller.observe(observation(8.0, 0.8, 0.03), seconds(2) + 500_000_000L)
-        val resumed = controller.tick(seconds(2) + 500_000_000L)
-
-        assertFalse(resumed.endpointReached)
-        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
-        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
-    }
     @Test
     fun `circular mode ignores the straight tape endpoint signature`() {
         val controller = circularTrackingController()
@@ -839,6 +848,38 @@ class TapeTrackingControllerTest {
         assertFalse(resumed.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
+    fun `circular endpoint verification times out to stationary reacquisition`() {
+        val controller = circularTrackingController()
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        val verificationStartedAt = seconds(3) + 250_000_000L
+        controller.observe(null, seconds(3))
+        controller.observe(null, verificationStartedAt)
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(verificationStartedAt).phase,
+        )
+
+        val persistentShortPath = observation(4.0, 0.30, 0.02)
+        controller.observe(persistentShortPath, seconds(4))
+        controller.observe(persistentShortPath, seconds(6))
+        val timedOut = controller.tick(
+            verificationStartedAt +
+                TapeTrackingController.CIRCULAR_ENDPOINT_VERIFICATION_TIMEOUT_NANOS,
+        )
+
+        assertFalse(timedOut.endpointReached)
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, timedOut.phase)
+        assertEquals(0.0, timedOut.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, timedOut.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, timedOut.yawRateDegreesPerSecond, 0.0)
     }
 
 
