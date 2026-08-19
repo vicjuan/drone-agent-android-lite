@@ -1,7 +1,10 @@
 package com.durendal.droneagent.lite
 
 import java.io.File
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -31,7 +34,7 @@ class TapeCaptureRecorderTest {
         recorder.trigger("loss")
 
         assertFalse(recorder.isArmed)
-        assertEquals(0, recorder.capturedFrameCount)
+        assertEquals(0, recorder.savedCaptureCount)
         assertEquals(emptyList<String>(), savedNames())
     }
 
@@ -149,6 +152,65 @@ class TapeCaptureRecorderTest {
         second.trigger("loss")
 
         assertEquals(listOf("000000000-loss-before", "000000001-loss-before"), savedNames())
+    }
+
+    @Test
+    fun `a writer that cannot keep up drops the oldest and never grows without bound`() {
+        val released = CountDownLatch(1)
+        val writer = Executors.newSingleThreadExecutor()
+        // Occupy the writer thread so the drain cannot start: this is the state a
+        // slow filesystem puts the recorder in, and the state in which an
+        // unbounded queue would accumulate whole frames until the app died.
+        writer.execute { released.await(20, TimeUnit.SECONDS) }
+        val recorder = TapeCaptureRecorder(
+            root = root,
+            log = { logLines.add(it) },
+            leadingFrameCount = 32,
+            trailingFrameCount = 0,
+            maximumPendingWrites = 2,
+            store = TapeCaptureStore(root),
+            writer = writer,
+        )
+        recorder.arm()
+        repeat(20) { recorder.offer(capture(it)) }
+
+        recorder.trigger("loss")
+
+        assertEquals(2, recorder.pendingCaptureCount)
+        assertEquals(18, recorder.droppedCaptureCount)
+        assertEquals(0, recorder.savedCaptureCount)
+
+        released.countDown()
+        writer.shutdown()
+        assertTrue(writer.awaitTermination(20, TimeUnit.SECONDS))
+        assertEquals(2, recorder.savedCaptureCount)
+        assertEquals(0, recorder.pendingCaptureCount)
+        // The survivors are the newest frames, which are the ones nearest the event.
+        assertEquals(
+            listOf("18", "19"),
+            savedNames().map { TapeCaptureCodec.read(File(root, it)).metadata["frame"] },
+        )
+        assertTrue(logLines.toString(), logLines.any { it.contains("writer-behind") })
+    }
+
+    @Test
+    fun `a store failure is counted as failed rather than saved`() {
+        val unwritable = File(root, "blocked").apply { writeText("not a directory") }
+        val recorder = TapeCaptureRecorder(
+            root = unwritable,
+            log = { logLines.add(it) },
+            leadingFrameCount = 1,
+            trailingFrameCount = 0,
+            store = TapeCaptureStore(unwritable),
+            writer = directExecutor,
+        )
+        recorder.arm()
+
+        recorder.offer(capture(0))
+        recorder.trigger("loss")
+
+        assertEquals(0, recorder.savedCaptureCount)
+        assertEquals(1, recorder.failedCaptureCount)
     }
 
     private fun recorder(leading: Int = 4, trailing: Int = 4) = TapeCaptureRecorder(

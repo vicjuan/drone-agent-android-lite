@@ -344,8 +344,7 @@ class MainActivity : Activity() {
                         longSideFraction = it.longSideFraction,
                         nearFieldOffsetFraction = it.nearFieldOffsetFraction,
                         bounds = it.bounds,
-                        lookaheadXFraction = it.lookaheadXFraction,
-                        lookaheadYFraction = it.lookaheadYFraction,
+                        lookahead = it.lookahead,
                         frameWidthPixels = it.sourceWidth,
                         frameHeightPixels = it.sourceHeight,
                         heightAboveGroundMeters = usableHeightMeters()?.takeIf { height ->
@@ -374,8 +373,8 @@ class MainActivity : Activity() {
                         it.angleFromVerticalDegrees,
                         it.anchorXFraction,
                         it.anchorYFraction,
-                        it.lookaheadXFraction,
-                        it.lookaheadYFraction,
+                        it.lookahead?.xFraction,
+                        it.lookahead?.yFraction,
                         it.bounds.centerX - 0.5,
                         it.longSideFraction,
                         it.bounds,
@@ -475,7 +474,18 @@ class MainActivity : Activity() {
         if (recorder.isArmed) {
             recorder.disarm()
             captureButton.text = "錄製影格證據"
-            render("影格證據已停止，本次共 ${recorder.capturedFrameCount} 張")
+            // Queued is not saved: report what reached storage, and say so plainly
+            // when the writer could not keep up, rather than implying evidence
+            // exists that was dropped.
+            val dropped = recorder.droppedCaptureCount + recorder.failedCaptureCount
+            render(
+                if (dropped == 0) {
+                    "影格證據已停止，已保存 ${recorder.savedCaptureCount} 張"
+                } else {
+                    "影格證據已停止，已保存 ${recorder.savedCaptureCount} 張，" +
+                        "另有 $dropped 張未能保存（寫入跟不上）"
+                },
+            )
         } else {
             recorder.arm()
             captureButton.text = "停止錄製影格"

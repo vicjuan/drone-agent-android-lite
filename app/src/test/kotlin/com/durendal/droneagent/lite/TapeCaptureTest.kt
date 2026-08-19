@@ -5,6 +5,7 @@ import java.io.IOException
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -146,6 +147,52 @@ class TapeCaptureTest {
         store.save(capture(), sequence = 1, reason = "loss")
 
         assertTrue("single=$single total=${store.totalBytes()}", store.totalBytes() > single)
+    }
+
+    @Test
+    fun `a capture becomes visible only once it is complete`() {
+        val store = TapeCaptureStore(root)
+        val big = capture(frameWidth = 64, frameHeight = 64, maskNames = listOf("blackMask"))
+
+        val directory = store.save(big, sequence = 0, reason = "loss")
+
+        assertEquals(listOf(directory.name), store.captures().map { it.name })
+        assertEquals(
+            "no scratch directory may survive a completed write",
+            emptyList<String>(),
+            root.listFiles()?.map { it.name }?.filter { it != directory.name }.orEmpty(),
+        )
+    }
+
+    @Test
+    fun `a half written capture from an earlier run is purged rather than left occupying storage`() {
+        // What a process killed mid-write used to leave: planes on disk, no
+        // manifest, therefore invisible to both replay and the size ceiling.
+        val orphan = File(root, "000000007-loss").apply { mkdirs() }
+        File(orphan, "frame.raw.gz").writeBytes(ByteArray(4096))
+
+        val store = TapeCaptureStore(root)
+
+        assertFalse(orphan.exists())
+        assertEquals(emptyList<String>(), store.captures().map { it.name })
+        assertEquals(0L, store.totalBytes())
+    }
+
+    @Test
+    fun `a failed write leaves nothing behind and does not block the next capture`() {
+        val store = TapeCaptureStore(root)
+        val blocked = File(root, "000000000-loss").apply { mkdirs() }
+        // A directory that cannot be replaced: publishing must fail, not
+        // half-succeed.
+        File(blocked, "capture.txt").mkdirs()
+
+        val goodDirectory = store.save(capture(), sequence = 1, reason = "loss")
+
+        assertTrue(goodDirectory.isDirectory)
+        assertEquals(listOf("000000001-loss"), store.captures().map { it.name })
+        assertTrue(
+            root.listFiles()?.none { it.name.startsWith("incomplete-") } ?: true,
+        )
     }
 
     private fun capture(

@@ -181,6 +181,12 @@ internal object TapeCaptureCodec {
  * so the store enforces both a count and a byte ceiling and drops the oldest
  * captures first. Eviction happens after the write, so the newest capture — the
  * one an operator just triggered — is never the one discarded.
+ *
+ * Writes are atomic: a capture is assembled in a scratch directory and only
+ * becomes visible by rename once every plane and the manifest are on disk. A
+ * process killed mid-write therefore leaves no half-capture that replay would
+ * read as real, and no files that the size ceiling cannot see. Whatever a
+ * previous run did leave behind is purged when a store is constructed.
  */
 internal class TapeCaptureStore(
     private val root: File,
@@ -190,6 +196,7 @@ internal class TapeCaptureStore(
     init {
         require(maximumCaptures > 0) { "maximumCaptures must be > 0" }
         require(maximumTotalBytes > 0L) { "maximumTotalBytes must be > 0" }
+        purgeIncomplete()
     }
 
     /**
@@ -198,16 +205,24 @@ internal class TapeCaptureStore(
      */
     fun save(capture: TapeCapture, sequence: Long, reason: String): File {
         val directory = File(root, captureDirectoryName(sequence, reason))
-        TapeCaptureCodec.write(capture, directory)
+        val scratch = File(root, "$INCOMPLETE_PREFIX${directory.name}")
+        scratch.deleteRecursively()
+        try {
+            TapeCaptureCodec.write(capture, scratch)
+            directory.deleteRecursively()
+            if (!scratch.renameTo(directory)) {
+                throw IOException("cannot publish capture ${directory.absolutePath}")
+            }
+        } catch (error: Throwable) {
+            scratch.deleteRecursively()
+            throw error
+        }
         evictUntilWithinLimits()
         return directory
     }
 
     /** Capture directories, oldest first by sequence. */
-    fun captures(): List<File> =
-        root.listFiles { file -> file.isDirectory && File(file, TapeCaptureCodec.MANIFEST_NAME).isFile }
-            ?.sortedBy { it.name }
-            ?: emptyList()
+    fun captures(): List<File> = completeDirectories().sortedBy { it.name }
 
     fun totalBytes(): Long = captures().sumOf { directorySize(it) }
 
@@ -218,6 +233,23 @@ internal class TapeCaptureStore(
      */
     fun nextSequence(): Long =
         (captures().mapNotNull { it.name.substringBefore('-').toLongOrNull() }.maxOrNull() ?: -1L) + 1L
+
+    /**
+     * Removes anything under the root that is not a complete capture: scratch
+     * directories from a killed write, and directories left by an older build
+     * that published planes before their manifest. Either kind is invisible to
+     * [captures] and would otherwise occupy storage no ceiling accounts for.
+     */
+    private fun purgeIncomplete() {
+        root.listFiles()
+            ?.filter { it.isDirectory && !File(it, TapeCaptureCodec.MANIFEST_NAME).isFile }
+            ?.forEach { it.deleteRecursively() }
+    }
+
+    private fun completeDirectories(): List<File> =
+        root.listFiles { file -> file.isDirectory && File(file, TapeCaptureCodec.MANIFEST_NAME).isFile }
+            ?.toList()
+            ?: emptyList()
 
     private fun evictUntilWithinLimits() {
         val remaining = captures().toMutableList()
@@ -251,5 +283,6 @@ internal class TapeCaptureStore(
         const val DEFAULT_MAXIMUM_CAPTURES = 40
         const val DEFAULT_MAXIMUM_TOTAL_BYTES = 256L * 1024 * 1024
         private const val MAXIMUM_REASON_LENGTH = 40
+        private const val INCOMPLETE_PREFIX = "incomplete-"
     }
 }

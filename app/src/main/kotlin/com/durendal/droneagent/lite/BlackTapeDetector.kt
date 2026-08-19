@@ -414,8 +414,10 @@ class BlackTapeDetector internal constructor(
                 nearFieldOffsetFraction = winner.nearFieldOffsetFraction,
                 anchorXFraction = winner.anchorXFraction,
                 anchorYFraction = winner.anchorYFraction,
-                lookaheadXFraction = winner.lookaheadXFraction,
-                lookaheadYFraction = winner.lookaheadYFraction,
+                lookahead = TapeLookahead(
+                    xFraction = winner.lookaheadXFraction,
+                    yFraction = winner.lookaheadYFraction,
+                ),
             )
         } finally {
             candidateMask.release()
@@ -799,9 +801,9 @@ class BlackTapeDetector internal constructor(
             metadata["detection.anchorXFraction"] = verdict.anchorXFraction.toString()
             metadata["detection.anchorYFraction"] = verdict.anchorYFraction.toString()
             metadata["detection.lookaheadXFraction"] =
-                verdict.lookaheadXFraction?.toString() ?: "none"
+                verdict.lookahead?.xFraction?.toString() ?: "none"
             metadata["detection.lookaheadYFraction"] =
-                verdict.lookaheadYFraction?.toString() ?: "none"
+                verdict.lookahead?.yFraction?.toString() ?: "none"
             metadata["detection.quality"] = verdict.quality.name
         }
         // Flight state last so a detector key can never be shadowed by it.

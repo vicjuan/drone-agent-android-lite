@@ -4,6 +4,7 @@ import java.io.File
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Collects replayable detector evidence around an interesting moment.
@@ -22,12 +23,20 @@ import java.util.concurrent.Executors
  * private copy of each frame because the DJI callback array is reused, so the
  * ring adds retention but no extra copying. That also means a caller must not
  * mutate a frame after offering it.
+ *
+ * The detector thread never waits for storage. Captures queue for a writer
+ * thread, and that queue is bounded: a full-resolution frame is megabytes, so an
+ * unbounded backlog behind a slow gzip or a busy filesystem would grow until the
+ * app died — during a flight, with the aircraft airborne. When the queue is full
+ * the oldest pending capture is dropped and counted, because the evidence
+ * closest to the trigger is the evidence still arriving.
  */
 internal class TapeCaptureRecorder(
     root: File,
     private val log: (String) -> Unit,
     private val leadingFrameCount: Int = DEFAULT_LEADING_FRAME_COUNT,
     private val trailingFrameCount: Int = DEFAULT_TRAILING_FRAME_COUNT,
+    private val maximumPendingWrites: Int = DEFAULT_MAXIMUM_PENDING_WRITES,
     private val store: TapeCaptureStore = TapeCaptureStore(root),
     private val writer: Executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "LiteTapeCapture").apply { isDaemon = true }
@@ -36,6 +45,7 @@ internal class TapeCaptureRecorder(
     init {
         require(leadingFrameCount > 0) { "leadingFrameCount must be > 0" }
         require(trailingFrameCount >= 0) { "trailingFrameCount must be >= 0" }
+        require(maximumPendingWrites > 0) { "maximumPendingWrites must be > 0" }
     }
 
     /**
@@ -46,14 +56,38 @@ internal class TapeCaptureRecorder(
         private set
 
     private val leadingFrames = ArrayDeque<TapeCapture>()
+    private val pendingWrites = ArrayDeque<PendingWrite>()
+    private var writerRunning = false
     private var pendingTrailingFrames = 0
     private var pendingReason = ""
     private var nextSequence = UNSEEDED_SEQUENCE
-    private var savedCaptureCount = 0
 
-    /** Captures written since the recorder was armed; shown to the operator. */
-    val capturedFrameCount: Int
-        @Synchronized get() = savedCaptureCount
+    private val savedCount = AtomicInteger()
+    private val droppedCount = AtomicInteger()
+    private val failedCount = AtomicInteger()
+
+    /**
+     * Captures actually on storage. Deliberately not "captures queued": telling
+     * an operator a frame was saved when it is still in a queue that may drop it
+     * is exactly the kind of evidence claim this whole mechanism exists to avoid.
+     */
+    val savedCaptureCount: Int get() = savedCount.get()
+
+    /** Captures dropped because the writer could not keep up. */
+    val droppedCaptureCount: Int get() = droppedCount.get()
+
+    /** Captures the writer accepted but storage refused. */
+    val failedCaptureCount: Int get() = failedCount.get()
+
+    /** Captures accepted into the queue and not yet resolved either way. */
+    val pendingCaptureCount: Int
+        @Synchronized get() = pendingWrites.size
+
+    private class PendingWrite(
+        val capture: TapeCapture,
+        val sequence: Long,
+        val reason: String,
+    )
 
     @Synchronized
     fun arm() {
@@ -77,7 +111,10 @@ internal class TapeCaptureRecorder(
         leadingFrames.clear()
         pendingTrailingFrames = 0
         pendingReason = ""
-        log("tape capture disarmed captures=$savedCaptureCount bytes=${store.totalBytes()}")
+        log(
+            "tape capture disarmed saved=${savedCount.get()} dropped=${droppedCount.get()} " +
+                "failed=${failedCount.get()} bytes=${store.totalBytes()}",
+        )
     }
 
     /**
@@ -123,12 +160,41 @@ internal class TapeCaptureRecorder(
         pendingTrailingFrames = trailingFrameCount
     }
 
+    /**
+     * Queues one capture for the writer thread. Called with the recorder lock
+     * held, and returns without touching storage: the detector's frame budget is
+     * 250 ms and a gzipped full-resolution frame does not fit in it.
+     */
     private fun write(capture: TapeCapture, reason: String) {
         val sequence = nextSequence++
-        savedCaptureCount++
-        writer.execute {
-            runCatching { store.save(capture, sequence, reason) }
-                .onFailure { log("tape capture write failed seq=$sequence: ${it.message}") }
+        while (pendingWrites.size >= maximumPendingWrites) {
+            val dropped = pendingWrites.removeFirst()
+            droppedCount.incrementAndGet()
+            log("tape capture dropped seq=${dropped.sequence} reason=writer-behind")
+        }
+        pendingWrites.addLast(PendingWrite(capture, sequence, reason))
+        if (!writerRunning) {
+            writerRunning = true
+            writer.execute(::drainPendingWrites)
+        }
+    }
+
+    /**
+     * Drains the queue on the writer thread. The lock is held only to take the
+     * next item, never across the gzip and file writes, so the detector thread
+     * is never blocked behind storage.
+     */
+    private fun drainPendingWrites() {
+        while (true) {
+            val next = synchronized(this) {
+                pendingWrites.pollFirst().also { if (it == null) writerRunning = false }
+            } ?: return
+            runCatching { store.save(next.capture, next.sequence, next.reason) }
+                .onSuccess { savedCount.incrementAndGet() }
+                .onFailure {
+                    failedCount.incrementAndGet()
+                    log("tape capture write failed seq=${next.sequence}: ${it.message}")
+                }
         }
     }
 
@@ -140,6 +206,13 @@ internal class TapeCaptureRecorder(
          */
         const val DEFAULT_LEADING_FRAME_COUNT = 4
         const val DEFAULT_TRAILING_FRAME_COUNT = 4
+
+        /**
+         * A full 1080p RGBA frame is about 8 MB, so this bounds the writer
+         * backlog at roughly 65 MB — enough to absorb one event's burst without
+         * the queue itself becoming the reason the app runs out of memory.
+         */
+        const val DEFAULT_MAXIMUM_PENDING_WRITES = 8
         private const val UNSEEDED_SEQUENCE = -1L
     }
 }

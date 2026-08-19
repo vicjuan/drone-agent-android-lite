@@ -126,8 +126,7 @@ class TapeCaptureReplayInstrumentedTest {
         assertEquals(expected.nearFieldOffsetFraction, actual.nearFieldOffsetFraction, 0.0)
         assertEquals(expected.anchorXFraction, actual.anchorXFraction, 0.0)
         assertEquals(expected.anchorYFraction, actual.anchorYFraction, 0.0)
-        assertEquals(expected.lookaheadXFraction, actual.lookaheadXFraction)
-        assertEquals(expected.lookaheadYFraction, actual.lookaheadYFraction)
+        assertEquals(expected.lookahead, actual.lookahead)
         assertEquals(expected.quality, actual.quality)
         assertEquals(expected.bounds, actual.bounds)
     }

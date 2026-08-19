@@ -576,8 +576,7 @@ class TapeTrackingControllerTest {
             longSideFraction = 1.10,
             nearFieldOffsetFraction = -0.48,
             bounds = NormalizedRect(0.0, 0.05, 0.90, 1.0),
-            lookaheadXFraction = 0.75,
-            lookaheadYFraction = 0.30,
+            lookahead = TapeLookahead(xFraction = 0.75, yFraction = 0.30),
         )
         var reacquired: TapeTrackingDecision? = null
         repeat(3) { index ->
@@ -604,8 +603,7 @@ class TapeTrackingControllerTest {
             longSideFraction = 0.35,
             nearFieldOffsetFraction = 0.01,
             bounds = NormalizedRect(0.46, 0.58, 0.56, 0.73),
-            lookaheadXFraction = 0.51,
-            lookaheadYFraction = 0.67,
+            lookahead = TapeLookahead(xFraction = 0.51, yFraction = 0.67),
         )
         repeat(4) { index ->
             val now = seconds(5) + index * 250_000_000L
@@ -634,8 +632,7 @@ class TapeTrackingControllerTest {
             longSideFraction = 1.60,
             nearFieldOffsetFraction = 0.35,
             bounds = NormalizedRect(0.10, 0.51, 0.74, 1.0),
-            lookaheadXFraction = 0.65,
-            lookaheadYFraction = 0.65,
+            lookahead = TapeLookahead(xFraction = 0.65, yFraction = 0.65),
         )
         controller.observe(shiftedPath, seconds(3) + 250_000_000L)
         val decision = controller.tick(seconds(3) + 250_000_000L)
@@ -712,8 +709,7 @@ class TapeTrackingControllerTest {
             observation(
                 angleDegrees = 0.0,
                 longSideFraction = 1.8,
-                lookaheadXFraction = 0.28,
-                lookaheadYFraction = 0.55,
+                lookahead = TapeLookahead(xFraction = 0.28, yFraction = 0.55),
                 heightAboveGroundMeters = 0.5,
             ),
             seconds(2),
@@ -757,8 +753,7 @@ class TapeTrackingControllerTest {
             observation(
                 angleDegrees = 0.0,
                 longSideFraction = 0.8,
-                lookaheadXFraction = 0.65,
-                lookaheadYFraction = 0.60,
+                lookahead = TapeLookahead(xFraction = 0.65, yFraction = 0.60),
                 heightAboveGroundMeters = 0.5,
             ),
             seconds(2),
@@ -770,8 +765,7 @@ class TapeTrackingControllerTest {
             observation(
                 angleDegrees = 0.0,
                 longSideFraction = 0.8,
-                lookaheadXFraction = 0.35,
-                lookaheadYFraction = 0.60,
+                lookahead = TapeLookahead(xFraction = 0.35, yFraction = 0.60),
                 heightAboveGroundMeters = 0.5,
             ),
             seconds(2),
@@ -795,8 +789,7 @@ class TapeTrackingControllerTest {
             observation(
                 angleDegrees = 0.0,
                 longSideFraction = 0.8,
-                lookaheadXFraction = 0.5,
-                lookaheadYFraction = 0.60,
+                lookahead = TapeLookahead(xFraction = 0.5, yFraction = 0.60),
                 heightAboveGroundMeters = 0.5,
             ),
             seconds(2),
@@ -815,8 +808,7 @@ class TapeTrackingControllerTest {
             observation(
                 angleDegrees = 0.0,
                 longSideFraction = 0.8,
-                lookaheadXFraction = 0.65,
-                lookaheadYFraction = 0.60,
+                lookahead = TapeLookahead(xFraction = 0.65, yFraction = 0.60),
                 heightAboveGroundMeters = null,
             ),
             seconds(2),
@@ -927,8 +919,7 @@ class TapeTrackingControllerTest {
             longSideFraction = 0.40,
             nearFieldOffsetFraction = 0.02,
             bounds = NormalizedRect(0.45, 0.10, 0.58, 0.58),
-            lookaheadXFraction = 0.52,
-            lookaheadYFraction = 0.25,
+            lookahead = TapeLookahead(xFraction = 0.52, yFraction = 0.25),
         )
 
         repeat(3) { index ->
@@ -1126,16 +1117,14 @@ class TapeTrackingControllerTest {
         longSideFraction: Double,
         nearFieldOffsetFraction: Double = 0.0,
         bounds: NormalizedRect = verticalBounds(longSideFraction, nearFieldOffsetFraction),
-        lookaheadXFraction: Double = 0.5,
-        lookaheadYFraction: Double = 0.60,
+        lookahead: TapeLookahead? = TapeLookahead(xFraction = 0.5, yFraction = 0.60),
         heightAboveGroundMeters: Double? = null,
     ) = TapeTrackingObservation(
         angleFromVerticalDegrees = angleDegrees,
         longSideFraction = longSideFraction,
         nearFieldOffsetFraction = nearFieldOffsetFraction,
         bounds = bounds,
-        lookaheadXFraction = lookaheadXFraction,
-        lookaheadYFraction = lookaheadYFraction,
+        lookahead = lookahead,
         frameWidthPixels = 1600,
         frameHeightPixels = 900,
         heightAboveGroundMeters = heightAboveGroundMeters,
@@ -1149,8 +1138,7 @@ class TapeTrackingControllerTest {
         longSideFraction = longSideFraction,
         nearFieldOffsetFraction = 0.493,
         bounds = NormalizedRect(0.90, 0.64, 1.0, 0.83),
-        lookaheadXFraction = 0.966,
-        lookaheadYFraction = 0.714,
+        lookahead = TapeLookahead(xFraction = 0.966, yFraction = 0.714),
     )
 
     private fun verticalBounds(
