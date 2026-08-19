@@ -130,10 +130,6 @@ class MainActivity : Activity() {
     private var horizontalSafetyReady = false
     private var obstacleDataListener: ObstacleDataListener? = null
 
-    /** One timed forward pulse; any fresh close range still stops it. */
-    private var nudging = false
-    private var nudgeRequestedAtNanos = 0L
-    private var nudgeCommandStartedAtNanos = 0L
 
 
     /** Battery percentage and one-shot forced-landing policy. */
@@ -672,6 +668,10 @@ class MainActivity : Activity() {
 
 
             val decision = tapeTracking.tick(now)
+            if (decision.stopRequested) {
+                stopTapeTracking("末端確認逾時，黑膠帶追蹤已停止", release = true)
+                return
+            }
             if (decision.endpointReached) {
                 beginTapeTurnaround()
                 return
@@ -771,7 +771,7 @@ class MainActivity : Activity() {
         flightLog.write("tape endpoint confirmed; detector remains active; right 180 armed")
         holdStatus = "確認膠帶末端：向右旋轉 180°"
         render(holdStatus)
-        armHeadingTurn(TurnDirection.RIGHT, heading)
+        armHeadingTurn(heading)
     }
 
 
@@ -836,7 +836,7 @@ class MainActivity : Activity() {
                 if (
                     release && stickOwned && !stickTransitionPending &&
                     !leftStickActive && !rightStickActive && !holdingHeight &&
-                    headingTurn == null && !nudging
+                    headingTurn == null
                 ) {
                     releaseControlLink { error ->
                         render(error?.let { "$restoredMessage（釋放控制權失敗：$it）" } ?: restoredMessage)
@@ -865,12 +865,6 @@ class MainActivity : Activity() {
             flightLog.write("horizontal stick refused: $horizontalStopReason")
             render(horizontalStopReason)
             return
-        }
-        if (side == StickSide.RIGHT && (x != 0.0 || y != 0.0) && nudging) {
-            nudging = false
-            mainHandler.removeCallbacks(nudgeTickRunnable)
-            virtualStick.setStick(StickSide.RIGHT, 0.0, 0.0)
-            flightLog.write("forward pulse cancelled by right stick")
         }
         val wasActive = leftStickActive || rightStickActive
         when (side) {
@@ -964,8 +958,7 @@ class MainActivity : Activity() {
         holdButton.available =
             ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
         cameraDownButton.available = ready
-        val tapeTrackingCanStart =
-            ready && flying && !nudging && !turning && !holdingHeight
+        val tapeTrackingCanStart = ready && flying && !turning && !holdingHeight
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
@@ -1469,9 +1462,7 @@ class MainActivity : Activity() {
             )
         }
         horizontalActuationStopReason()?.let { reason ->
-            if (rightStickActive || nudging) {
-                stopHorizontalActuation(reason)
-            }
+            if (rightStickActive) stopHorizontalActuation(reason)
         }
         if (changed || trigger == "BRAKE read-back") {
             render(failure ?: "BRAKE 已確認，水平避障資料可用")
@@ -1480,11 +1471,6 @@ class MainActivity : Activity() {
 
     private fun stopHorizontalActuation(reason: String) {
         rightStickActive = false
-        if (nudging) {
-            flightLog.write("horizontal actuation stopped: $reason")
-            finishForwardNudge(reason)
-            return
-        }
         virtualStick.setForwardOnly(0.0)
         holdStatus = reason
         flightLog.write("horizontal actuation stopped: $reason")
@@ -1538,16 +1524,16 @@ class MainActivity : Activity() {
      * through a toggle have already proven their own activity is idle.
      */
     private fun anotherFlightControlActive(): Boolean =
-        headingTurn != null || nudging || holdingHeight || tapeTracking.enabled ||
+        headingTurn != null || holdingHeight || tapeTracking.enabled ||
             tapeTrackingStartPending || leftStickActive || rightStickActive
 
-    private fun armHeadingTurn(direction: TurnDirection, currentHeading: Double) {
-        headingTurn = HeadingTurn(direction, currentHeading)
+    private fun armHeadingTurn(currentHeading: Double) {
+        headingTurn = HeadingTurn(currentHeading)
         turnStartedAtNanos = System.nanoTime()
         turnCommandStartedAtNanos = 0L
         turnAuthoritySeen = false
         virtualStick.setYawRate(0.0)
-        flightLog.write("${direction.label}180 armed heading=$currentHeading")
+        flightLog.write("$TURN_LABEL 180 armed heading=$currentHeading")
         mainHandler.post(headingTurnTickRunnable)
     }
 
@@ -1562,22 +1548,22 @@ class MainActivity : Activity() {
     private fun driveHeadingTurn() {
         val turn = headingTurn ?: return
         if (!stickOwned) {
-            finishHeadingTurn("${turn.direction.label} 180° 失去控制權，已停止", release = false)
+            finishHeadingTurn("$TURN_LABEL 180° 失去控制權，已停止", release = false)
             return
         }
         val ownsAuthority = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
         if (ownsAuthority) {
             turnAuthoritySeen = true
         } else if (turnAuthoritySeen) {
-            finishHeadingTurn("遙控器已接管，${turn.direction.label} 180° 已停止", release = false)
+            finishHeadingTurn("遙控器已接管，$TURN_LABEL 180° 已停止", release = false)
             return
         } else {
             virtualStick.setYawRate(0.0)
             val waitedMs = (System.nanoTime() - turnStartedAtNanos) / 1_000_000L
             if (waitedMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
-                finishHeadingTurn("未取得控制權，${turn.direction.label} 180° 已取消")
+                finishHeadingTurn("未取得控制權，$TURN_LABEL 180° 已取消")
             } else {
-                holdStatus = "等待控制權移交後${turn.direction.label} 180°…"
+                holdStatus = "等待控制權移交後$TURN_LABEL 180°…"
                 render(holdStatus)
             }
             return
@@ -1593,21 +1579,21 @@ class MainActivity : Activity() {
         }
         if (now - turnStartedAtNanos > TURN_TIMEOUT_NANOS) {
             finishHeadingTurn(
-                "${turn.direction.label} 180° 逾時，已轉 %.0f°".format(turn.progressDegrees),
+                "$TURN_LABEL 180° 逾時，已轉 %.0f°".format(turn.progressDegrees),
             )
             return
         }
         val remaining = (HeadingTurn.TARGET_DEGREES - turn.progressDegrees).coerceAtLeast(0.0)
         if (remaining <= TURN_TOLERANCE_DEGREES) {
             finishHeadingTurn(
-                "${turn.direction.label} 180° 完成（%.0f°）".format(turn.progressDegrees),
+                "$TURN_LABEL 180° 完成（%.0f°）".format(turn.progressDegrees),
                 succeeded = true,
             )
             return
         }
         val speed = if (remaining <= TURN_SLOWDOWN_DEGREES) TURN_SLOW_SPEED_DPS else TURN_SPEED_DPS
-        virtualStick.setYawRate(turn.direction.commandSign * speed)
-        holdStatus = "${turn.direction.label} 180°：已轉 %.0f°，剩 %.0f°".format(
+        virtualStick.setYawRate(speed)
+        holdStatus = "$TURN_LABEL 180°：已轉 %.0f°，剩 %.0f°".format(
             turn.progressDegrees,
             remaining,
         )
@@ -1647,7 +1633,7 @@ class MainActivity : Activity() {
             )
             return
         }
-        if (release && stickOwned && !leftStickActive && !rightStickActive && !holdingHeight && !nudging) {
+        if (release && stickOwned && !leftStickActive && !rightStickActive && !holdingHeight) {
             releaseControlLink { error ->
                 render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
             }
@@ -2014,68 +2000,6 @@ class MainActivity : Activity() {
 
 
 
-    private fun armForwardNudge() {
-        nudging = true
-        nudgeRequestedAtNanos = System.nanoTime()
-        nudgeCommandStartedAtNanos = 0L
-        flightLog.write(
-            "forward armed speed=$NUDGE_SPEED_MPS visionReady=$horizontalSafetyReady " +
-                "clearanceMm=$nearestHorizontalObstacleMm",
-        )
-        mainHandler.post(nudgeTickRunnable)
-    }
-
-    private val nudgeTickRunnable = object : Runnable {
-        override fun run() {
-            if (!nudging) return
-            horizontalActuationStopReason()?.let {
-                stopHorizontalActuation(it)
-                render(it)
-                return
-            }
-            if (!stickOwned || stickStatus.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER) {
-                virtualStick.setForwardOnly(0.0)
-                val waitedMs = (System.nanoTime() - nudgeRequestedAtNanos) / 1_000_000L
-                if (waitedMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
-                    finishForwardNudge("未取得控制權，前進取消")
-                } else {
-                    mainHandler.postDelayed(this, NUDGE_TICK_MS)
-                }
-                return
-            }
-            if (nudgeCommandStartedAtNanos == 0L) {
-                nudgeCommandStartedAtNanos = System.nanoTime()
-            }
-            val elapsedMs = (System.nanoTime() - nudgeCommandStartedAtNanos) / 1_000_000L
-            if (elapsedMs >= NUDGE_DURATION_MS) {
-                finishForwardNudge("前進 $FORWARD_DURATION_SECONDS 秒完成")
-                return
-            }
-            virtualStick.setForwardOnly(NUDGE_SPEED_MPS)
-            val obstacleText = nearestHorizontalObstacleMm?.let { "$it mm" } ?: "未偵測"
-            holdStatus = "前進… %.1f 秒，最近障礙 %s".format(
-                elapsedMs / 1000.0,
-                obstacleText,
-            )
-            render(holdStatus)
-            mainHandler.postDelayed(this, NUDGE_TICK_MS)
-        }
-    }
-
-    private fun finishForwardNudge(message: String) {
-        nudging = false
-        mainHandler.removeCallbacks(nudgeTickRunnable)
-        virtualStick.setForwardOnly(0.0)
-        holdStatus = message
-        flightLog.write("$message nearestMm=$nearestHorizontalObstacleMm")
-        if (stickOwned && !leftStickActive && !rightStickActive && !holdingHeight) {
-            releaseControlLink { error ->
-                render(error?.let { "$message（釋放控制權失敗：$it）" } ?: message)
-            }
-        } else {
-            render(message)
-        }
-    }
 
     /**
      * The one operator action that hands control to this app: pressing it takes
@@ -2299,6 +2223,7 @@ class MainActivity : Activity() {
         const val HOLD_TIMEOUT_NANOS = 20_000_000_000L
 
         /** Gentle closed-loop half-turn, slowed near the target to limit overshoot. */
+        const val TURN_LABEL = "右旋"
         const val TURN_SPEED_DPS = 20.0
         const val TURN_SLOW_SPEED_DPS = 8.0
         const val TURN_SLOWDOWN_DEGREES = 25.0
@@ -2342,11 +2267,6 @@ class MainActivity : Activity() {
         const val MAX_OBSTACLE_SAMPLE_AGE_MS = 500L
         const val HORIZONTAL_WATCHDOG_MS = 100L
 
-        /** Duration of one operator-requested forward pulse. */
-        const val FORWARD_DURATION_SECONDS = 3
-        const val NUDGE_DURATION_MS = FORWARD_DURATION_SECONDS * 1_000L
-        const val NUDGE_SPEED_MPS = 0.3
-        const val NUDGE_TICK_MS = 50L
 
 
         /** Obstacle distances are recorded at most this often. */

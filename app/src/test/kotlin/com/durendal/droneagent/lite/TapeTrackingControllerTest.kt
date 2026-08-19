@@ -35,6 +35,22 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `persistent short tape does not strand straight endpoint verification`() {
+        val controller = trackingController()
+        enterEndpointVerification(controller)
+        val persistentShortTape = observation(0.0, 0.35)
+        controller.observe(persistentShortTape, seconds(5))
+        controller.observe(persistentShortTape, seconds(8))
+
+        val timedOut = controller.tick(seconds(10))
+
+        assertTrue(timedOut.stopRequested)
+        assertEquals(0.0, timedOut.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, timedOut.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, timedOut.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
     fun `latest low altitude endpoint sequence starts the probe`() {
         val controller = trackingController()
         controller.observe(observation(0.0, 1.0), seconds(2))
@@ -957,7 +973,7 @@ class TapeTrackingControllerTest {
         controller.observe(persistentShortPath, seconds(6))
         val timedOut = controller.tick(
             verificationStartedAt +
-                TapeTrackingController.CIRCULAR_ENDPOINT_VERIFICATION_TIMEOUT_NANOS,
+                TapeTrackingController.ENDPOINT_VERIFICATION_TIMEOUT_NANOS,
         )
 
         assertFalse(timedOut.endpointReached)

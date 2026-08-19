@@ -54,6 +54,7 @@ internal data class TapeTrackingDecision(
     val forwardSpeedMetersPerSecond: Double = 0.0,
     val rightSpeedMetersPerSecond: Double = 0.0,
     val endpointReached: Boolean = false,
+    val stopRequested: Boolean = false,
     val rawAngleDegrees: Double? = null,
     val controlledAngleDegrees: Double? = null,
     val rawOffsetFraction: Double? = null,
@@ -100,6 +101,9 @@ internal class TapeTrackingController {
     private var consecutiveCurveAlignmentDetections = 0
     private var lastAcceptedCircularObservation: TapeTrackingObservation? = null
     private var circularDetectionGap = false
+    // One candidate sequence is shared by three mutually exclusive contexts:
+    // post-turn recovery, REACQUIRING_PATH, and a TRACKING gap. Every context
+    // transition or intervening miss resets both fields before another can use them.
     private var circularReacquisitionCandidate: TapeTrackingObservation? = null
     private var consecutiveCircularReacquisitionDetections = 0
     private var consecutiveCircularEndpointReadyDetections = 0
@@ -268,13 +272,21 @@ internal class TapeTrackingController {
             return decision(TapeTrackingPhase.TURNING, 0.0)
         }
         if (
-            mode == TapeTrackingMode.CIRCULAR &&
             phase == TapeTrackingPhase.VERIFYING_ENDPOINT &&
             endpointVerificationStartedAtNanos != 0L &&
             nowNanos - endpointVerificationStartedAtNanos >=
-            CIRCULAR_ENDPOINT_VERIFICATION_TIMEOUT_NANOS
+            ENDPOINT_VERIFICATION_TIMEOUT_NANOS
         ) {
-            beginCircularReacquisition()
+            if (mode == TapeTrackingMode.CIRCULAR) {
+                beginCircularReacquisition()
+            } else {
+                resetAppliedCommands()
+                return decision(
+                    phase = phase,
+                    yawRateDegreesPerSecond = 0.0,
+                    stopRequested = true,
+                )
+            }
         }
 
         if (phase == TapeTrackingPhase.RECENTERING && nowNanos >= recenterUntilNanos) {
@@ -1032,6 +1044,7 @@ internal class TapeTrackingController {
         forwardSpeedMetersPerSecond: Double = 0.0,
         rightSpeedMetersPerSecond: Double = 0.0,
         endpointReached: Boolean = false,
+        stopRequested: Boolean = false,
         purePursuitYawRateDegreesPerSecond: Double = 0.0,
     ): TapeTrackingDecision {
         check(!endpointReached || phase == TapeTrackingPhase.TURNING) {
@@ -1043,6 +1056,7 @@ internal class TapeTrackingController {
             forwardSpeedMetersPerSecond = forwardSpeedMetersPerSecond,
             rightSpeedMetersPerSecond = rightSpeedMetersPerSecond,
             endpointReached = endpointReached,
+            stopRequested = stopRequested,
             rawAngleDegrees = rawAngleDegrees,
             controlledAngleDegrees = controlledAngleDegrees,
             rawOffsetFraction = rawHorizontalOffsetFraction,
@@ -1141,11 +1155,13 @@ internal class TapeTrackingController {
         const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
         const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
+        // A lost-path reacquisition must be a substantial route, not a short floor feature.
         const val CIRCULAR_REACQUISITION_MIN_PATH_FRACTION = 0.60
         const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
         const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
         const val REACQUISITION_CONFIRMATION_COUNT = 3
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
+        // Endpoint qualification likewise requires a long route before misses may trigger a turn.
         const val CIRCULAR_ENDPOINT_READY_MIN_FRACTION = 0.60
         const val CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES = 30.0
         const val CIRCULAR_ENDPOINT_READY_MAX_OFFSET_FRACTION = 0.20
@@ -1153,9 +1169,11 @@ internal class TapeTrackingController {
         const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
         const val CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION = 0.60
         const val CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.02
-        const val CIRCULAR_ENDPOINT_VERIFICATION_TIMEOUT_NANOS = 6_000_000_000L
+        const val ENDPOINT_VERIFICATION_TIMEOUT_NANOS = 6_000_000_000L
         const val CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND = 0.03
         const val CIRCULAR_POST_TURN_RECOVERY_NANOS = 6_000_000_000L
+        // Immediately after a half-turn the camera may see only the near fragment; three
+        // centered, mutually consistent frames compensate for this deliberately lower length.
         const val CIRCULAR_POST_TURN_MIN_PATH_FRACTION = 0.20
         const val CIRCULAR_POST_TURN_MAX_ANGLE_DEGREES = 45.0
         const val CIRCULAR_POST_TURN_MAX_OFFSET_FRACTION = 0.20
