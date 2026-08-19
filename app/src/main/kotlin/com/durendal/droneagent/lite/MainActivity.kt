@@ -792,6 +792,7 @@ class MainActivity : Activity() {
         }
         tapeTracking.stop()
         tapeDetector?.setDetectionMode(TapeDetectionMode.PATH)
+        tapeDetector?.resetTracking()
         tapeTrackingStartPending = false
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
         virtualStick.setYawRate(0.0)

@@ -93,6 +93,7 @@ class BlackTapeDetector(
     }
 
     internal fun setDetectionMode(mode: TapeDetectionMode) {
+        if (detectionMode == mode) return
         detectionMode = mode
         resetTracking()
     }

@@ -112,6 +112,27 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(tracked[0] != null)
         assertTrue(tracked[1] != null)
     }
+    @Test
+    fun selectingTheCurrentPathModePreservesTheTrackedCandidate() {
+        val width = 640
+        val height = 360
+        val uniformFloor = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(uniformFloor, width, height, direction = 1.0, value = 20)
+        val splitFloor = stripedSplitFloorWithCurvedTape(width, height)
+
+        val tracked = detectSequence(
+            frames = listOf(uniformFloor, splitFloor),
+            width = width,
+            height = height,
+            beforeFrame = { index, detector ->
+                if (index == 1) detector.setDetectionMode(TapeDetectionMode.PATH)
+            },
+        )
+
+        assertTrue(tracked[0] != null)
+        assertTrue(tracked[1] != null)
+    }
+
 
     @Test
     fun curvedTapeCanBeAcquiredWhileEnteringFromFrameEdge() {
@@ -509,6 +530,7 @@ class BlackTapeDetectorInstrumentedTest {
         height: Int,
         mode: TapeDetectionMode? = null,
         onDiagnostics: (String) -> Unit = {},
+        beforeFrame: (Int, BlackTapeDetector) -> Unit = { _, _ -> },
     ): List<TapeDetection?> {
         val outcomes = LinkedBlockingQueue<DetectionOutcome>()
         val detector = BlackTapeDetector(
@@ -519,6 +541,7 @@ class BlackTapeDetectorInstrumentedTest {
         try {
             return frames.mapIndexed { index, frame ->
                 if (index > 0) Thread.sleep(300)
+                beforeFrame(index, detector)
                 detector.submitRgba(frame, 0, frame.size, width, height)
                 val outcome =
                     outcomes.poll(3, TimeUnit.SECONDS)
