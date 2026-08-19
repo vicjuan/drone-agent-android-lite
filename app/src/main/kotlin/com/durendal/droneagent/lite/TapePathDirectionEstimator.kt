@@ -53,6 +53,7 @@ internal class TapePathDirectionEstimator {
         bottom: Int,
         initialCenterHint: Double? = null,
         preferRightmostInitialRun: Boolean = false,
+        expectedMedianWidthFraction: Double? = null,
     ): TapePathEstimate? {
         require(mask.size >= frameWidth * frameHeight)
         if (left !in 0 until right || top !in 0 until bottom) return null
@@ -60,6 +61,15 @@ internal class TapePathDirectionEstimator {
 
         val frameShortSide = minOf(frameWidth, frameHeight).toDouble()
         val maximumLocalWidth = frameShortSide * MAX_LOCAL_WIDTH_FRACTION
+        val expectedWidth = expectedMedianWidthFraction?.times(frameShortSide)
+        if (
+            expectedWidth != null &&
+            expectedWidth !in
+                frameShortSide * MIN_LOCAL_WIDTH_FRACTION..
+                frameShortSide * MAX_LOCAL_WIDTH_FRACTION
+        ) {
+            return null
+        }
         val pointsX = DoubleArray(bottom - top)
         val pointsY = DoubleArray(bottom - top)
         val widths = DoubleArray(bottom - top)
@@ -81,6 +91,7 @@ internal class TapePathDirectionEstimator {
                     maximumLocalWidth,
                     initialCenterHint,
                     preferRightmostInitialRun,
+                    expectedWidth,
                 )
             if (run == null) {
                 if (pointCount > 0 && ++missingRows > MAX_CONSECUTIVE_MISSING_ROWS) break
@@ -580,6 +591,7 @@ internal class TapePathDirectionEstimator {
         maximumLocalWidth: Double,
         initialCenterHint: Double?,
         preferRightmostInitialRun: Boolean,
+        expectedWidth: Double?,
     ): PixelRun? {
         var best: PixelRun? = null
         var x = left
@@ -588,8 +600,17 @@ internal class TapePathDirectionEstimator {
             if (x >= right) break
             val runStart = x
             while (x < right && mask[y * frameWidth + x].toInt() != 0) x++
-            val candidate = PixelRun(runStart, x)
-            if (candidate.width > maximumLocalWidth) continue
+            val rawCandidate = PixelRun(runStart, x)
+            val candidate =
+                if (rawCandidate.width <= maximumLocalWidth) {
+                    rawCandidate
+                } else {
+                    inferTapeAtFrameEdge(
+                        wideRun = rawCandidate,
+                        frameWidth = frameWidth,
+                        expectedWidth = expectedWidth,
+                    ) ?: continue
+                }
             if (previousCenter.isNaN()) {
                 val candidateCost =
                     initialCenterHint?.let { abs(candidate.center - it) } ?: -candidate.width
@@ -619,6 +640,30 @@ internal class TapePathDirectionEstimator {
             if (bestCost == null || candidateCost < bestCost) best = candidate
         }
         return best
+    }
+
+    /**
+     * When tracked tape reaches a dark floor beside the board, both become one wide
+     * edge-connected run. The inner boundary still identifies the tape edge, so retain
+     * exactly the previously measured tape width. Never infer during acquisition or
+     * from a run touching both frame edges.
+     */
+    private fun inferTapeAtFrameEdge(
+        wideRun: PixelRun,
+        frameWidth: Int,
+        expectedWidth: Double?,
+    ): PixelRun? {
+        val inferredWidth = expectedWidth?.roundToInt()?.coerceAtLeast(1) ?: return null
+        val touchesLeftEdge = wideRun.start == 0
+        val touchesRightEdge = wideRun.endExclusive == frameWidth
+        if (touchesLeftEdge == touchesRightEdge || inferredWidth >= wideRun.endExclusive - wideRun.start) {
+            return null
+        }
+        return if (touchesLeftEdge) {
+            PixelRun(wideRun.endExclusive - inferredWidth, wideRun.endExclusive)
+        } else {
+            PixelRun(wideRun.start, wideRun.start + inferredWidth)
+        }
     }
 
     private data class PixelRun(val start: Int, val endExclusive: Int) {

@@ -497,6 +497,7 @@ class BlackTapeDetector(
                 previousAnchorXFraction?.times(candidateMask.cols()),
             preferRightmostInitialRun =
                 requireCurvature && previousAnchorXFraction == null,
+            expectedMedianWidthFraction = previousPathMedianWidthFraction,
         )
         val horizontalPath = pathDirectionEstimator.estimateHorizontalFallback(
             mask = candidateMaskBytes,
