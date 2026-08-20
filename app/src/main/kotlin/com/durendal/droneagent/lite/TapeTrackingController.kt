@@ -1,36 +1,67 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.sqrt
+import kotlin.math.tan
 import kotlin.math.sign
 
 internal enum class TapeTrackingPhase {
     DISABLED,
     RECENTERING,
+    RECOVERING_AFTER_TURN,
     TRACKING,
+    ALIGNING_CURVE,
+    REACQUIRING_PATH,
     VERIFYING_ENDPOINT,
     TURNING,
 }
 
-internal enum class TapeTrackingMode {
-    STRAIGHT,
-    CIRCULAR,
+internal enum class TapeTrackingMode(val followsCurvedPath: Boolean) {
+    STRAIGHT(false),
+    CIRCULAR(true),
+    CURVED_OUT_AND_BACK(true),
 }
 
 
-internal enum class TrackingGimbalTarget {
-    DOWN_CENTER,
-}
 
 internal data class TapeTrackingObservation(
     val angleFromVerticalDegrees: Double,
     val longSideFraction: Double,
     val nearFieldOffsetFraction: Double,
     val bounds: NormalizedRect,
+    val lookahead: TapeLookahead?,
+    /**
+     * What the geometry stage concluded this frame. The controller reads this
+     * rather than inferring authority from whether a look-ahead point happens to
+     * be present: one field, one meaning, decided where the evidence is.
+     */
+    val quality: PathQuality,
+    /**
+     * The chain's far end stops inside the frame. A chain cut off at the border
+     * says the tape left the field of view, which shortening alone cannot tell
+     * apart from an approaching end — and mistaking one for the other is a
+     * 180-degree turn in the middle of the tape.
+     */
+    val endpointCandidate: Boolean,
+    /** A loop has no end to reach, so it may never trigger a turnaround. */
+    val closedLoop: Boolean,
+    val frameWidthPixels: Int,
+    val frameHeightPixels: Int,
+    val heightAboveGroundMeters: Double?,
 ) {
     init {
         require(angleFromVerticalDegrees in -90.0..90.0)
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
+        require(frameWidthPixels > 0 && frameHeightPixels > 0)
+        require(quality != PathQuality.LOST) { "a LOST path is reported as no observation" }
+        require((quality == PathQuality.FULL_PATH) == (lookahead != null)) {
+            "only FULL_PATH carries a look-ahead point"
+        }
+        require(heightAboveGroundMeters == null || (
+            heightAboveGroundMeters.isFinite() && heightAboveGroundMeters > 0.0
+        ))
     }
 }
 
@@ -39,26 +70,28 @@ internal data class TapeTrackingDecision(
     val yawRateDegreesPerSecond: Double,
     val forwardSpeedMetersPerSecond: Double = 0.0,
     val rightSpeedMetersPerSecond: Double = 0.0,
-    val gimbalTarget: TrackingGimbalTarget? = null,
     val endpointReached: Boolean = false,
+    val stopRequested: Boolean = false,
     val rawAngleDegrees: Double? = null,
     val controlledAngleDegrees: Double? = null,
     val rawOffsetFraction: Double? = null,
     val controlledOffsetFraction: Double? = null,
     val offsetRatePerSecond: Double = 0.0,
+    val purePursuitYawRateDegreesPerSecond: Double = 0.0,
+    val pathQuality: PathQuality = PathQuality.LOST,
 )
 
 /**
- * Pure timing and steering policy for black-tape tracking. Aircraft and gimbal
- * commands remain in MainActivity, so this class can be tested without DJI SDK.
+ * Timing and steering policy for black-tape tracking: it owns the tracking phase,
+ * the smoothed measurements and the output slew limits, and answers every tick with
+ * a [TapeTrackingDecision]. Aircraft commands remain in MainActivity, so this state machine
+ * can be tested without the DJI SDK.
  */
 internal class TapeTrackingController {
     var enabled: Boolean = false
         private set
 
-    var phase: TapeTrackingPhase = TapeTrackingPhase.DISABLED
-        private set
-
+    private var phase: TapeTrackingPhase = TapeTrackingPhase.DISABLED
 
     private var lastDetectionAtNanos = 0L
     private var lastControlObservationAtNanos = 0L
@@ -66,6 +99,10 @@ internal class TapeTrackingController {
     private var rawHorizontalOffsetFraction: Double? = null
     private var controlledAngleDegrees: Double? = null
     private var controlledHorizontalOffsetFraction: Double? = null
+    private var controlledLookaheadXFraction: Double? = null
+    private var controlledLookaheadYFraction: Double? = null
+    private var lookaheadFrameAspectRatio: Double? = null
+    private var heightAboveGroundMeters: Double? = null
     private var offsetRatePerSecond = 0.0
     private var recenterUntilNanos = 0L
     private var consecutiveEndpointDetections = 0
@@ -73,23 +110,38 @@ internal class TapeTrackingController {
     private var longestObservedTapeFraction = 0.0
     private var endpointQualificationArmed = true
     private var endpointPending = false
-    private var pendingGimbalTarget: TrackingGimbalTarget? = null
     private var awaitingPostTurnDetection = false
     private var postTurnRecoveryUntilNanos = 0L
     private var endpointVerificationStartedAtNanos = 0L
     private var consecutiveEndpointMisses = 0
     private var endpointReferenceBounds: NormalizedRect? = null
     private var lateralCorrectionActive = false
+    private var consecutiveCurveAlignmentDetections = 0
+    private var lastAcceptedCircularObservation: TapeTrackingObservation? = null
+    private var circularDetectionGap = false
+    // One candidate sequence is shared by three mutually exclusive contexts:
+    // post-turn recovery, REACQUIRING_PATH, and a TRACKING gap. Context transitions
+    // reset it; full reacquisition alone may retain it across a brief detector flicker.
+    private var circularReacquisitionCandidate: TapeTrackingObservation? = null
+    private var circularReacquisitionCandidateAtNanos = 0L
+    private var consecutiveCircularReacquisitionDetections = 0
+    private var consecutiveReliableCircularPathDetections = 0
+    private var reliableCircularPathEstablished = false
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
-    var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
-        private set
+    private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
+    private var pathQuality: PathQuality = PathQuality.LOST
+    private var endpointTurnEnabled = true
 
-
-    fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
+    fun start(
+        nowNanos: Long,
+        mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT,
+        endpointTurnEnabled: Boolean = true,
+    ) {
         enabled = true
         this.mode = mode
+        this.endpointTurnEnabled = endpointTurnEnabled
         resetLeg()
         awaitingPostTurnDetection = false
         beginRecentering(nowNanos)
@@ -106,23 +158,23 @@ internal class TapeTrackingController {
         endpointVerificationStartedAtNanos = 0L
         endpointReferenceBounds = null
         consecutiveEndpointMisses = 0
-        pendingGimbalTarget = null
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
+        endpointTurnEnabled = true
     }
 
     fun resumeAfterTurn(nowNanos: Long) {
-        check(enabled && mode == TapeTrackingMode.STRAIGHT && phase == TapeTrackingPhase.TURNING)
+        check(enabled && phase == TapeTrackingPhase.TURNING)
         resetLeg()
         awaitingPostTurnDetection = true
-        postTurnRecoveryUntilNanos =
-            nowNanos + RECENTER_DURATION_NANOS + POST_TURN_RECOVERY_NANOS
+        postTurnRecoveryUntilNanos = 0L
         beginRecentering(nowNanos)
     }
 
+
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        if (mode.followsCurvedPath) {
             observeCircularPath(observation, nowNanos)
             return
         }
@@ -142,11 +194,7 @@ internal class TapeTrackingController {
         }
         when (phase) {
             TapeTrackingPhase.TRACKING -> {
-                updateControlMeasurements(
-                    observation.angleFromVerticalDegrees,
-                    observation.nearFieldOffsetFraction,
-                    nowNanos,
-                )
+                updateControlMeasurements(observation, nowNanos)
                 lastDetectionAtNanos = nowNanos
                 awaitingPostTurnDetection = false
                 longestObservedTapeFraction =
@@ -163,14 +211,24 @@ internal class TapeTrackingController {
                     !endpointQualificationArmed &&
                     abs(observation.angleFromVerticalDegrees) > ALIGNMENT_TOLERANCE_DEGREES
                 ) {
-                    clearControlMeasurements()
                     endpointCandidateSinceNanos = 0L
                     consecutiveEndpointDetections = 0
                     endpointReferenceBounds = null
+                    if (
+                        abs(observation.angleFromVerticalDegrees) >
+                        STRAIGHT_REACQUISITION_MAX_ALIGNMENT_ANGLE_DEGREES
+                    ) {
+                        // A near-horizontal fragment is likely a glare edge, not a route.
+                        clearControlMeasurements()
+                    }
                     return
                 }
+                // Length alone is not evidence of an end: only a terminus that
+                // stops inside the frame is, and a loop never is.
                 val endpointCandidate =
-                    endpointQualificationArmed &&
+                    observation.endpointCandidate &&
+                        !observation.closedLoop &&
+                        endpointQualificationArmed &&
                         abs(observation.angleFromVerticalDegrees) <= ALIGNMENT_TOLERANCE_DEGREES &&
                         longestObservedTapeFraction >= ENDPOINT_REFERENCE_MIN_FRACTION &&
                         observation.longSideFraction <=
@@ -205,11 +263,7 @@ internal class TapeTrackingController {
                 }
                 endpointReferenceBounds = observation.bounds
                 consecutiveEndpointMisses = 0
-                updateControlMeasurements(
-                    observation.angleFromVerticalDegrees,
-                    observation.nearFieldOffsetFraction,
-                    nowNanos,
-                )
+                updateControlMeasurements(observation, nowNanos)
                 lastDetectionAtNanos = nowNanos
                 if (
                     observation.longSideFraction >=
@@ -223,8 +277,21 @@ internal class TapeTrackingController {
                 }
             }
 
+            TapeTrackingPhase.RECOVERING_AFTER_TURN -> {
+                // The bounded search found tape again: resume following it from
+                // this frame's measurement, not from anything held over the turn.
+                awaitingPostTurnDetection = false
+                phase = TapeTrackingPhase.TRACKING
+                updateControlMeasurements(observation, nowNanos)
+                lastDetectionAtNanos = nowNanos
+                longestObservedTapeFraction = observation.longSideFraction
+                resetAppliedCommands()
+            }
+
             TapeTrackingPhase.DISABLED,
             TapeTrackingPhase.RECENTERING,
+            TapeTrackingPhase.ALIGNING_CURVE,
+            TapeTrackingPhase.REACQUIRING_PATH,
             TapeTrackingPhase.TURNING,
             -> Unit
         }
@@ -246,17 +313,58 @@ internal class TapeTrackingController {
             resetAppliedCommands()
             return decision(TapeTrackingPhase.TURNING, 0.0)
         }
+        if (
+            phase == TapeTrackingPhase.VERIFYING_ENDPOINT &&
+            endpointVerificationStartedAtNanos != 0L &&
+            nowNanos - endpointVerificationStartedAtNanos >=
+            ENDPOINT_VERIFICATION_TIMEOUT_NANOS
+        ) {
+            if (mode.followsCurvedPath) {
+                beginCircularReacquisition()
+            } else {
+                resetAppliedCommands()
+                return decision(
+                    phase = phase,
+                    yawRateDegreesPerSecond = 0.0,
+                    stopRequested = true,
+                )
+            }
+        }
 
         if (phase == TapeTrackingPhase.RECENTERING && nowNanos >= recenterUntilNanos) {
-            phase = TapeTrackingPhase.TRACKING
+            // Both modes reacquire in an explicit, bounded, low-speed phase.
+            // Advancing inside TRACKING with nothing detected was the one place
+            // the controller moved on evidence it did not have.
+            phase =
+                if (awaitingPostTurnDetection) {
+                    postTurnRecoveryUntilNanos = nowNanos + postTurnRecoveryDurationNanos()
+                    TapeTrackingPhase.RECOVERING_AFTER_TURN
+                } else {
+                    TapeTrackingPhase.TRACKING
+                }
             lastDetectionAtNanos = nowNanos
             clearControlMeasurements()
         }
+        if (
+            phase == TapeTrackingPhase.RECOVERING_AFTER_TURN &&
+            nowNanos >= postTurnRecoveryUntilNanos
+        ) {
+            awaitingPostTurnDetection = false
+            if (mode.followsCurvedPath) {
+                beginCircularReacquisition()
+            } else {
+                // The bounded search is over and nothing was found. Hovering in
+                // TRACKING with no path is a LOST state, and LOST commands zero.
+                phase = TapeTrackingPhase.TRACKING
+                clearControlMeasurements()
+                resetAppliedCommands()
+            }
+        }
 
-        val target = pendingGimbalTarget
-        pendingGimbalTarget = null
         if (
             (phase != TapeTrackingPhase.TRACKING &&
+                phase != TapeTrackingPhase.ALIGNING_CURVE &&
+                phase != TapeTrackingPhase.RECOVERING_AFTER_TURN &&
                 phase != TapeTrackingPhase.VERIFYING_ENDPOINT) ||
             nowNanos - lastDetectionAtNanos > DETECTION_COMMAND_STALE_NANOS ||
             controlledAngleDegrees == null ||
@@ -267,15 +375,57 @@ internal class TapeTrackingController {
                 phase = phase,
                 yawRateDegreesPerSecond = 0.0,
                 forwardSpeedMetersPerSecond =
-                    if (mode == TapeTrackingMode.CIRCULAR) 0.0 else desiredForwardSpeed(nowNanos),
-                gimbalTarget = target,
+                    if (
+                        phase == TapeTrackingPhase.VERIFYING_ENDPOINT ||
+                        phase == TapeTrackingPhase.RECOVERING_AFTER_TURN
+                    ) {
+                        // The bounded searches meter their own advance and stop on
+                        // their own clocks; a detection gap is their normal state.
+                        desiredForwardSpeed(nowNanos)
+                    } else {
+                        // A stale or missing measurement is no measurement in either
+                        // mode: keeping speed here advances into unmeasured space.
+                        0.0
+                    },
             )
         }
+        if (
+            !mode.followsCurvedPath &&
+            !endpointQualificationArmed &&
+            abs(controlledAngleDegrees ?: 0.0) > ALIGNMENT_TOLERANCE_DEGREES
+        ) {
+            // Reacquisition may need an in-place yaw before the route is long enough
+            // to re-arm endpoint tracking. Translation remains forbidden.
+            val (yawRate, _) = applyOutputLimits(
+                targetYawRate = desiredYawRate(purePursuitYawRate = null),
+                targetRightSpeed = 0.0,
+                nowNanos = nowNanos,
+            )
+            return decision(
+                phase = phase,
+                yawRateDegreesPerSecond = yawRate,
+            )
+        }
+        if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
+            val targetYawRate = desiredCurveAlignmentYawRate()
+            val (yawRate, _) = applyOutputLimits(
+                targetYawRate,
+                targetRightSpeed = 0.0,
+                nowNanos,
+            )
+            return decision(
+                phase = phase,
+                yawRateDegreesPerSecond = yawRate,
+            )
+        }
+
 
         // Establish the anchor correction state before yaw selection so a
         // displaced rail translates first instead of spending the frame spinning.
         val targetRightSpeed = desiredRightSpeed()
-        val targetYawRate = desiredYawRate()
+        val targetForwardSpeed = desiredForwardSpeed(nowNanos)
+        val purePursuitYawRate = desiredPurePursuitYawRate(targetForwardSpeed)
+        val targetYawRate = desiredYawRate(purePursuitYawRate)
         val (yawRate, rightSpeed) = applyOutputLimits(
             targetYawRate,
             targetRightSpeed,
@@ -284,9 +434,9 @@ internal class TapeTrackingController {
         return decision(
             phase = phase,
             yawRateDegreesPerSecond = yawRate,
-            forwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos),
+            forwardSpeedMetersPerSecond = targetForwardSpeed,
             rightSpeedMetersPerSecond = rightSpeed,
-            gimbalTarget = target,
+            purePursuitYawRateDegreesPerSecond = purePursuitYawRate ?: 0.0,
         )
     }
 
@@ -294,13 +444,379 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation?,
         nowNanos: Long,
     ) {
-        if (observation == null || phase != TapeTrackingPhase.TRACKING) return
-        updateControlMeasurements(
-            observation.angleFromVerticalDegrees,
-            observation.nearFieldOffsetFraction,
-            nowNanos,
-        )
+        if (
+            phase != TapeTrackingPhase.TRACKING &&
+            phase != TapeTrackingPhase.ALIGNING_CURVE &&
+            phase != TapeTrackingPhase.RECOVERING_AFTER_TURN &&
+            phase != TapeTrackingPhase.REACQUIRING_PATH &&
+            phase != TapeTrackingPhase.VERIFYING_ENDPOINT
+        ) {
+            return
+        }
+        if (phase == TapeTrackingPhase.RECOVERING_AFTER_TURN) {
+            observeCircularPostTurnRecovery(observation, nowNanos)
+            return
+        }
+        if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
+            observeCircularEndpointVerification(observation, nowNanos)
+            return
+        }
+        if (observation == null) {
+            circularDetectionGap = true
+            if (!reliableCircularPathEstablished) {
+                consecutiveReliableCircularPathDetections = 0
+            }
+            if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
+                expireCircularReacquisitionCandidateIfStale(nowNanos)
+            } else {
+                resetCircularReacquisitionCandidate()
+            }
+            when (phase) {
+                TapeTrackingPhase.TRACKING -> {
+                    if (reliableCircularPathEstablished) {
+                        consecutiveEndpointMisses += 1
+                        if (
+                            consecutiveEndpointMisses >=
+                            CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT
+                        ) {
+                            beginCircularEndpointVerification(nowNanos)
+                        }
+                    }
+                }
+
+                TapeTrackingPhase.ALIGNING_CURVE -> {
+                    consecutiveCurveAlignmentDetections = 0
+                    clearControlMeasurements()
+                }
+
+                else -> Unit
+            }
+            return
+        }
+
+        if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
+            observeCircularReacquisitionCandidate(observation, nowNanos)
+            return
+        }
+
+        val previousObservation = lastAcceptedCircularObservation
+        if (
+            previousObservation == null &&
+            abs(observation.nearFieldOffsetFraction) >
+            REACQUISITION_ENTRY_OFFSET_FRACTION
+        ) {
+            beginCircularReacquisition()
+            observeCircularReacquisitionCandidate(observation, nowNanos)
+            return
+        }
+        if (circularDetectionGap && previousObservation != null) {
+            if (!isPlausibleCircularContinuation(observation, previousObservation)) {
+                if (
+                    reliableCircularPathEstablished &&
+                    !isCredibleCircularReacquisitionPath(observation)
+                ) {
+                    beginCircularEndpointVerification(nowNanos)
+                    registerEndpointMiss(nowNanos)
+                } else {
+                    beginCircularReacquisition()
+                    observeCircularReacquisitionCandidate(observation, nowNanos)
+                }
+            } else {
+                observeCircularGapContinuation(observation, nowNanos)
+            }
+            return
+        }
+
+        acceptCircularObservation(observation, nowNanos)
+        updateCircularTrackingPhase()
+    }
+
+    private fun observeCircularPostTurnRecovery(
+        observation: TapeTrackingObservation?,
+        nowNanos: Long,
+    ) {
+        val centeredPath =
+            observation != null &&
+                observation.longSideFraction >= CIRCULAR_POST_TURN_MIN_PATH_FRACTION &&
+                abs(observation.angleFromVerticalDegrees) <=
+                CIRCULAR_POST_TURN_MAX_ANGLE_DEGREES &&
+                abs(observation.nearFieldOffsetFraction) <=
+                CIRCULAR_POST_TURN_MAX_OFFSET_FRACTION
+        if (!centeredPath) {
+            resetCircularReacquisitionCandidate()
+            clearControlMeasurements()
+            return
+        }
+
+        val trackedObservation = checkNotNull(observation)
+        val previousCandidate = circularReacquisitionCandidate
+        if (
+            previousCandidate != null &&
+            isConsistentCircularReacquisition(trackedObservation, previousCandidate)
+        ) {
+            consecutiveCircularReacquisitionDetections += 1
+        } else {
+            consecutiveCircularReacquisitionDetections = 1
+        }
+        circularReacquisitionCandidate = trackedObservation
+        if (
+            consecutiveCircularReacquisitionDetections <
+            CIRCULAR_POST_TURN_CONFIRMATION_COUNT
+        ) {
+            clearControlMeasurements()
+            return
+        }
+
+        awaitingPostTurnDetection = false
+        phase = TapeTrackingPhase.TRACKING
+        resetCircularReacquisitionCandidate()
+        acceptCircularObservation(trackedObservation, nowNanos)
+        resetAppliedCommands()
+        updateCircularTrackingPhase()
+    }
+
+    private fun observeCircularEndpointVerification(
+        observation: TapeTrackingObservation?,
+        nowNanos: Long,
+    ) {
+        val referenceBounds = endpointReferenceBounds
+        val previousObservation = lastAcceptedCircularObservation
+        val matchesTrackedPath =
+            observation != null &&
+                referenceBounds != null &&
+                previousObservation != null &&
+                isPlausibleCircularContinuation(observation, previousObservation) &&
+                overlapOfSmallerArea(observation.bounds, referenceBounds) >=
+                ENDPOINT_TRACK_MIN_OVERLAP
+        if (!matchesTrackedPath) {
+            clearControlMeasurements()
+            registerEndpointMiss(nowNanos)
+            return
+        }
+
+        val trackedObservation = checkNotNull(observation)
+        endpointReferenceBounds = trackedObservation.bounds
+        consecutiveEndpointMisses = 0
+        acceptCircularObservation(trackedObservation, nowNanos)
+        // Endpoint inference is based on reliable-route absence. Any matching full path
+        // proves the route is present again, even when its far end also looks terminal.
+        if (
+            trackedObservation.quality == PathQuality.FULL_PATH &&
+            trackedObservation.longSideFraction >=
+            CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION &&
+            trackedObservation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+        ) {
+            phase = TapeTrackingPhase.TRACKING
+            endpointVerificationStartedAtNanos = 0L
+            endpointReferenceBounds = null
+            resetAppliedCommands()
+            updateCircularTrackingPhase()
+        }
+    }
+
+    private fun beginCircularEndpointVerification(nowNanos: Long) {
+        phase = TapeTrackingPhase.VERIFYING_ENDPOINT
+        endpointReferenceBounds = lastAcceptedCircularObservation?.bounds
+        endpointVerificationStartedAtNanos = nowNanos
+        consecutiveEndpointMisses = 0
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
+        clearControlMeasurements()
+        resetAppliedCommands()
+    }
+
+    private fun observeCircularGapContinuation(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ) {
+        val previousCandidate = circularReacquisitionCandidate
+        if (
+            previousCandidate != null &&
+            isConsistentCircularReacquisition(observation, previousCandidate)
+        ) {
+            consecutiveCircularReacquisitionDetections += 1
+        } else {
+            consecutiveCircularReacquisitionDetections = 1
+        }
+        circularReacquisitionCandidate = observation
+        clearControlMeasurements()
+        resetAppliedCommands()
+        if (
+            consecutiveCircularReacquisitionDetections <
+            CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT
+        ) {
+            return
+        }
+        resetCircularReacquisitionCandidate()
+        acceptCircularObservation(observation, nowNanos)
+        updateCircularTrackingPhase()
+    }
+
+    private fun observeCircularReacquisitionCandidate(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ) {
+        expireCircularReacquisitionCandidateIfStale(nowNanos)
+        if (!isCredibleCircularReacquisitionPath(observation)) {
+            return
+        }
+
+        val previousCandidate = circularReacquisitionCandidate
+        if (
+            previousCandidate != null &&
+            isConsistentCircularReacquisition(observation, previousCandidate)
+        ) {
+            consecutiveCircularReacquisitionDetections += 1
+        } else {
+            consecutiveCircularReacquisitionDetections = 1
+        }
+        circularReacquisitionCandidate = observation
+        circularReacquisitionCandidateAtNanos = nowNanos
+        if (
+            consecutiveCircularReacquisitionDetections >=
+            REACQUISITION_CONFIRMATION_COUNT
+        ) {
+            completeCircularReacquisition(observation, nowNanos)
+        }
+    }
+
+    private fun beginCircularReacquisition() {
+        phase = TapeTrackingPhase.REACQUIRING_PATH
+        consecutiveCurveAlignmentDetections = 0
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
+        consecutiveEndpointMisses = 0
+        resetCircularReacquisitionCandidate()
+        clearControlMeasurements()
+        resetAppliedCommands()
+    }
+
+    private fun completeCircularReacquisition(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ) {
+        phase = TapeTrackingPhase.TRACKING
+        resetCircularReacquisitionCandidate()
+        acceptCircularObservation(observation, nowNanos)
+        resetAppliedCommands()
+        updateCircularTrackingPhase()
+    }
+
+    private fun acceptCircularObservation(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ) {
+        updateControlMeasurements(observation, nowNanos)
         lastDetectionAtNanos = nowNanos
+        lastAcceptedCircularObservation = observation
+        circularDetectionGap = false
+        consecutiveEndpointMisses = 0
+        if (!endpointTurnEnabled) {
+            consecutiveReliableCircularPathDetections = 0
+            reliableCircularPathEstablished = false
+            return
+        }
+        val reliablePath =
+            observation.quality == PathQuality.FULL_PATH &&
+                !observation.closedLoop &&
+                observation.longSideFraction >= CIRCULAR_RELIABLE_PATH_MIN_FRACTION &&
+                observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+        if (reliablePath) {
+            consecutiveReliableCircularPathDetections += 1
+            if (
+                consecutiveReliableCircularPathDetections >=
+                CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT
+            ) {
+                reliableCircularPathEstablished = true
+            }
+        } else if (!reliableCircularPathEstablished) {
+            consecutiveReliableCircularPathDetections = 0
+        }
+    }
+
+    private fun updateCircularTrackingPhase() {
+        val angle = controlledAngleDegrees ?: return
+        when (phase) {
+            TapeTrackingPhase.TRACKING -> {
+                if (
+                    abs(angle) >= CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES &&
+                    !hasUsablePurePursuitTarget()
+                ) {
+                    phase = TapeTrackingPhase.ALIGNING_CURVE
+                    consecutiveCurveAlignmentDetections = 0
+                    lateralCorrectionActive = false
+                    resetAppliedCommands()
+                }
+            }
+
+            TapeTrackingPhase.ALIGNING_CURVE -> {
+                if (abs(angle) <= CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES) {
+                    consecutiveCurveAlignmentDetections += 1
+                    if (
+                        consecutiveCurveAlignmentDetections >=
+                        CURVE_ALIGNMENT_CONFIRMATION_COUNT
+                    ) {
+                        phase = TapeTrackingPhase.TRACKING
+                        consecutiveCurveAlignmentDetections = 0
+                        lateralCorrectionActive = false
+                        resetAppliedCommands()
+                    }
+                } else {
+                    consecutiveCurveAlignmentDetections = 0
+                }
+            }
+
+            else -> Unit
+        }
+    }
+
+    private fun isPlausibleCircularContinuation(
+        observation: TapeTrackingObservation,
+        reference: TapeTrackingObservation,
+    ): Boolean =
+        abs(observation.nearFieldOffsetFraction - reference.nearFieldOffsetFraction) <=
+            REACQUISITION_MAX_OFFSET_JUMP_FRACTION &&
+            axialAngleDifferenceDegrees(
+                observation.angleFromVerticalDegrees,
+                reference.angleFromVerticalDegrees,
+            ) <= REACQUISITION_MAX_ANGLE_JUMP_DEGREES
+
+    private fun isCredibleCircularReacquisitionPath(
+        observation: TapeTrackingObservation,
+    ): Boolean {
+        if (observation.longSideFraction < CIRCULAR_REACQUISITION_MIN_PATH_FRACTION) {
+            return false
+        }
+        return abs(observation.nearFieldOffsetFraction) <=
+            REACQUISITION_ENTRY_OFFSET_FRACTION ||
+            observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+    }
+
+    private fun isConsistentCircularReacquisition(
+        observation: TapeTrackingObservation,
+        previousCandidate: TapeTrackingObservation,
+    ): Boolean =
+        abs(observation.nearFieldOffsetFraction - previousCandidate.nearFieldOffsetFraction) <=
+            REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION &&
+            axialAngleDifferenceDegrees(
+                observation.angleFromVerticalDegrees,
+                previousCandidate.angleFromVerticalDegrees,
+            ) <= REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES
+
+    private fun expireCircularReacquisitionCandidateIfStale(nowNanos: Long) {
+        if (
+            circularReacquisitionCandidateAtNanos != 0L &&
+            nowNanos - circularReacquisitionCandidateAtNanos >
+            REACQUISITION_CANDIDATE_MAX_GAP_NANOS
+        ) {
+            resetCircularReacquisitionCandidate()
+        }
+    }
+
+    private fun resetCircularReacquisitionCandidate() {
+        circularReacquisitionCandidate = null
+        circularReacquisitionCandidateAtNanos = 0L
+        consecutiveCircularReacquisitionDetections = 0
     }
 
 
@@ -313,8 +829,13 @@ internal class TapeTrackingController {
         ) {
             return
         }
+        if (endpointReferenceBounds == null) {
+            endpointCandidateSinceNanos = 0L
+            consecutiveEndpointDetections = 0
+            endpointQualificationArmed = false
+            return
+        }
         phase = TapeTrackingPhase.VERIFYING_ENDPOINT
-        endpointReferenceBounds = checkNotNull(endpointReferenceBounds)
         endpointCandidateSinceNanos = 0L
         consecutiveEndpointDetections = 0
         endpointVerificationStartedAtNanos = nowNanos
@@ -336,7 +857,6 @@ internal class TapeTrackingController {
     private fun beginRecentering(nowNanos: Long) {
         phase = TapeTrackingPhase.RECENTERING
         clearControlMeasurements()
-        pendingGimbalTarget = TrackingGimbalTarget.DOWN_CENTER
         recenterUntilNanos = nowNanos + RECENTER_DURATION_NANOS
         resetAppliedCommands()
     }
@@ -351,24 +871,41 @@ internal class TapeTrackingController {
         endpointVerificationStartedAtNanos = 0L
         consecutiveEndpointMisses = 0
         endpointReferenceBounds = null
-        lateralCorrectionActive = false
         resetControlState()
     }
 
     private fun updateControlMeasurements(
-        angleDegrees: Double,
-        horizontalOffsetFraction: Double,
+        observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
-        rawAngleDegrees = angleDegrees
-        rawHorizontalOffsetFraction = horizontalOffsetFraction
+        setPathQuality(observation.quality)
+        rawAngleDegrees = observation.angleFromVerticalDegrees
+        rawHorizontalOffsetFraction = observation.nearFieldOffsetFraction
         val previousOffset = controlledHorizontalOffsetFraction
         val nextAngle = controlledAngleDegrees?.let {
-            axialExponentialAverage(it, angleDegrees, STABILIZED_FILTER_ALPHA)
-        } ?: angleDegrees
+            axialExponentialAverage(it, observation.angleFromVerticalDegrees, STABILIZED_FILTER_ALPHA)
+        } ?: observation.angleFromVerticalDegrees
         val nextOffset = previousOffset?.let {
-            exponentialAverage(it, horizontalOffsetFraction, STABILIZED_FILTER_ALPHA)
-        } ?: horizontalOffsetFraction
+            exponentialAverage(it, observation.nearFieldOffsetFraction, STABILIZED_FILTER_ALPHA)
+        } ?: observation.nearFieldOffsetFraction
+        // A path the detector could not follow far enough reports no look-ahead.
+        // Holding the previous one would steer from evidence this frame does not
+        // have, so Pure Pursuit loses its target instead of inheriting a stale one.
+        val lookahead = observation.lookahead
+        if (lookahead == null) {
+            controlledLookaheadXFraction = null
+            controlledLookaheadYFraction = null
+        } else {
+            controlledLookaheadXFraction = controlledLookaheadXFraction?.let {
+                exponentialAverage(it, lookahead.xFraction, STABILIZED_FILTER_ALPHA)
+            } ?: lookahead.xFraction
+            controlledLookaheadYFraction = controlledLookaheadYFraction?.let {
+                exponentialAverage(it, lookahead.yFraction, STABILIZED_FILTER_ALPHA)
+            } ?: lookahead.yFraction
+        }
+        lookaheadFrameAspectRatio =
+            observation.frameWidthPixels.toDouble() / observation.frameHeightPixels
+        heightAboveGroundMeters = observation.heightAboveGroundMeters
         val elapsedNanos = nowNanos - lastControlObservationAtNanos
         offsetRatePerSecond =
             if (previousOffset != null && lastControlObservationAtNanos != 0L && elapsedNanos > 0L) {
@@ -382,17 +919,44 @@ internal class TapeTrackingController {
         lastControlObservationAtNanos = nowNanos
     }
 
+    /**
+     * Records this frame's quality. LOST is the resting state, so a frame that
+     * produced no observation leaves the controller with no authority rather
+     * than with the authority the previous frame had.
+     */
+    private fun setPathQuality(value: PathQuality) {
+        pathQuality = value
+    }
+
+    /**
+     * LOST is expressed by clearing the filtered measurements, not by a separate
+     * branch in every command: with no angle, offset or look-ahead there is
+     * nothing for a command to be computed from, and no path by which a previous
+     * frame's value could survive into this one.
+     */
+
     private fun clearControlMeasurements() {
         rawAngleDegrees = null
         rawHorizontalOffsetFraction = null
         controlledAngleDegrees = null
         controlledHorizontalOffsetFraction = null
+        controlledLookaheadXFraction = null
+        controlledLookaheadYFraction = null
+        lookaheadFrameAspectRatio = null
+        heightAboveGroundMeters = null
         offsetRatePerSecond = 0.0
         lastControlObservationAtNanos = 0L
         lateralCorrectionActive = false
+        pathQuality = PathQuality.LOST
     }
 
     private fun resetControlState() {
+        consecutiveCurveAlignmentDetections = 0
+        lastAcceptedCircularObservation = null
+        circularDetectionGap = false
+        resetCircularReacquisitionCandidate()
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
         clearControlMeasurements()
         resetAppliedCommands()
     }
@@ -403,32 +967,107 @@ internal class TapeTrackingController {
         lastCommandAtNanos = 0L
     }
 
-    private fun desiredYawRate(): Double {
+    private fun desiredYawRate(purePursuitYawRate: Double?): Double {
         val angle = controlledAngleDegrees ?: return 0.0
         val deadZone =
-            if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_DEAD_ZONE_DEGREES
+            if (mode.followsCurvedPath) CIRCULAR_YAW_DEAD_ZONE_DEGREES
             else YAW_DEAD_ZONE_DEGREES
-        if (abs(angle) <= deadZone) return 0.0
         val modeMaximumYawRate = when {
-            mode == TapeTrackingMode.CIRCULAR ->
-                CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
             phase == TapeTrackingPhase.VERIFYING_ENDPOINT ->
                 ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND
+            mode.followsCurvedPath ->
+                CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
             else -> MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND
         }
         val maximumYawRate =
-            if (lateralCorrectionActive) {
+            if (pathQuality == PathQuality.NEAR_FIELD_ONLY) {
+                // In-place alignment only, and bounded: a near-field-only path is
+                // enough to point at, never enough to chase.
+                minOf(modeMaximumYawRate, NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND)
+            } else if (lateralCorrectionActive && !mode.followsCurvedPath) {
                 minOf(modeMaximumYawRate, ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND)
             } else {
                 modeMaximumYawRate
             }
         val gain =
-            if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_PROPORTIONAL_GAIN
+            if (mode.followsCurvedPath) CIRCULAR_YAW_PROPORTIONAL_GAIN
             else YAW_PROPORTIONAL_GAIN
-        return (angle * gain).coerceIn(-maximumYawRate, maximumYawRate)
+        val angleFeedback = if (abs(angle) <= deadZone) 0.0 else angle * gain
+        return (purePursuitYawRate ?: angleFeedback)
+            .coerceIn(-maximumYawRate, maximumYawRate)
+    }
+    private fun desiredCurveAlignmentYawRate(): Double {
+        val angle = controlledAngleDegrees ?: return 0.0
+        val maximumYawRate =
+            if (pathQuality == PathQuality.NEAR_FIELD_ONLY) {
+                NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND
+            } else {
+                CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
+            }
+        return (angle * CIRCULAR_YAW_PROPORTIONAL_GAIN).coerceIn(
+            -maximumYawRate,
+            maximumYawRate,
+        )
+    }
+
+
+    private fun hasUsablePurePursuitTarget(): Boolean {
+        if (pathQuality != PathQuality.FULL_PATH) return false
+        val lookaheadX = controlledLookaheadXFraction ?: return false
+        val lookaheadY = controlledLookaheadYFraction ?: return false
+        val aspectRatio = lookaheadFrameAspectRatio ?: return false
+        val height = heightAboveGroundMeters?.takeIf {
+            it >= PURE_PURSUIT_MIN_HEIGHT_METERS
+        } ?: return false
+        val normalizedLateralDistance =
+            (lookaheadX - TRACKING_TARGET_X_FRACTION) * aspectRatio
+        val normalizedForwardDistance = TRACKING_TARGET_Y_FRACTION - lookaheadY
+        if (normalizedForwardDistance <= 0.0) return false
+        val verticalHalfFovTangent =
+            CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
+        val groundFrameHeightMeters = 2.0 * height * verticalHalfFovTangent
+        return groundFrameHeightMeters *
+            hypot(normalizedLateralDistance, normalizedForwardDistance) >=
+            PURE_PURSUIT_MIN_LOOKAHEAD_METERS
+    }
+    /**
+     * Ground-plane Pure Pursuit from the detected target point. The white overlay cross is the
+     * image-space aircraft reference; image-up is forward and image-right is positive yaw.
+     *
+     * Height and the Mini 4 Pro camera's diagonal FOV provide the metric scale. If either the
+     * height or a forward target is unavailable, the angle feedback remains the safe fallback.
+     *
+     * A path without a look-ahead cannot reach here: only FULL_PATH carries one,
+     * and an observation without one clears the filtered target, so the guard is
+     * the absent target itself rather than a quality check that could drift out
+     * of step with it.
+     */
+    private fun desiredPurePursuitYawRate(
+        forwardSpeedMetersPerSecond: Double,
+    ): Double? {
+        if (forwardSpeedMetersPerSecond <= 0.0 || !hasUsablePurePursuitTarget()) return null
+        val lookaheadX = checkNotNull(controlledLookaheadXFraction)
+        val lookaheadY = checkNotNull(controlledLookaheadYFraction)
+        val aspectRatio = checkNotNull(lookaheadFrameAspectRatio)
+        val height = checkNotNull(heightAboveGroundMeters)
+        val verticalHalfFovTangent =
+            CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
+        val groundFrameHeightMeters = 2.0 * height * verticalHalfFovTangent
+        val lateralMeters =
+            (lookaheadX - TRACKING_TARGET_X_FRACTION) *
+                aspectRatio * groundFrameHeightMeters
+        val forwardMeters =
+            (TRACKING_TARGET_Y_FRACTION - lookaheadY) * groundFrameHeightMeters
+        val lookaheadDistanceMeters = hypot(lateralMeters, forwardMeters)
+        val curvaturePerMeter =
+            2.0 * lateralMeters / (lookaheadDistanceMeters * lookaheadDistanceMeters)
+        return Math.toDegrees(forwardSpeedMetersPerSecond * curvaturePerMeter)
     }
 
     private fun desiredRightSpeed(): Double {
+        // Translation is the command a wrong path turns into a crash, so it is
+        // the first thing quality takes away.
+        if (pathQuality != PathQuality.FULL_PATH) return 0.0
         val offset = controlledHorizontalOffsetFraction ?: return 0.0
         lateralCorrectionActive = when {
             lateralCorrectionActive && abs(offset) <= CENTERING_STOP_FRACTION -> false
@@ -437,7 +1076,7 @@ internal class TapeTrackingController {
         }
         if (!lateralCorrectionActive) return 0.0
         val maximumCenteringSpeed =
-            if (mode == TapeTrackingMode.CIRCULAR) {
+            if (mode.followsCurvedPath) {
                 CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND
             } else {
                 MAX_CENTERING_SPEED_METERS_PER_SECOND
@@ -458,13 +1097,38 @@ internal class TapeTrackingController {
     }
 
     private fun desiredForwardSpeed(nowNanos: Long): Double {
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        // NEAR_FIELD_ONLY knows which way the tape under the aircraft runs and
+        // nothing about what is ahead. Aligning in place is safe; advancing is
+        // advancing into unmeasured space.
+        if (pathQuality != PathQuality.FULL_PATH && phase == TapeTrackingPhase.TRACKING) return 0.0
+        if (phase == TapeTrackingPhase.RECOVERING_AFTER_TURN) {
+            return if (nowNanos < postTurnRecoveryUntilNanos) {
+                postTurnRecoverySpeedMetersPerSecond()
+            } else {
+                0.0
+            }
+        }
+        if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
+            return if (
+                nowNanos - endpointVerificationStartedAtNanos <= ENDPOINT_PROBE_DURATION_NANOS
+            ) {
+                if (mode.followsCurvedPath) {
+                    CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND
+                } else {
+                    ENDPOINT_PROBE_SPEED_METERS_PER_SECOND
+                }
+            } else {
+                0.0
+            }
+        }
+        if (mode.followsCurvedPath) {
             if (phase != TapeTrackingPhase.TRACKING) return 0.0
             val angle = controlledAngleDegrees ?: return 0.0
             val offset = controlledHorizontalOffsetFraction ?: return 0.0
             if (
-                abs(angle) > CIRCULAR_MAX_MOVING_ANGLE_DEGREES ||
-                abs(offset) > CIRCULAR_MAX_MOVING_OFFSET_FRACTION
+                abs(offset) > CIRCULAR_MAX_MOVING_OFFSET_FRACTION ||
+                (!hasUsablePurePursuitTarget() &&
+                    abs(angle) > CIRCULAR_MAX_MOVING_ANGLE_DEGREES)
             ) {
                 return 0.0
             }
@@ -475,22 +1139,6 @@ internal class TapeTrackingController {
                 CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND
             } else {
                 CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND
-            }
-        }
-        if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
-            return if (
-                nowNanos - endpointVerificationStartedAtNanos <= ENDPOINT_PROBE_DURATION_NANOS
-            ) {
-                ENDPOINT_PROBE_SPEED_METERS_PER_SECOND
-            } else {
-                0.0
-            }
-        }
-        if (awaitingPostTurnDetection && phase == TapeTrackingPhase.TRACKING) {
-            return if (nowNanos <= postTurnRecoveryUntilNanos) {
-                POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
-            } else {
-                0.0
             }
         }
         if (phase != TapeTrackingPhase.TRACKING || consecutiveEndpointDetections > 0) return 0.0
@@ -515,6 +1163,20 @@ internal class TapeTrackingController {
             STABILIZED_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND
         }
     }
+
+    private fun postTurnRecoveryDurationNanos(): Long =
+        if (mode.followsCurvedPath) {
+            CIRCULAR_POST_TURN_RECOVERY_NANOS
+        } else {
+            POST_TURN_RECOVERY_NANOS
+        }
+
+    private fun postTurnRecoverySpeedMetersPerSecond(): Double =
+        if (mode.followsCurvedPath) {
+            CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
+        } else {
+            POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
+        }
 
     private fun applyOutputLimits(
         targetYawRate: Double,
@@ -547,24 +1209,27 @@ internal class TapeTrackingController {
         yawRateDegreesPerSecond: Double,
         forwardSpeedMetersPerSecond: Double = 0.0,
         rightSpeedMetersPerSecond: Double = 0.0,
-        gimbalTarget: TrackingGimbalTarget? = null,
         endpointReached: Boolean = false,
+        stopRequested: Boolean = false,
+        purePursuitYawRateDegreesPerSecond: Double = 0.0,
     ): TapeTrackingDecision {
-        check(!endpointReached || mode == TapeTrackingMode.STRAIGHT) {
-            "Only straight tape tracking can report a physical endpoint"
+        check(!endpointReached || phase == TapeTrackingPhase.TURNING) {
+            "A physical endpoint can only be reported while turning around"
         }
         return TapeTrackingDecision(
             phase = phase,
             yawRateDegreesPerSecond = yawRateDegreesPerSecond,
             forwardSpeedMetersPerSecond = forwardSpeedMetersPerSecond,
             rightSpeedMetersPerSecond = rightSpeedMetersPerSecond,
-            gimbalTarget = gimbalTarget,
             endpointReached = endpointReached,
+            stopRequested = stopRequested,
             rawAngleDegrees = rawAngleDegrees,
             controlledAngleDegrees = controlledAngleDegrees,
             rawOffsetFraction = rawHorizontalOffsetFraction,
             controlledOffsetFraction = controlledHorizontalOffsetFraction,
             offsetRatePerSecond = offsetRatePerSecond,
+            purePursuitYawRateDegreesPerSecond = purePursuitYawRateDegreesPerSecond,
+            pathQuality = pathQuality,
         )
     }
 
@@ -583,6 +1248,11 @@ internal class TapeTrackingController {
         while (averaged > 90.0) averaged -= 180.0
         while (averaged < -90.0) averaged += 180.0
         return averaged
+    }
+    private fun axialAngleDifferenceDegrees(first: Double, second: Double): Double {
+        var difference = abs(first - second)
+        if (difference > 90.0) difference = 180.0 - difference
+        return difference
     }
 
     private fun moveToward(current: Double, target: Double, maximumDelta: Double): Double =
@@ -606,6 +1276,8 @@ internal class TapeTrackingController {
 
     internal companion object {
         const val ALIGNMENT_TOLERANCE_DEGREES = 10.0
+        /** Reject near-horizontal glare fragments while allowing in-place route realignment. */
+        const val STRAIGHT_REACQUISITION_MAX_ALIGNMENT_ANGLE_DEGREES = 45.0
         const val YAW_DEAD_ZONE_DEGREES = 2.0
         const val YAW_PROPORTIONAL_GAIN = 0.3
         const val MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND = 5.0
@@ -639,6 +1311,9 @@ internal class TapeTrackingController {
         const val ENDPOINT_TRACK_MIN_OVERLAP = 0.20
         const val ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND = 2.0
         const val ENDPOINT_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.03
+
+        /** Bounded in-place alignment allowed when only the near field is credible. */
+        const val NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND = 3.0
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 6.0
@@ -646,8 +1321,49 @@ internal class TapeTrackingController {
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.03
         const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.10
         const val CIRCULAR_STABLE_ANGLE_DEGREES = 8.0
+        const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
+        const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0
+        const val CURVE_ALIGNMENT_CONFIRMATION_COUNT = 3
+        const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
+        const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
+        const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
+        // A lost-path reacquisition must be a substantial route, not a short floor feature.
+        // Flight evidence after the detector hardening showed that waiting for a third
+        // mutually consistent frame only prolonged a stationary tail reacquisition.
+        const val CIRCULAR_REACQUISITION_MIN_PATH_FRACTION = 0.60
+        const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
+        const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
+        const val REACQUISITION_CONFIRMATION_COUNT = 2
+        // Detector flicker on wrinkled tape may insert null or short-fragment frames.
+        const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
+        const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
+        // In out-and-back mode the operational endpoint signal is not a visible tape tip:
+        // the latest flights end where tape passes under the mat, so no trustworthy
+        // in-frame terminus exists. Establish a route from several full, near-aircraft
+        // observations, then let sustained disappearance enter the existing low-speed
+        // probe. A brief gap cannot arm this state, and a returning full path cancels it.
+        const val CIRCULAR_RELIABLE_PATH_MIN_FRACTION = 0.60
+        const val CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT = 3
+        const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
+        const val CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION = 0.60
+        const val CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.02
+        const val ENDPOINT_VERIFICATION_TIMEOUT_NANOS = 6_000_000_000L
+        const val CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND = 0.03
+        const val CIRCULAR_POST_TURN_RECOVERY_NANOS = 6_000_000_000L
+        // Immediately after a half-turn the camera may see only the near fragment; three
+        // centered, mutually consistent frames compensate for this deliberately lower length.
+        const val CIRCULAR_POST_TURN_MIN_PATH_FRACTION = 0.20
+        const val CIRCULAR_POST_TURN_MAX_ANGLE_DEGREES = 45.0
+        const val CIRCULAR_POST_TURN_MAX_OFFSET_FRACTION = 0.20
+        const val CIRCULAR_POST_TURN_CONFIRMATION_COUNT = 3
         const val CIRCULAR_MAX_MOVING_ANGLE_DEGREES = 45.0
-        const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = 0.25
+        // Do not accept a path into tracking and then forbid that same path from advancing.
+        const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = REACQUISITION_ENTRY_OFFSET_FRACTION
+        const val PURE_PURSUIT_MIN_HEIGHT_METERS = 0.30
+        const val PURE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.10
+        const val CAMERA_VIDEO_DIAGONAL_FOV_DEGREES = 75.0
+        val CAMERA_DIAGONAL_HALF_FOV_TANGENT =
+            tan(Math.toRadians(CAMERA_VIDEO_DIAGONAL_FOV_DEGREES) / 2.0)
         private const val NANOS_PER_SECOND = 1_000_000_000.0
         private const val INITIAL_COMMAND_INTERVAL_SECONDS = 0.1
         private const val MAX_COMMAND_INTERVAL_SECONDS = 0.25

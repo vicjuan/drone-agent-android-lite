@@ -53,10 +53,10 @@ class VirtualStickSession(
         Thread(runnable, "LiteVirtualStick").apply { isDaemon = true }
     }
 
-    @Volatile private var forward = 0.0
-    @Volatile private var right = 0.0
-    @Volatile private var up = 0.0
-    @Volatile private var yawRate = 0.0
+    @Volatile private var commandedForwardMetersPerSecond = 0.0
+    @Volatile private var commandedRightMetersPerSecond = 0.0
+    @Volatile private var commandedClimbMetersPerSecond = 0.0
+    @Volatile private var commandedYawDegreesPerSecond = 0.0
     private var sendTask: ScheduledFuture<*>? = null
 
     /** Frames the aircraft accepted since the stream started, and failures. */
@@ -155,12 +155,12 @@ class VirtualStickSession(
     fun setStick(side: StickSide, x: Double, y: Double) {
         when (side) {
             StickSide.LEFT -> {
-                yawRate = x.coerceIn(-1.0, 1.0) * MAX_YAW_DEGREES_PER_SECOND
-                up = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
+                commandedYawDegreesPerSecond = x.coerceIn(-1.0, 1.0) * MAX_YAW_DEGREES_PER_SECOND
+                commandedClimbMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
             }
             StickSide.RIGHT -> {
-                right = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
-                forward = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                commandedRightMetersPerSecond = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                commandedForwardMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
             }
         }
     }
@@ -172,18 +172,18 @@ class VirtualStickSession(
      * decides which, and the aircraft never receives two vertical intents.
      */
     fun setClimbRate(metersPerSecond: Double) {
-        up = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
+        commandedClimbMetersPerSecond = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
     }
 
     /** Yaw-only command for a closed-loop turn; positive is clockwise. */
     fun setYawRate(degreesPerSecond: Double) {
-        yawRate = degreesPerSecond.coerceIn(-MAX_YAW_DEGREES_PER_SECOND, MAX_YAW_DEGREES_PER_SECOND)
+        commandedYawDegreesPerSecond = degreesPerSecond.coerceIn(-MAX_YAW_DEGREES_PER_SECOND, MAX_YAW_DEGREES_PER_SECOND)
     }
 
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
     fun setForwardOnly(metersPerSecond: Double) {
-        forward = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
-        right = 0.0
+        commandedForwardMetersPerSecond = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        commandedRightMetersPerSecond = 0.0
     }
 
     /** Body-frame horizontal velocity for autonomous tracking. */
@@ -191,8 +191,8 @@ class VirtualStickSession(
         forwardMetersPerSecond: Double,
         rightMetersPerSecond: Double,
     ) {
-        forward = forwardMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
-        right = rightMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        commandedForwardMetersPerSecond = forwardMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        commandedRightMetersPerSecond = rightMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
     }
 
 
@@ -222,11 +222,20 @@ class VirtualStickSession(
                 // commanded: enough to prove the stream is alive and what it
                 // carries, without the flood that destroyed earlier evidence.
                 if (frameCount % FRAME_RATE_HZ == 0L) {
-                    val moving = forward != 0.0 || right != 0.0 || up != 0.0 || yawRate != 0.0
+                    val moving =
+                        commandedForwardMetersPerSecond != 0.0 ||
+                            commandedRightMetersPerSecond != 0.0 ||
+                            commandedClimbMetersPerSecond != 0.0 ||
+                            commandedYawDegreesPerSecond != 0.0
                     if (moving || frameFailures > 0) {
                         onFrameSummary(
                             "frames=$frameCount fails=$frameFailures " +
-                                "fwd=%.2f right=%.2f up=%.2f yaw=%.1f".format(forward, right, up, yawRate),
+                                "fwd=%.2f right=%.2f up=%.2f yaw=%.1f".format(
+                                    commandedForwardMetersPerSecond,
+                                    commandedRightMetersPerSecond,
+                                    commandedClimbMetersPerSecond,
+                                    commandedYawDegreesPerSecond,
+                                ),
                         )
                     }
                 }
@@ -248,18 +257,18 @@ class VirtualStickSession(
     }
 
     private fun zeroAxes() {
-        forward = 0.0
-        right = 0.0
-        up = 0.0
-        yawRate = 0.0
+        commandedForwardMetersPerSecond = 0.0
+        commandedRightMetersPerSecond = 0.0
+        commandedClimbMetersPerSecond = 0.0
+        commandedYawDegreesPerSecond = 0.0
     }
 
     private fun currentParam(): VirtualStickFlightControlParam =
         VirtualStickFlightControlParam().apply {
-            roll = forward
-            pitch = right
-            verticalThrottle = up
-            yaw = yawRate
+            roll = commandedForwardMetersPerSecond
+            pitch = commandedRightMetersPerSecond
+            verticalThrottle = commandedClimbMetersPerSecond
+            yaw = commandedYawDegreesPerSecond
             rollPitchControlMode = RollPitchControlMode.VELOCITY
             verticalControlMode = VerticalControlMode.VELOCITY
             yawControlMode = YawControlMode.ANGULAR_VELOCITY

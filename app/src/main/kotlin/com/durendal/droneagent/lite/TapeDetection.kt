@@ -2,6 +2,30 @@ package com.durendal.droneagent.lite
 
 import kotlin.math.atan2
 
+/** Aircraft reference point shared by measurement, control, and the preview overlay. */
+internal const val TRACKING_TARGET_X_FRACTION = 0.5
+internal const val TRACKING_TARGET_Y_FRACTION = 0.94
+
+/**
+ * How much of the tape path this frame's image evidence actually supports.
+ *
+ * [FULL_PATH] is the only verdict that may drive Pure Pursuit: a credible
+ * near-field centerline that also carries a usable arc-length lookahead.
+ * [NEAR_FIELD_ONLY] means the aircraft still knows which way the tape under it
+ * runs but has no trustworthy path ahead, so translation must stop and only a
+ * bounded in-place alignment is allowed. [LOST] means even the near field is
+ * not credible and every motion command must be zero.
+ *
+ * [LOST] is deliberately never a property of a [TapeDetection]: a lost path is
+ * reported as no detection at all. Keeping it in this enum is what lets the
+ * controller answer every frame — detected or not — with one quality value.
+ */
+enum class PathQuality {
+    FULL_PATH,
+    NEAR_FIELD_ONLY,
+    LOST,
+}
+
 /**
  * PATH follows a sampled tape centerline and is the passive preview default, so
  * curved tape is outlined before the operator enables autonomous tracking.
@@ -11,7 +35,33 @@ internal enum class TapeDetectionMode {
     PATH,
 }
 
-/** A black-tape candidate expressed in source-frame proportions. */
+/**
+ * The point on the tape the aircraft should steer toward, in source-frame
+ * proportions.
+ *
+ * The two coordinates travel together because half a look-ahead point is not a
+ * weaker look-ahead, it is a bug: a path is either followed far enough ahead to
+ * aim at, or it is not followed far enough at all.
+ */
+data class TapeLookahead(
+    val xFraction: Double,
+    val yFraction: Double,
+) {
+    init {
+        require(xFraction in 0.0..1.0) { "lookahead x must be a frame fraction" }
+        require(yFraction in 0.0..1.0) { "lookahead y must be a frame fraction" }
+    }
+}
+
+/**
+ * A black-tape candidate expressed in source-frame proportions.
+ *
+ * [quality] is derived from [lookahead] rather than stored, and [lookahead] has
+ * no default, so a caller cannot claim [PathQuality.FULL_PATH] for a path it
+ * could not follow ahead, nor arrive at one by omission. That
+ * equivalence is the contract itself: a trustworthy look-ahead point is exactly
+ * what separates a path the controller may pursue from one it may only align to.
+ */
 data class TapeDetection(
     val sourceWidth: Int,
     val sourceHeight: Int,
@@ -22,9 +72,27 @@ data class TapeDetection(
     val nearFieldOffsetFraction: Double,
     val anchorXFraction: Double = bounds.centerX,
     val anchorYFraction: Double = bounds.bottom,
-    val lookaheadXFraction: Double = bounds.centerX,
-    val lookaheadYFraction: Double = bounds.top,
+    /**
+     * Deliberately has no default. A default derived from [bounds] would hand
+     * every forgetful caller a made-up look-ahead point and, with it,
+     * [PathQuality.FULL_PATH] — the exact silent promotion this contract exists
+     * to prevent. Whether the path was followed far enough to aim at is a fact
+     * the measurement stage knows and must state.
+     */
+    val lookahead: TapeLookahead?,
+    /**
+     * Whether the far end of the chain stops inside the frame. Only then may the
+     * mission layer treat shortening as an approaching end of tape; a chain cut
+     * off by the border says the tape left the view, which is the opposite.
+     */
+    val endpointCandidate: Boolean = false,
+    /** A closed loop has no end to reach and must never trigger a turnaround. */
+    val closedLoop: Boolean = false,
+    val centerline: TapeCenterlinePath? = null,
 ) {
+    val quality: PathQuality
+        get() = if (lookahead == null) PathQuality.NEAR_FIELD_ONLY else PathQuality.FULL_PATH
+
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
         require(confidence in 0.0..1.0)
@@ -32,7 +100,6 @@ data class TapeDetection(
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
         require(anchorXFraction in 0.0..1.0 && anchorYFraction in 0.0..1.0)
-        require(lookaheadXFraction in 0.0..1.0 && lookaheadYFraction in 0.0..1.0)
     }
 }
 
@@ -65,30 +132,23 @@ internal object TapeOrientation {
         return Math.toDegrees(atan2(upwardX, -upwardY)).coerceIn(-90.0, 90.0)
     }
 }
-internal data class TapeCandidateMetrics(
-    val areaFraction: Double,
-    val aspectRatio: Double,
-    val shortSideFraction: Double,
-    val longSideFraction: Double,
-    val orientedFill: Double,
-    val surroundingFloor: Double,
-    val minimumSideFloor: Double = 1.0,
-    val touchesHorizontalFrameEdge: Boolean = false,
-    val overlapsPreviousDetection: Boolean = false,
-)
 
 internal enum class TapeCandidateRejection {
     INVALID_GEOMETRY,
     AREA,
-    ASPECT,
     LENGTH,
     CURVATURE,
     DIRECTION_CONTINUITY,
-    WIDTH,
     HORIZONTAL_FRAME_EDGE,
-    ORIENTED_FILL,
     CHROMA,
     FLOOR_CONTEXT,
+    BOARD_COLOR_CONTEXT,
+    NO_CENTERLINE,
+    NO_NEAR_FIELD_COMPONENT,
+    INSUFFICIENT_LOOKAHEAD,
+    AMBIGUOUS_BRANCH,
+    TEMPORAL_DISCONTINUITY,
+    BRIDGE_REJECTED,
 }
 
 internal object TapeLuminancePolicy {
@@ -98,64 +158,3 @@ internal object TapeLuminancePolicy {
     private const val MAX_TAPE_LUMINANCE = 105.0
 }
 
-internal object TapeCandidatePolicy {
-    fun rejectionReason(metrics: TapeCandidateMetrics): TapeCandidateRejection? {
-        if (metrics.areaFraction !in MIN_AREA_FRACTION..MAX_AREA_FRACTION) {
-            return TapeCandidateRejection.AREA
-        }
-        val minimumAspectRatio =
-            if (metrics.overlapsPreviousDetection) MIN_TRACKED_ASPECT_RATIO else MIN_ASPECT_RATIO
-        if (metrics.aspectRatio < minimumAspectRatio) {
-            return TapeCandidateRejection.ASPECT
-        }
-        val minimumLongSideFraction =
-            if (metrics.overlapsPreviousDetection) {
-                MIN_TRACKED_LONG_SIDE_FRACTION
-            } else {
-                MIN_LONG_SIDE_FRACTION
-            }
-        if (metrics.longSideFraction < minimumLongSideFraction) {
-            return TapeCandidateRejection.LENGTH
-        }
-        if (metrics.shortSideFraction !in MIN_SHORT_SIDE_FRACTION..MAX_SHORT_SIDE_FRACTION) {
-            return TapeCandidateRejection.WIDTH
-        }
-        if (metrics.touchesHorizontalFrameEdge && !metrics.overlapsPreviousDetection) {
-            return TapeCandidateRejection.HORIZONTAL_FRAME_EDGE
-        }
-        if (metrics.orientedFill < MIN_ORIENTED_FILL) {
-            return TapeCandidateRejection.ORIENTED_FILL
-        }
-        if (
-            metrics.surroundingFloor < MIN_SURROUNDING_FLOOR ||
-            metrics.minimumSideFloor < MIN_SIDE_FLOOR
-        ) {
-            return TapeCandidateRejection.FLOOR_CONTEXT
-        }
-        return null
-    }
-
-    fun score(metrics: TapeCandidateMetrics): Double? {
-        if (rejectionReason(metrics) != null) return null
-        val aspectConfidence = (metrics.aspectRatio / IDEAL_ASPECT_RATIO).coerceIn(0.0, 1.0)
-        val floorConfidence = (metrics.surroundingFloor + metrics.minimumSideFloor) / 2.0
-        return (
-            metrics.orientedFill * 0.40 +
-                floorConfidence * 0.35 +
-                aspectConfidence * 0.25
-            ).coerceIn(0.0, 1.0)
-    }
-
-    private const val MIN_AREA_FRACTION = 0.0008
-    private const val MAX_AREA_FRACTION = 0.18
-    private const val MIN_ASPECT_RATIO = 2.2
-    private const val MIN_TRACKED_ASPECT_RATIO = 1.5
-    private const val MIN_SHORT_SIDE_FRACTION = 0.035
-    private const val MAX_SHORT_SIDE_FRACTION = 0.20
-    private const val MIN_LONG_SIDE_FRACTION = 0.25
-    private const val MIN_TRACKED_LONG_SIDE_FRACTION = 0.15
-    private const val MIN_ORIENTED_FILL = 0.30
-    private const val MIN_SURROUNDING_FLOOR = 0.22
-    private const val MIN_SIDE_FLOOR = 0.30
-    private const val IDEAL_ASPECT_RATIO = 8.0
-}

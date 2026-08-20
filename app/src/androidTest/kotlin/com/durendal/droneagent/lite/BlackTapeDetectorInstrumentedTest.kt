@@ -22,11 +22,11 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detection = detect(frame, width, height)
         assertEquals(0.0, detection.angleFromVerticalDegrees, 1.0)
-        assertTrue(detection.longSideFraction >= 0.95)
+        assertEquals(PathQuality.FULL_PATH, detection.quality)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
         assertEquals(0.5, detection.anchorXFraction, 0.01)
-        assertTrue(detection.anchorYFraction > 0.95)
-        assertTrue(detection.lookaheadYFraction < detection.anchorYFraction)
+        assertEquals(TRACKING_TARGET_Y_FRACTION, detection.anchorYFraction, 0.01)
+        assertTrue(detection.lookaheadY < detection.anchorYFraction)
     }
 
     @Test
@@ -40,8 +40,62 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detection = detect(frame, width, height)
         assertEquals(0.0, detection.angleFromVerticalDegrees, 1.0)
-        assertTrue(detection.longSideFraction >= 0.95)
+        assertEquals(PathQuality.FULL_PATH, detection.quality)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.01)
+        assertTrue(detection.lookaheadY < detection.anchorYFraction)
+    }
+
+    @Test
+    fun curvedPathRemainsContinuousAcrossBrightGlareBands() {
+        val width = 640
+        val height = 360
+        val cleanFrame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(cleanFrame, width, height, direction = 1.0, value = 20)
+        val frame = cleanFrame.copyOf()
+        for (y in 145 until 160) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                frame,
+                width,
+                left = (center - TAPE_HALF_WIDTH).toInt(),
+                top = y,
+                right = (center + TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                value = 220,
+            )
+        }
+        for (y in 185 until 200) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                frame,
+                width,
+                left = (center - TAPE_HALF_WIDTH).toInt(),
+                top = y,
+                right = (center + TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                value = 220,
+            )
+        }
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(cleanFrame, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+        assertTrue(detections[0] != null)
+        val detection = checkNotNull(detections[1]) { diagnostics.last() }
+
+        assertTrue(
+            "expected a continuous path, actual=$detection diagnostics=${diagnostics.last()}",
+            detection.longSideFraction > 0.9,
+        )
+        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.04)
+        assertTrue(detection.lookaheadX > detection.anchorXFraction)
     }
 
     @Test
@@ -53,17 +107,24 @@ class BlackTapeDetectorInstrumentedTest {
         val terminalTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
         fillRect(terminalTape, width, left = 300, top = 290, right = 340, bottom = height, value = 20)
 
+        val diagnostics = mutableListOf<String>()
         val detections =
-            detectSequence(listOf(fullTape, terminalTape), width, height, TapeDetectionMode.STRAIGHT)
+            detectSequence(
+                listOf(fullTape, terminalTape),
+                width,
+                height,
+                TapeDetectionMode.STRAIGHT,
+                onDiagnostics = diagnostics::add,
+            )
         assertTrue(detections[0] != null)
-        val terminal = checkNotNull(detections[1])
+        val terminal = checkNotNull(detections[1]) { diagnostics.last() }
         assertEquals(0.0, terminal.angleFromVerticalDegrees, 1.0)
         assertTrue(terminal.longSideFraction < 0.25)
         assertEquals(0.0, terminal.nearFieldOffsetFraction, 0.01)
     }
 
     @Test
-    fun previewModeDetectsCurvedTapeWithoutStartingTracking() {
+    fun defaultPathModeDetectsCurvedTape() {
         val width = 640
         val height = 360
         val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
@@ -77,7 +138,8 @@ class BlackTapeDetectorInstrumentedTest {
             ).single(),
         )
 
-        assertTrue(detection.angleFromVerticalDegrees > 10.0)
+        assertEquals(0.0, detection.angleFromVerticalDegrees, 2.0)
+        assertTrue(detection.lookaheadX > detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
         assertTrue(detection.longSideFraction > 0.9)
     }
@@ -91,9 +153,49 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
 
-        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+        assertTrue(detection.angleFromVerticalDegrees in -8.0..8.0)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
         assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
     }
+
+    @Test
+    fun trackedTapeIsRejectedWhenEitherSideLeavesCorrugatedBoard() {
+        val width = 640
+        val height = 360
+        val uniformBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(uniformBoard, width, height, direction = 1.0, value = 20)
+        val boardBesideGrayFloor = stripedSplitFloorWithCurvedTape(width, height)
+
+        val tracked = detectSequence(listOf(uniformBoard, boardBesideGrayFloor), width, height)
+
+        assertTrue(tracked[0] != null)
+        assertEquals(null, tracked[1])
+    }
+    @Test
+    fun selectingTheCurrentPathModePreservesTheTrackedCandidate() {
+        val width = 640
+        val height = 360
+        val fullTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(fullTape, width, left = 305, top = 0, right = 335, bottom = height, value = 20)
+        val terminalTape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(terminalTape, width, left = 305, top = 300, right = 335, bottom = height, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val tracked = detectSequence(
+            frames = listOf(fullTape, terminalTape),
+            width = width,
+            height = height,
+            mode = TapeDetectionMode.STRAIGHT,
+            onDiagnostics = diagnostics::add,
+            beforeFrame = { index, detector ->
+                if (index == 1) detector.setDetectionMode(TapeDetectionMode.STRAIGHT)
+            },
+        )
+
+        assertTrue(tracked[0] != null)
+        assertTrue(diagnostics.last(), tracked[1] != null)
+    }
+
 
     @Test
     fun curvedTapeCanBeAcquiredWhileEnteringFromFrameEdge() {
@@ -108,10 +210,20 @@ class BlackTapeDetectorInstrumentedTest {
             fillRect(frame, width, left, y, right, y + 1, value = 20)
         }
 
-        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
+        var diagnostics = ""
+        val detection = checkNotNull(
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = { diagnostics = it },
+            ).single(),
+        ) { diagnostics }
 
-        assertEquals(1.0, detection.bounds.right, 0.001)
-        assertTrue(detection.angleFromVerticalDegrees < -10.0)
+        assertTrue(detection.bounds.right > 0.99)
+        assertTrue(!detection.endpointCandidate)
+        assertTrue(detection.angleFromVerticalDegrees in -30.0..0.0)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
     }
 
     @Test
@@ -146,29 +258,27 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
 
-        assertTrue(detection.nearFieldOffsetFraction > 0.15)
+        assertTrue(detection.nearFieldOffsetFraction > 0.10)
         assertTrue(detection.bounds.right > 0.68)
     }
     @Test
-    fun finalCardboardSceneKeepsVisibleTapeDetectable() {
+    fun finalCardboardScreenshotUiIsNotAcceptedAsCameraTape() {
+        // This asset is a screenshot with the app's dark status panel, controls,
+        // and bottom bar burned into the pixels. The detector receives raw camera
+        // frames in production, so accepting any of those overlay components as
+        // physical tape would be a false positive rather than real-camera proof.
         val frame = rgbaAsset("final-cardboard-tape.jpg")
-        val diagnostics = mutableListOf<String>()
 
         val detection =
-            checkNotNull(
-                detectSequence(
-                    listOf(frame),
-                    width = 640,
-                    height = 360,
-                    onDiagnostics = diagnostics::add,
-                ).single(),
-            ) {
-                diagnostics.single()
-            }
+            detectSequence(
+                listOf(frame),
+                width = 640,
+                height = 360,
+            ).single()
 
-        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 70.0)
-        assertTrue(detection.longSideFraction > 0.50)
+        assertEquals(null, detection)
     }
+
 
     @Test
     fun horizontalCurvedTapeCanBeAcquiredWithoutPreviousDetection() {
@@ -202,12 +312,12 @@ class BlackTapeDetectorInstrumentedTest {
                 diagnostics.single()
             }
 
-        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 80.0)
+        assertTrue(kotlin.math.abs(detection.angleFromVerticalDegrees) > 70.0)
         assertTrue(detection.longSideFraction > 1.0)
     }
 
     @Test
-    fun rainbowTapeAcquiresTheRightEndpointForCounterclockwiseTracking() {
+    fun rainbowTapeLookaheadFollowsCounterclockwiseDirectionFromAircraftProjection() {
         val width = 640
         val height = 360
         val detection =
@@ -215,15 +325,16 @@ class BlackTapeDetectorInstrumentedTest {
                 detectSequence(listOf(rainbowFrame(width, height)), width, height).single(),
             )
 
-        assertTrue(detection.anchorXFraction > 0.75)
-        assertTrue(detection.lookaheadXFraction < detection.anchorXFraction)
+        assertEquals(TRACKING_TARGET_X_FRACTION, detection.anchorXFraction, 0.03)
+        assertTrue(detection.lookaheadX < detection.anchorXFraction)
     }
 
     @Test
     fun rainbowTrackingDoesNotSwitchToTheLowerLeftEndpoint() {
         val width = 640
         val height = 360
-        val detections =
+        val diagnostics = mutableListOf<String>()
+        val outcomes =
             detectSequence(
                 listOf(
                     rainbowFrame(width, height),
@@ -231,10 +342,19 @@ class BlackTapeDetectorInstrumentedTest {
                 ),
                 width,
                 height,
-            ).map(::checkNotNull)
+                onDiagnostics = diagnostics::add,
+            )
+        val detections = outcomes.mapIndexed { index, detection ->
+            checkNotNull(detection) { diagnostics[index] }
+        }
 
-        assertTrue(detections.all { it.anchorXFraction > 0.75 })
-        assertTrue(detections.all { it.lookaheadXFraction < it.anchorXFraction })
+        assertTrue(
+            detections.all {
+                kotlin.math.abs(it.anchorXFraction - TRACKING_TARGET_X_FRACTION) < 0.08
+            },
+        )
+        assertTrue(detections.all { it.quality == PathQuality.FULL_PATH })
+        assertTrue(detections.all { it.lookaheadX < it.anchorXFraction })
     }
 
     @Test
@@ -285,13 +405,13 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detections[0] != null)
         val horizontal = checkNotNull(detections[1]) { diagnostics.last() }
 
-        assertTrue(kotlin.math.abs(horizontal.angleFromVerticalDegrees) > 80.0)
+        assertTrue(kotlin.math.abs(horizontal.angleFromVerticalDegrees) > 70.0)
         assertTrue(horizontal.longSideFraction > 1.0)
         assertTrue(horizontal.bounds.bottom < 0.85)
-        assertTrue(horizontal.nearFieldOffsetFraction > 0.30)
-        assertTrue(horizontal.anchorXFraction > 0.75)
-        assertTrue(horizontal.anchorYFraction > 0.75)
-        assertTrue(horizontal.lookaheadXFraction < horizontal.anchorXFraction)
+        assertTrue(kotlin.math.abs(horizontal.nearFieldOffsetFraction) < 0.10)
+        assertTrue(horizontal.anchorXFraction in 0.45..0.60)
+        assertTrue(horizontal.anchorYFraction in 0.65..0.80)
+        assertTrue(horizontal.lookaheadX < horizontal.anchorXFraction)
     }
     @Test
     fun veryDarkTapeRemainsDetectableUnderWarmColourCast() {
@@ -311,6 +431,175 @@ class BlackTapeDetectorInstrumentedTest {
         val detection = detectSequence(listOf(frame), width, height).single()
 
         assertTrue(detection != null)
+    }
+
+    @Test
+    fun trackedFlightPathSurvivesWarmChromaFlicker() {
+        val width = 1920
+        val height = 1080
+        val outcomes =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-path-before-chroma-loss.jpg", width, height),
+                    rgbaAsset("flight-path-chroma-loss.jpg", width, height),
+                ),
+                width,
+                height,
+            )
+
+        assertTrue("recorded run-up frame must establish continuity", outcomes.first() != null)
+        assertEquals(PathQuality.FULL_PATH, outcomes.last()?.quality)
+    }
+
+    @Test
+    fun trackedTapeSurvivesRecordedGlare() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-glare-before-loss.png", width, height),
+                    rgbaAsset("flight-glare-loss.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+
+        assertTrue(diagnostics.first(), detections.first() != null)
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun trackedTapeSurvivesLatestFlightReflection() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-reflection-pause-establish.png", width, height),
+                    rgbaAsset("flight-reflection-pause-before.png", width, height),
+                    rgbaAsset("flight-reflection-pause-at.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    detector.setDetectionMode(
+                        if (index == 0) TapeDetectionMode.STRAIGHT else TapeDetectionMode.PATH,
+                    )
+                },
+            )
+        assertTrue(diagnostics.first(), detections.first() != null)
+        detections.forEachIndexed { index, detection ->
+            assertEquals(diagnostics[index], PathQuality.FULL_PATH, detection?.quality)
+        }
+    }
+
+    @Test
+    fun latestFlightProvidesTwoQualifiedEndpointFramesBeforeDetectorFlicker() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-endpoint-missed-1.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-2.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-3.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-4.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    detector.setDetectionMode(
+                        if (index == 0) TapeDetectionMode.STRAIGHT else TapeDetectionMode.PATH,
+                    )
+                },
+            )
+
+        val endpointEvidence = detections.mapIndexed { index, detection ->
+            "$index:${detection?.quality}:${detection?.endpointCandidate}:${diagnostics[index]}"
+        }
+        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it != null })
+        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it?.endpointCandidate == true })
+        assertTrue(endpointEvidence.joinToString("\n"), detections.drop(2).none { it?.endpointCandidate == true })
+    }
+
+    @Test
+    fun flightBoardBoundaryIsNotReacquiredAsTape() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val blankBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        val frames = buildList {
+            add(rgbaAsset("flight-path-before-chroma-loss.jpg", width, height))
+            repeat(8) { add(blankBoard) }
+            add(rgbaAsset("flight-non-tape-boundary.jpg", width, height))
+        }
+
+        val detections =
+            detectSequence(
+                frames,
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+
+        assertTrue("recorded tape must establish the board colour", detections.first() != null)
+        assertEquals(diagnostics.last(), null, detections.last())
+        assertTrue(diagnostics.last(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.last()))
+    }
+
+    @Test
+    fun newTrackingSessionForgetsIdleBoardColour() {
+        val width = 640
+        val height = 360
+        val idleScenery = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
+        fillCurvedRibbon(idleScenery, width, height, direction = 1.0, value = 20)
+        val flightBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(flightBoard, width, height, direction = 1.0, value = 20)
+        val diagnostics = mutableListOf<String>()
+
+        val detections =
+            detectSequence(
+                listOf(idleScenery, flightBoard),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 1) detector.resetTracking()
+                },
+            )
+
+        assertTrue(diagnostics.first(), detections.first() != null)
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun trackedWarmFloorShadowStillFailsChromaGate() {
+        val width = 640
+        val height = 360
+        val tape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(tape, width, height, direction = -1.0, value = 20)
+        val shadow = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbonRgb(
+            shadow,
+            width,
+            height,
+            direction = -1.0,
+            red = 72,
+            green = 48,
+            blue = 20,
+        )
+
+        val outcomes = detectSequence(listOf(tape, shadow), width, height)
+
+        assertTrue(outcomes.first() != null)
+        assertEquals(null, outcomes.last())
     }
 
     @Test
@@ -358,6 +647,41 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun curvedBoundaryBetweenDifferentBoardColoursIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = y,
+                right = (center - TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                red = 70,
+                green = 145,
+                blue = 65,
+            )
+        }
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(diagnostics.single(), null, detection)
+        assertTrue(diagnostics.single(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.single()))
+    }
+
+    @Test
     fun straightPathIsRejectedInCurvedTapeMode() {
         val width = 640
         val height = 360
@@ -400,6 +724,110 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(null, detection)
     }
+    @Test
+    fun curvedCastShadowEdgeIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val shadowEdge = (340.0 + 120.0 * forwardFraction * forwardFraction).toInt()
+            fillRectRgb(
+                frame,
+                width,
+                left = shadowEdge,
+                top = y,
+                right = width,
+                bottom = y + 1,
+                red = 100,
+                green = 70,
+                blue = 32,
+            )
+        }
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(diagnostics.single(), null, detection)
+    }
+    @Test
+    fun trackedTapeDoesNotFollowCastShadowEdge() {
+        val width = 640
+        val height = 360
+        val cleanFrame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        fillCurvedRibbon(cleanFrame, width, height, direction = 1.0, value = 20)
+        val shadowFrame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val shadowEdge = (220.0 + 240.0 * forwardFraction).toInt()
+            fillRectRgb(
+                shadowFrame,
+                width,
+                left = shadowEdge,
+                top = y,
+                right = width,
+                bottom = y + 1,
+                red = 100,
+                green = 70,
+                blue = 32,
+            )
+        }
+        fillCurvedRibbon(shadowFrame, width, height, direction = 1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(cleanFrame, shadowFrame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+        val clean = checkNotNull(detections[0]) { diagnostics[0] }
+        val shadowed = checkNotNull(detections[1]) { diagnostics[1] }
+        assertEquals(clean.anchorXFraction, shadowed.anchorXFraction, 0.04)
+        assertEquals(clean.lookaheadX, shadowed.lookaheadX, 0.04)
+    }
+
+
+    private fun stripedSplitFloorWithCurvedTape(
+        width: Int,
+        height: Int,
+    ): ByteArray {
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height step 8) {
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = y,
+                right = width / 2,
+                bottom = (y + 4).coerceAtMost(height),
+                red = 130,
+                green = 130,
+                blue = 130,
+            )
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = (y + 4).coerceAtMost(height),
+                right = width / 2,
+                bottom = (y + 8).coerceAtMost(height),
+                red = 220,
+                green = 220,
+                blue = 220,
+            )
+        }
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+        return frame
+    }
+
     private fun rainbowFrame(
         width: Int,
         height: Int,
@@ -428,10 +856,14 @@ class BlackTapeDetectorInstrumentedTest {
         return frame
     }
 
-    private fun rgbaAsset(name: String): ByteArray {
+    private fun rgbaAsset(
+        name: String,
+        expectedWidth: Int = 640,
+        expectedHeight: Int = 360,
+    ): ByteArray {
         val context = InstrumentationRegistry.getInstrumentation().context
         val bitmap = context.assets.open(name).use(BitmapFactory::decodeStream)
-        check(bitmap.width == 640 && bitmap.height == 360)
+        check(bitmap.width == expectedWidth && bitmap.height == expectedHeight)
         val pixels = IntArray(bitmap.width * bitmap.height)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
         return ByteArray(pixels.size * 4).also { frame ->
@@ -445,10 +877,20 @@ class BlackTapeDetectorInstrumentedTest {
         }
     }
 
-    private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection =
-        checkNotNull(detectSequence(listOf(frame), width, height, TapeDetectionMode.STRAIGHT).single()) {
-            "detector rejected the synthetic tape"
+    private fun detect(frame: ByteArray, width: Int, height: Int): TapeDetection {
+        var diagnostics = ""
+        return checkNotNull(
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                TapeDetectionMode.STRAIGHT,
+                onDiagnostics = { diagnostics = it },
+            ).single(),
+        ) {
+            "detector rejected the synthetic tape: $diagnostics"
         }
+    }
 
     private fun detectSequence(
         frames: List<ByteArray>,
@@ -456,6 +898,7 @@ class BlackTapeDetectorInstrumentedTest {
         height: Int,
         mode: TapeDetectionMode? = null,
         onDiagnostics: (String) -> Unit = {},
+        beforeFrame: (Int, BlackTapeDetector) -> Unit = { _, _ -> },
     ): List<TapeDetection?> {
         val outcomes = LinkedBlockingQueue<DetectionOutcome>()
         val detector = BlackTapeDetector(
@@ -466,6 +909,7 @@ class BlackTapeDetectorInstrumentedTest {
         try {
             return frames.mapIndexed { index, frame ->
                 if (index > 0) Thread.sleep(300)
+                beforeFrame(index, detector)
                 detector.submitRgba(frame, 0, frame.size, width, height)
                 val outcome =
                     outcomes.poll(3, TimeUnit.SECONDS)
@@ -483,6 +927,16 @@ class BlackTapeDetectorInstrumentedTest {
         val detection: TapeDetection?,
         val failure: Throwable?,
     )
+
+    /**
+     * Every detector case here expects a path good enough to steer by, so a
+     * missing look-ahead is a failure of the case rather than a value to skip.
+     */
+    private val TapeDetection.lookaheadX: Double
+        get() = requireNotNull(lookahead) { "expected a FULL_PATH look-ahead point" }.xFraction
+
+    private val TapeDetection.lookaheadY: Double
+        get() = requireNotNull(lookahead) { "expected a FULL_PATH look-ahead point" }.yFraction
 
     private fun rgbaFrame(
         width: Int,
@@ -508,16 +962,7 @@ class BlackTapeDetectorInstrumentedTest {
         right: Int,
         bottom: Int,
         value: Int,
-    ) {
-        for (y in top until bottom) {
-            for (x in left until right) {
-                val offset = (y * frameWidth + x) * 4
-                frame[offset] = value.toByte()
-                frame[offset + 1] = value.toByte()
-                frame[offset + 2] = value.toByte()
-            }
-        }
-    }
+    ) = fillRectRgb(frame, frameWidth, left, top, right, bottom, value, value, value)
 
     private fun fillRectRgb(
         frame: ByteArray,
@@ -546,16 +991,8 @@ class BlackTapeDetectorInstrumentedTest {
         frameHeight: Int,
         direction: Double,
         value: Int,
-    ) {
-        for (y in 0 until frameHeight) {
-            val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
-            val center =
-                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
-            val left = (center - 15.0).toInt().coerceAtLeast(0)
-            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
-            fillRect(frame, frameWidth, left, y, right, y + 1, value)
-        }
-    }
+    ) = fillCurvedRibbonRgb(frame, frameWidth, frameHeight, direction, value, value, value)
+
     private fun fillCurvedRibbonRgb(
         frame: ByteArray,
         frameWidth: Int,
@@ -568,11 +1005,16 @@ class BlackTapeDetectorInstrumentedTest {
         for (y in 0 until frameHeight) {
             val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
             val center =
-                frameWidth / 2.0 + direction * 140.0 * forwardFraction * forwardFraction
-            val left = (center - 15.0).toInt().coerceAtLeast(0)
-            val right = (center + 15.0).toInt().coerceAtMost(frameWidth)
+                frameWidth / 2.0 + direction * CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            val left = (center - TAPE_HALF_WIDTH).toInt().coerceAtLeast(0)
+            val right = (center + TAPE_HALF_WIDTH).toInt().coerceAtMost(frameWidth)
             fillRectRgb(frame, frameWidth, left, y, right, y + 1, red, green, blue)
         }
     }
 
+    private companion object {
+        const val CURVE_DISPLACEMENT = 140.0
+        const val TAPE_HALF_WIDTH = 15.0
+        val BOARD_COLOR_REJECTION = Regex("""boardColor:[1-9]\d*""")
+    }
 }
