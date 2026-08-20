@@ -211,10 +211,16 @@ internal class TapeTrackingController {
                     !endpointQualificationArmed &&
                     abs(observation.angleFromVerticalDegrees) > ALIGNMENT_TOLERANCE_DEGREES
                 ) {
-                    clearControlMeasurements()
                     endpointCandidateSinceNanos = 0L
                     consecutiveEndpointDetections = 0
                     endpointReferenceBounds = null
+                    if (
+                        abs(observation.angleFromVerticalDegrees) >
+                        STRAIGHT_REACQUISITION_MAX_ALIGNMENT_ANGLE_DEGREES
+                    ) {
+                        // A near-horizontal fragment is likely a glare edge, not a route.
+                        clearControlMeasurements()
+                    }
                     return
                 }
                 // Length alone is not evidence of an end: only a terminus that
@@ -381,6 +387,23 @@ internal class TapeTrackingController {
                         // mode: keeping speed here advances into unmeasured space.
                         0.0
                     },
+            )
+        }
+        if (
+            !mode.followsCurvedPath &&
+            !endpointQualificationArmed &&
+            abs(controlledAngleDegrees ?: 0.0) > ALIGNMENT_TOLERANCE_DEGREES
+        ) {
+            // Reacquisition may need an in-place yaw before the route is long enough
+            // to re-arm endpoint tracking. Translation remains forbidden.
+            val (yawRate, _) = applyOutputLimits(
+                targetYawRate = desiredYawRate(purePursuitYawRate = null),
+                targetRightSpeed = 0.0,
+                nowNanos = nowNanos,
+            )
+            return decision(
+                phase = phase,
+                yawRateDegreesPerSecond = yawRate,
             )
         }
         if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
@@ -1253,6 +1276,8 @@ internal class TapeTrackingController {
 
     internal companion object {
         const val ALIGNMENT_TOLERANCE_DEGREES = 10.0
+        /** Reject near-horizontal glare fragments while allowing in-place route realignment. */
+        const val STRAIGHT_REACQUISITION_MAX_ALIGNMENT_ANGLE_DEGREES = 45.0
         const val YAW_DEAD_ZONE_DEGREES = 2.0
         const val YAW_PROPORTIONAL_GAIN = 0.3
         const val MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND = 5.0

@@ -322,6 +322,24 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `disarmed straight tracking can yaw toward a credible tilted route`() {
+        val controller = trackingController()
+        controller.observe(observation(0.0, 0.8), seconds(2))
+        controller.observe(null, seconds(3))
+
+        controller.observe(observation(15.0, 0.5), seconds(3) + 250_000_000L)
+        val aligning = controller.tick(seconds(3) + 250_000_000L)
+
+        assertEquals(TapeTrackingPhase.TRACKING, aligning.phase)
+        assertTrue(aligning.yawRateDegreesPerSecond > 0.0)
+        assertEquals(0.0, aligning.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, aligning.rightSpeedMetersPerSecond, 0.0)
+
+        controller.observe(observation(0.0, 0.8), seconds(4))
+        assertTrue(controller.tick(seconds(4)).forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
     fun `long tape reappearing cancels endpoint probe`() {
         val controller = trackingController()
         enterEndpointVerification(controller)
