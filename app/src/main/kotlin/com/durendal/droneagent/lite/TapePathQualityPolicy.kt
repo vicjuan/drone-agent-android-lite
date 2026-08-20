@@ -77,12 +77,14 @@ internal object TapePathQualityPolicy {
         // A branch is actionable ambiguity only when the selected route also
         // leaves a material share of the candidate unexplained. This keeps a
         // high-coverage single path moving while a real T junction still stops.
-        val minimumCoverage =
-            if (estimate.topology.branchCount > 0) {
-                MIN_BRANCHED_PATH_COVERAGE
-            } else {
-                MIN_PATH_COVERAGE
-            }
+        // A closed loop is held to the same standard over the half of itself
+        // its route can reach: the unexplained remainder is the same tape
+        // rejoining itself, not a competing shape.
+        val minimumCoverage = when {
+            estimate.topology.branchCount > 0 -> MIN_BRANCHED_PATH_COVERAGE
+            estimate.topology.closedLoop -> MIN_CLOSED_LOOP_PATH_COVERAGE
+            else -> MIN_PATH_COVERAGE
+        }
         if (pathCoverage < minimumCoverage) {
             return TapePathVerdict(
                 PathQuality.NEAR_FIELD_ONLY,
@@ -165,6 +167,16 @@ internal object TapePathQualityPolicy {
      * extractor is choosing between shapes rather than describing one.
      */
     const val MIN_PATH_COVERAGE = 0.70
+
+    /**
+     * A closed loop's route is a longest path from its lowest skeleton point,
+     * so it traverses about half the cycle and its coverage sits near 0.5 by
+     * construction; the pixels it leaves out are the same tape rejoining
+     * itself (which is also why the extractor reports zero branches for a
+     * loop). Applying [MIN_PATH_COVERAGE] to the reachable half keeps the
+     * same tolerance for genuinely unexplained tape.
+     */
+    const val MIN_CLOSED_LOOP_PATH_COVERAGE = MIN_PATH_COVERAGE / 2
 
     /**
      * A reported skeleton branch may be a medial-axis spur, but only when the

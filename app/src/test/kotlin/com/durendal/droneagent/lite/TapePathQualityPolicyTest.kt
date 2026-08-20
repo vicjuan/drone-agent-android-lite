@@ -40,6 +40,41 @@ class TapePathQualityPolicyTest {
     }
 
     @Test
+    fun `a closed loop is not downgraded for covering only half of itself`() {
+        // A loop's route can explain only about half the candidate's pixels;
+        // the remainder is the same tape rejoining itself, not an unexplained
+        // arm, so half coverage must not read as ambiguity.
+        val verdict = evaluate(points = 120, pathCoverage = 0.5, closedLoop = true)
+
+        assertEquals(PathQuality.FULL_PATH, verdict.quality)
+        assertTrue(verdict.lookahead != null)
+        assertNull(verdict.rejection)
+    }
+
+    @Test
+    fun `a reported branch still stops a candidate marked as closed loop`() {
+        val verdict = evaluate(
+            points = 120,
+            branchCount = 1,
+            pathCoverage = 0.5,
+            closedLoop = true,
+        )
+
+        assertEquals(PathQuality.NEAR_FIELD_ONLY, verdict.quality)
+        assertNull("a branch must not hand over a target", verdict.lookahead)
+        assertEquals(TapeCandidateRejection.AMBIGUOUS_BRANCH, verdict.rejection)
+    }
+
+    @Test
+    fun `an open chain at half coverage is still ambiguous`() {
+        val verdict = evaluate(points = 120, pathCoverage = 0.5)
+
+        assertEquals(PathQuality.NEAR_FIELD_ONLY, verdict.quality)
+        assertNull("ambiguous coverage must not hand over a target", verdict.lookahead)
+        assertEquals(TapeCandidateRejection.AMBIGUOUS_BRANCH, verdict.rejection)
+    }
+
+    @Test
     fun `a chain with no usable look-ahead is near field only`() {
         // Long enough for the near field to be credible, but too short for the
         // look-ahead to travel a usable distance.
@@ -134,6 +169,7 @@ class TapePathQualityPolicyTest {
         widthConsistency: Double = 1.0,
         anchorBottomOffset: Double = 1.0,
         pathCoverage: Double = 1.0,
+        closedLoop: Boolean = false,
     ): TapePathVerdict {
         val chain = (0 until points).map { index ->
             CenterlinePoint(
@@ -142,7 +178,7 @@ class TapePathQualityPolicyTest {
                 widthPixels = 24.0,
             )
         }
-        val estimate = estimate(chain, branchCount, widthConsistency)
+        val estimate = estimate(chain, branchCount, widthConsistency, closedLoop)
         return TapePathQualityPolicy.evaluate(
             estimate = estimate,
             measurement = CenterlineMeasurement.measure(estimate, FRAME_WIDTH, FRAME_HEIGHT),
@@ -156,13 +192,19 @@ class TapePathQualityPolicyTest {
         points: List<CenterlinePoint>,
         branchCount: Int = 0,
         widthConsistency: Double = 1.0,
+        closedLoop: Boolean = false,
     ) = CenterlineEstimate(
         points = points,
         confidence = 1.0,
         components = CenterlineConfidence(1.0, widthConsistency, 1.0, 1.0, 1.0),
         topology = CenterlineTopology(
-            distalTerminus = CenterlineTerminus.INSIDE_FRAME,
+            distalTerminus = if (closedLoop) {
+                CenterlineTerminus.NONE
+            } else {
+                CenterlineTerminus.INSIDE_FRAME
+            },
             branchCount = branchCount,
+            closedLoop = closedLoop,
         ),
     )
 

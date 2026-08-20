@@ -373,11 +373,13 @@ internal class TapeTrackingController {
                         phase == TapeTrackingPhase.VERIFYING_ENDPOINT ||
                         phase == TapeTrackingPhase.RECOVERING_AFTER_TURN
                     ) {
+                        // The bounded searches meter their own advance and stop on
+                        // their own clocks; a detection gap is their normal state.
                         desiredForwardSpeed(nowNanos)
-                    } else if (mode.followsCurvedPath) {
-                        0.0
                     } else {
-                        desiredForwardSpeed(nowNanos)
+                        // A stale or missing measurement is no measurement in either
+                        // mode: keeping speed here advances into unmeasured space.
+                        0.0
                     },
             )
         }

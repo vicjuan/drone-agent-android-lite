@@ -358,6 +358,24 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `straight tracking stops advancing when detections stop arriving`() {
+        val controller = trackingController()
+        controller.observe(observation(0.0, 0.8), seconds(2))
+
+        val fresh = controller.tick(seconds(2))
+        assertEquals(TapeTrackingPhase.TRACKING, fresh.phase)
+        assertEquals(0.15, fresh.forwardSpeedMetersPerSecond, 0.0)
+
+        // The detector callback stalls outright: with no further observe() call,
+        // the retained FULL_PATH measurement ages past DETECTION_COMMAND_STALE_NANOS.
+        val stale = controller.tick(seconds(4))
+        assertEquals(TapeTrackingPhase.TRACKING, stale.phase)
+        assertEquals(0.0, stale.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stale.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stale.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
     fun `controller filters axial angle across the ninety degree seam`() {
         val controller = trackingController()
         controller.observe(observation(89.0, 0.8), seconds(2))

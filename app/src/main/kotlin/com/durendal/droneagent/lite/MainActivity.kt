@@ -699,6 +699,23 @@ class MainActivity : Activity() {
             render("另一個飛行控制正在使用中")
             return
         }
+        // Tracking closes obstacle avoidance and reads the route through the
+        // camera alone, so the -90° quick command must be confirmed before any
+        // control is taken. The tolerance absorbs floating-point representation
+        // noise, never a deliberate tilt.
+        val confirmedPitch = selectedCameraPitchDegrees
+        val cameraNotDownReason = when {
+            cameraPitchCommandPending -> "鏡頭角度切換中，請稍候再試"
+            confirmedPitch == null -> "鏡頭角度未確認，請先按「鏡頭 -90°」把鏡頭朝下"
+            abs(confirmedPitch - CAMERA_DOWN_PITCH_DEGREES) >
+                CAMERA_DOWN_PITCH_TOLERANCE_DEGREES ->
+                "鏡頭在 %.0f° 而非 -90°，請先按「鏡頭 -90°」".format(confirmedPitch)
+            else -> null
+        }
+        if (cameraNotDownReason != null) {
+            render("無法啟動$trackingName：$cameraNotDownReason")
+            return
+        }
         mainHandler.removeCallbacks(idleReleaseRunnable)
         activeTapeTrackingMode = mode
         tapeTrackingStartPending = true
@@ -869,6 +886,18 @@ class MainActivity : Activity() {
                 }
                 holdStatus = status
                 flightLog.write("tape tracking phase=${decision.phase}")
+                if (
+                    decision.phase == TapeTrackingPhase.VERIFYING_ENDPOINT &&
+                    activeTapeTrackingMode?.followsCurvedPath == true
+                ) {
+                    // Curved modes reach endpoint verification only after a confirmed
+                    // reliable route disappears; straight mode enters by shrinking-endpoint
+                    // evidence and must not carry this reason.
+                    flightLog.write(
+                        "tape tracking endpoint verification reason=reliable-path-lost " +
+                            tapeDetector?.diagnosticsSummary().orEmpty(),
+                    )
+                }
                 render(status)
             }
             mainHandler.postDelayed(this, TAPE_TRACKING_TICK_MS)
@@ -2429,6 +2458,8 @@ class MainActivity : Activity() {
         const val TAPE_TRACKING_TICK_MS = 100L
         const val TAPE_CAPTURE_DIRECTORY = "tape-captures"
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
+        /** Absorbs floating-point noise in a confirmed pitch, never a deliberate tilt. */
+        const val CAMERA_DOWN_PITCH_TOLERANCE_DEGREES = 0.5
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
         // MSDK is given two seconds to rotate; one extra second allows callback delivery.
         const val CAMERA_PITCH_COMMAND_TIMEOUT_MS = 3_000L
