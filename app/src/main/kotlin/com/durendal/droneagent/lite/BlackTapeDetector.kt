@@ -154,6 +154,7 @@ class BlackTapeDetector(
         val lab = Mat()
         val blackMask = Mat()
         val bridgedBlackMask = Mat()
+        val directionalBridgeMask = Mat()
         val floorMask = Mat()
         val floorMaskWithBorder = Mat()
         val cleanedBlackMask = Mat()
@@ -167,17 +168,39 @@ class BlackTapeDetector(
         lastPathAxis = "NONE"
         lastPathCurvatureDegrees = 0.0
         lastPathCurvatureSmoothness = 0.0
-        // Fluorescent glare creates short bright gaps inside the black tape. Straight
-        // tape is closed along its axis so those fragments reconnect without merging
-        // nearby objects; a curved path needs an isotropic kernel instead.
-        val closeKernel = Imgproc.getStructuringElement(
-            if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
+        // Fluorescent glare can cut completely across glossy tape. A tracked PATH
+        // combines its normal isotropic close with narrow directional closes. The
+        // wider repair is never used for acquisition: without a previous winner it
+        // could join unrelated wall or floor edges into a plausible path.
+        val closeKernels =
             if (mode == TapeDetectionMode.PATH) {
-                Size(PATH_CLOSE_KERNEL_SIZE, PATH_CLOSE_KERNEL_SIZE)
+                val kernels = mutableListOf(
+                    Imgproc.getStructuringElement(
+                        Imgproc.MORPH_ELLIPSE,
+                        Size(PATH_CLOSE_KERNEL_SIZE, PATH_CLOSE_KERNEL_SIZE),
+                    ),
+                )
+                if (previousBounds != null) {
+                    kernels += Imgproc.getStructuringElement(
+                        Imgproc.MORPH_ELLIPSE,
+                        Size(PATH_GLARE_BRIDGE_SHORT_SIZE, PATH_GLARE_BRIDGE_LONG_SIZE),
+                    )
+                    kernels += Imgproc.getStructuringElement(
+                        Imgproc.MORPH_ELLIPSE,
+                        Size(PATH_GLARE_BRIDGE_LONG_SIZE, PATH_GLARE_BRIDGE_SHORT_SIZE),
+                    )
+                    kernels += diagonalGlareBridgeKernel(descending = true)
+                    kernels += diagonalGlareBridgeKernel(descending = false)
+                }
+                kernels
             } else {
-                Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT)
-            },
-        )
+                listOf(
+                    Imgproc.getStructuringElement(
+                        Imgproc.MORPH_RECT,
+                        Size(TAPE_MASK_KERNEL_WIDTH, VERTICAL_CLOSE_KERNEL_HEIGHT),
+                    ),
+                )
+            }
         val openKernel = Imgproc.getStructuringElement(
             if (mode == TapeDetectionMode.PATH) Imgproc.MORPH_ELLIPSE else Imgproc.MORPH_RECT,
             if (mode == TapeDetectionMode.PATH) {
@@ -233,7 +256,21 @@ class BlackTapeDetector(
             lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
             lastFloorFraction =
                 Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
-            Imgproc.morphologyEx(blackMask, bridgedBlackMask, Imgproc.MORPH_CLOSE, closeKernel)
+            Imgproc.morphologyEx(
+                blackMask,
+                bridgedBlackMask,
+                Imgproc.MORPH_CLOSE,
+                closeKernels.first(),
+            )
+            for (kernel in closeKernels.drop(1)) {
+                Imgproc.morphologyEx(
+                    blackMask,
+                    directionalBridgeMask,
+                    Imgproc.MORPH_CLOSE,
+                    kernel,
+                )
+                Core.bitwise_or(bridgedBlackMask, directionalBridgeMask, bridgedBlackMask)
+            }
             Imgproc.morphologyEx(bridgedBlackMask, cleanedBlackMask, Imgproc.MORPH_OPEN, openKernel)
             Imgproc.findContours(
                 cleanedBlackMask,
@@ -314,6 +351,7 @@ class BlackTapeDetector(
                 bounds = NormalizedRect(
                     left = rect.x.toDouble() / analysis.cols(),
                     top = rect.y.toDouble() / analysis.rows(),
+
                     right = (rect.x + rect.width).toDouble() / analysis.cols(),
                     bottom = (rect.y + rect.height).toDouble() / analysis.rows(),
                 ),
@@ -330,8 +368,9 @@ class BlackTapeDetector(
             candidateMask.release()
             contours.forEach(MatOfPoint::release)
             hierarchy.release()
-            closeKernel.release()
+            closeKernels.forEach(Mat::release)
             openKernel.release()
+            directionalBridgeMask.release()
             cleanedBlackMask.release()
             floorMaskWithBorder.release()
             floorMask.release()
@@ -343,6 +382,23 @@ class BlackTapeDetector(
             rgb.release()
             resized.release()
             source.release()
+        }
+    }
+    private fun diagonalGlareBridgeKernel(descending: Boolean): Mat {
+        val size = PATH_GLARE_BRIDGE_LONG_SIZE.toInt()
+        val last = (size - 1).toDouble()
+        return Mat.zeros(
+            size,
+            size,
+            org.opencv.core.CvType.CV_8UC1,
+        ).also { kernel ->
+            Imgproc.line(
+                kernel,
+                if (descending) Point(0.0, 0.0) else Point(0.0, last),
+                if (descending) Point(last, last) else Point(last, 0.0),
+                Scalar(255.0),
+                PATH_GLARE_BRIDGE_SHORT_SIZE.toInt(),
+            )
         }
     }
 
@@ -441,6 +497,7 @@ class BlackTapeDetector(
                 previousAnchorXFraction?.times(candidateMask.cols()),
             preferRightmostInitialRun =
                 requireCurvature && previousAnchorXFraction == null,
+            expectedMedianWidthFraction = previousPathMedianWidthFraction,
         )
         val horizontalPath = pathDirectionEstimator.estimateHorizontalFallback(
             mask = candidateMaskBytes,
@@ -709,17 +766,18 @@ class BlackTapeDetector(
         const val VERTICAL_OPEN_KERNEL_HEIGHT = 31.0
         const val VERTICAL_CLOSE_KERNEL_HEIGHT = 25.0
         const val PATH_CLOSE_KERNEL_SIZE = 5.0
+        const val PATH_GLARE_BRIDGE_SHORT_SIZE = 7.0
+        const val PATH_GLARE_BRIDGE_LONG_SIZE = 25.0
         const val PATH_OPEN_KERNEL_SIZE = 3.0
         const val MIN_PATH_AREA_FRACTION = 0.0008
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
-        // A path already connected to the previous winner may cross a floor-material
-        // boundary, leaving one side with no matching floor. Keep the surrounding-floor
-        // guard, but deliberately disable the per-side floor guard only during the
-        // bounded previous-selection window (PREVIOUS_SELECTION_MISS_LIMIT).
+        // A tracked path may cross a floor-material boundary, so surrounding coverage
+        // stays relaxed. Both visible sides must still be corrugated board; otherwise
+        // a board edge or a seam on the adjacent floor becomes a plausible continuation.
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
-        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.0
+        const val MIN_TRACKED_PATH_SIDE_FLOOR = MIN_PATH_SIDE_FLOOR
         const val MIN_PATH_CURVATURE_SMOOTHNESS = 0.08
         const val MIN_HORIZONTAL_PATH_SURROUNDING_FLOOR = 0.0
         const val MIN_HORIZONTAL_PATH_SIDE_FLOOR = 0.0

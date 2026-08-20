@@ -241,6 +241,71 @@ class TapePathDirectionEstimatorTest {
         assertEquals(null, estimate)
     }
 
+    @Test
+    fun `tracked tape stays traceable when it merges into dark floor at frame edge`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (y in 0 until FRAME_HEIGHT) {
+            val nearFraction = y / (FRAME_HEIGHT - 1.0)
+            val centerX = 320.0 + 150.0 * nearFraction * nearFraction
+            if (y < FRAME_HEIGHT / 2) {
+                fillRun(mask, y, centerX, halfWidth = 15)
+            } else {
+                val tapeLeft = (centerX - 15.0).toInt()
+                for (x in tapeLeft until FRAME_WIDTH) {
+                    mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
+                }
+            }
+        }
+
+        val estimate = checkNotNull(
+            estimator.estimateVerticalPath(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 0,
+                top = 0,
+                right = FRAME_WIDTH,
+                bottom = FRAME_HEIGHT,
+                initialCenterHint = 470.0,
+                expectedMedianWidthFraction = 30.0 / FRAME_HEIGHT,
+            ),
+        )
+
+        assertEquals(470.0, estimate.nearFieldCenterX, 5.0)
+        assertTrue(estimate.arcLengthFraction > 1.0)
+        assertEquals(30.0 / FRAME_HEIGHT, estimate.medianWidthFraction, 0.01)
+    }
+
+    @Test
+    fun `tracked tape does not infer a path through floor spanning both frame edges`() {
+        val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
+        for (y in 0 until FRAME_HEIGHT / 2) {
+            fillRun(mask, y, centerX = 320.0, halfWidth = 15)
+        }
+        for (y in FRAME_HEIGHT / 2 until FRAME_HEIGHT) {
+            for (x in 0 until FRAME_WIDTH) {
+                mask[y * FRAME_WIDTH + x] = 0xFF.toByte()
+            }
+        }
+
+        val estimate = checkNotNull(
+            estimator.estimateVerticalPath(
+                mask = mask,
+                frameWidth = FRAME_WIDTH,
+                frameHeight = FRAME_HEIGHT,
+                left = 0,
+                top = 0,
+                right = FRAME_WIDTH,
+                bottom = FRAME_HEIGHT,
+                initialCenterHint = 320.0,
+                expectedMedianWidthFraction = 30.0 / FRAME_HEIGHT,
+            ),
+        )
+
+        assertTrue(estimate.arcLengthFraction < 0.55)
+        assertTrue(estimate.nearFieldCenterY < FRAME_HEIGHT / 2)
+    }
+
     private fun estimateRibbon(curveDirection: Double): TapePathEstimate? {
         val mask = ByteArray(FRAME_WIDTH * FRAME_HEIGHT)
         for (y in 0 until FRAME_HEIGHT) {
