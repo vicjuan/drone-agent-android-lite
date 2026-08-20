@@ -504,6 +504,63 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `brief detector flicker does not strand circular path reacquisition`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(80.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(4))
+
+        val firstCandidateAt = seconds(5)
+        controller.observe(observation(-60.0, 0.90, -0.16), firstCandidateAt)
+        controller.observe(null, firstCandidateAt + 200_000_000L)
+        controller.observe(
+            observation(-62.0, 0.95, -0.14),
+            firstCandidateAt + 400_000_000L,
+        )
+        controller.observe(
+            observation(-50.0, 0.35, -0.12),
+            firstCandidateAt + 600_000_000L,
+        )
+        controller.observe(
+            observation(-64.0, 0.99, -0.18),
+            firstCandidateAt + 800_000_000L,
+        )
+
+        val reacquired = controller.tick(firstCandidateAt + 800_000_000L)
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, reacquired.phase)
+        assertTrue(reacquired.yawRateDegreesPerSecond < 0.0)
+        assertEquals(0.0, reacquired.forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `stale circular reacquisition candidate still requires three fresh detections`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(80.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(3))
+        controller.observe(rightEdgeObservation(67.4, 0.34), seconds(4))
+
+        val firstCandidateAt = seconds(5)
+        controller.observe(observation(-60.0, 0.90, -0.16), firstCandidateAt)
+        controller.observe(
+            null,
+            firstCandidateAt +
+                TapeTrackingController.REACQUISITION_CANDIDATE_MAX_GAP_NANOS +
+                1L,
+        )
+        repeat(2) { index ->
+            controller.observe(
+                observation(-62.0, 0.95, -0.14),
+                seconds(6) + index * 200_000_000L,
+            )
+        }
+
+        val awaitingThirdCandidate = controller.tick(seconds(6) + 200_000_000L)
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, awaitingThirdCandidate.phase)
+        assertEquals(0.0, awaitingThirdCandidate.yawRateDegreesPerSecond, 0.0)
+        assertEquals(0.0, awaitingThirdCandidate.forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
     fun `stable near-edge path reacquires laterally without moving forward`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
@@ -900,6 +957,34 @@ class TapeTrackingControllerTest {
         assertEquals(0.0, stopped.forwardSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, stopped.rightSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, stopped.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
+    fun `closed loop experiment ignores circular endpoint disappearance`() {
+        val controller = TapeTrackingController()
+        controller.start(
+            nowNanos = 0L,
+            mode = TapeTrackingMode.CIRCULAR,
+            endpointTurnEnabled = false,
+        )
+        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(2)).phase)
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        repeat(4) { index ->
+            controller.observe(null, seconds(3) + index * 250_000_000L)
+        }
+
+        val decision = controller.tick(seconds(4))
+
+        assertFalse(decision.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.yawRateDegreesPerSecond, 0.0)
     }
 
     @Test

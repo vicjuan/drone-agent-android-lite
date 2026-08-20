@@ -102,9 +102,10 @@ internal class TapeTrackingController {
     private var lastAcceptedCircularObservation: TapeTrackingObservation? = null
     private var circularDetectionGap = false
     // One candidate sequence is shared by three mutually exclusive contexts:
-    // post-turn recovery, REACQUIRING_PATH, and a TRACKING gap. Every context
-    // transition or intervening miss resets both fields before another can use them.
+    // post-turn recovery, REACQUIRING_PATH, and a TRACKING gap. Context transitions
+    // reset it; full reacquisition alone may retain it across a brief detector flicker.
     private var circularReacquisitionCandidate: TapeTrackingObservation? = null
+    private var circularReacquisitionCandidateAtNanos = 0L
     private var consecutiveCircularReacquisitionDetections = 0
     private var consecutiveCircularEndpointReadyDetections = 0
     private var circularEndpointQualified = false
@@ -112,10 +113,16 @@ internal class TapeTrackingController {
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
     private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
+    private var endpointTurnEnabled = true
 
-    fun start(nowNanos: Long, mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT) {
+    fun start(
+        nowNanos: Long,
+        mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT,
+        endpointTurnEnabled: Boolean = true,
+    ) {
         enabled = true
         this.mode = mode
+        this.endpointTurnEnabled = endpointTurnEnabled
         resetLeg()
         awaitingPostTurnDetection = false
         beginRecentering(nowNanos)
@@ -134,6 +141,7 @@ internal class TapeTrackingController {
         consecutiveEndpointMisses = 0
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
+        endpointTurnEnabled = true
     }
 
     fun resumeAfterTurn(nowNanos: Long) {
@@ -392,7 +400,11 @@ internal class TapeTrackingController {
         }
         if (observation == null) {
             circularDetectionGap = true
-            resetCircularReacquisitionCandidate()
+            if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
+                expireCircularReacquisitionCandidateIfStale(nowNanos)
+            } else {
+                resetCircularReacquisitionCandidate()
+            }
             when (phase) {
                 TapeTrackingPhase.TRACKING -> {
                     if (circularEndpointQualified) {
@@ -409,10 +421,6 @@ internal class TapeTrackingController {
                 TapeTrackingPhase.ALIGNING_CURVE -> {
                     consecutiveCurveAlignmentDetections = 0
                     clearControlMeasurements()
-                }
-
-                TapeTrackingPhase.REACQUIRING_PATH -> {
-                    resetCircularReacquisitionCandidate()
                 }
 
                 else -> Unit
@@ -579,8 +587,8 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
+        expireCircularReacquisitionCandidateIfStale(nowNanos)
         if (!isCredibleCircularReacquisitionPath(observation)) {
-            resetCircularReacquisitionCandidate()
             return
         }
 
@@ -591,16 +599,15 @@ internal class TapeTrackingController {
         ) {
             consecutiveCircularReacquisitionDetections += 1
         } else {
-            circularReacquisitionCandidate = observation
             consecutiveCircularReacquisitionDetections = 1
         }
+        circularReacquisitionCandidate = observation
+        circularReacquisitionCandidateAtNanos = nowNanos
         if (
             consecutiveCircularReacquisitionDetections >=
             REACQUISITION_CONFIRMATION_COUNT
         ) {
             completeCircularReacquisition(observation, nowNanos)
-        } else {
-            circularReacquisitionCandidate = observation
         }
     }
 
@@ -635,6 +642,11 @@ internal class TapeTrackingController {
         lastAcceptedCircularObservation = observation
         circularDetectionGap = false
         consecutiveEndpointMisses = 0
+        if (!endpointTurnEnabled) {
+            consecutiveCircularEndpointReadyDetections = 0
+            circularEndpointQualified = false
+            return
+        }
         val endpointReady =
             observation.longSideFraction >= CIRCULAR_ENDPOINT_READY_MIN_FRACTION &&
                 observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION &&
@@ -722,8 +734,19 @@ internal class TapeTrackingController {
                 previousCandidate.angleFromVerticalDegrees,
             ) <= REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES
 
+    private fun expireCircularReacquisitionCandidateIfStale(nowNanos: Long) {
+        if (
+            circularReacquisitionCandidateAtNanos != 0L &&
+            nowNanos - circularReacquisitionCandidateAtNanos >
+            REACQUISITION_CANDIDATE_MAX_GAP_NANOS
+        ) {
+            resetCircularReacquisitionCandidate()
+        }
+    }
+
     private fun resetCircularReacquisitionCandidate() {
         circularReacquisitionCandidate = null
+        circularReacquisitionCandidateAtNanos = 0L
         consecutiveCircularReacquisitionDetections = 0
     }
 
@@ -1160,6 +1183,8 @@ internal class TapeTrackingController {
         const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
         const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
         const val REACQUISITION_CONFIRMATION_COUNT = 3
+        // Detector flicker on wrinkled tape may insert null or short-fragment frames.
+        const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
         // Endpoint qualification likewise requires a long route before misses may trigger a turn.
         const val CIRCULAR_ENDPOINT_READY_MIN_FRACTION = 0.60
