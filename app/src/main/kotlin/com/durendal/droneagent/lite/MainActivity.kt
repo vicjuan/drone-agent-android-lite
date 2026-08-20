@@ -74,8 +74,7 @@ class MainActivity : Activity() {
     private lateinit var holdButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var cameraDownButton: PillButton
-    private lateinit var cameraPitch65Button: PillButton
-    private lateinit var cameraPitch60Button: PillButton
+    private lateinit var curvedOutAndBackTrackingButton: PillButton
     private lateinit var captureButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
@@ -454,16 +453,11 @@ class MainActivity : Activity() {
         gravity = Gravity.START
         circularTapeTrackingButton =
             PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
-        cameraPitch65Button = PillButton("鏡頭 -65°", StickPadView.CYAN) {
-            moveCameraToPitch(CAMERA_PITCH_65_DEGREES)
-        }
-        cameraPitch60Button = PillButton("鏡頭 -60°", StickPadView.CYAN) {
-            moveCameraToPitch(CAMERA_PITCH_60_DEGREES)
-        }
+        curvedOutAndBackTrackingButton =
+            PillButton("弧形往返追蹤", StickPadView.GREEN) { toggleCurvedOutAndBackTracking() }
         captureButton = PillButton("錄製影格證據", StickPadView.AMBER) { toggleFrameCapture() }
         addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
-        addView(cameraPitch65Button, actionParams(marginEnd = dp(10)))
-        addView(cameraPitch60Button, actionParams(marginEnd = dp(10)))
+        addView(curvedOutAndBackTrackingButton, actionParams(marginEnd = dp(10)))
         addView(captureButton, actionParams())
     }
 
@@ -671,6 +665,10 @@ class MainActivity : Activity() {
         toggleTapeTracking(TapeTrackingMode.CIRCULAR)
     }
 
+    private fun toggleCurvedOutAndBackTracking() {
+        toggleTapeTracking(TapeTrackingMode.CURVED_OUT_AND_BACK)
+    }
+
     private fun toggleTapeTracking(mode: TapeTrackingMode) {
         when {
             tapeTracking.enabled && activeTapeTrackingMode == mode ->
@@ -735,7 +733,7 @@ class MainActivity : Activity() {
                     ) {
                         tapeEndpointTurn = false
                         tapeDetector?.setDetectionMode(
-                            if (mode == TapeTrackingMode.CIRCULAR) {
+                            if (mode.followsCurvedPath) {
                                 TapeDetectionMode.PATH
                             } else {
                                 TapeDetectionMode.STRAIGHT
@@ -745,8 +743,8 @@ class MainActivity : Activity() {
                         // A flight session must learn its board from the current route.
                         tapeDetector?.resetTracking()
                         val now = System.nanoTime()
-                        // Meeting-room runs use a physically closed loop. Keep endpoint
-                        // detection active for diagnostics, but do not arm a 180° turn.
+                        // The circular experiment uses a physically closed loop. Curved
+                        // out-and-back tracking uses the same path detector with its endpoint armed.
                         val endpointTurnEnabled = mode != TapeTrackingMode.CIRCULAR
                         tapeTracking.start(now, mode, endpointTurnEnabled)
                         tapeTrackingStartedAtNanos = now
@@ -757,10 +755,13 @@ class MainActivity : Activity() {
                         commandedTapeForwardSpeed = 0.0
                         commandedTapeRightSpeed = 0.0
                         tapeCommandLoggedAtNanos = 0L
-                        if (mode == TapeTrackingMode.STRAIGHT) {
-                            tapeTrackingButton.text = "停止直線黑膠帶追蹤"
-                        } else {
-                            circularTapeTrackingButton.text = "停止圓形黑膠帶追蹤"
+                        when (mode) {
+                            TapeTrackingMode.STRAIGHT ->
+                                tapeTrackingButton.text = "停止直線黑膠帶追蹤"
+                            TapeTrackingMode.CIRCULAR ->
+                                circularTapeTrackingButton.text = "停止圓形黑膠帶追蹤"
+                            TapeTrackingMode.CURVED_OUT_AND_BACK ->
+                                curvedOutAndBackTrackingButton.text = "停止弧形往返追蹤"
                         }
                         flightLog.write(
                             "tape tracking started mode=$mode avoidance=CLOSE " +
@@ -877,7 +878,11 @@ class MainActivity : Activity() {
 
 
     private fun tapeTrackingName(mode: TapeTrackingMode? = activeTapeTrackingMode): String =
-        if (mode == TapeTrackingMode.CIRCULAR) "圓形黑膠帶追蹤" else "直線黑膠帶追蹤"
+        when (mode) {
+            TapeTrackingMode.CIRCULAR -> "圓形黑膠帶追蹤"
+            TapeTrackingMode.CURVED_OUT_AND_BACK -> "弧形往返追蹤"
+            else -> "直線黑膠帶追蹤"
+        }
 
     private fun beginTapeTurnaround() {
         check(activeTapeTrackingMode != null) {
@@ -940,6 +945,9 @@ class MainActivity : Activity() {
         if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "直線黑膠帶追蹤"
         if (::circularTapeTrackingButton.isInitialized) {
             circularTapeTrackingButton.text = "圓形黑膠帶追蹤"
+        }
+        if (::curvedOutAndBackTrackingButton.isInitialized) {
+            curvedOutAndBackTrackingButton.text = "弧形往返追蹤"
         }
         if (!wasActive) {
             render(message)
@@ -1090,16 +1098,17 @@ class MainActivity : Activity() {
         holdButton.available =
             ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
         captureButton.available = captureRecorder != null
-        val cameraPitchAvailable = ready && !cameraPitchCommandPending
-        cameraDownButton.available = cameraPitchAvailable
-        cameraPitch65Button.available = cameraPitchAvailable
-        cameraPitch60Button.available = cameraPitchAvailable
+        cameraDownButton.available = ready && !cameraPitchCommandPending
         val tapeTrackingCanStart = ready && flying && !turning && !holdingHeight
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         circularTapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        curvedOutAndBackTrackingButton.available =
+            (tapeTracking.enabled &&
+                activeTapeTrackingMode == TapeTrackingMode.CURVED_OUT_AND_BACK) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         leftPad.isEnabled = ready && flying
         rightPad.isEnabled = ready && flying
@@ -2420,8 +2429,6 @@ class MainActivity : Activity() {
         const val TAPE_TRACKING_TICK_MS = 100L
         const val TAPE_CAPTURE_DIRECTORY = "tape-captures"
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
-        const val CAMERA_PITCH_65_DEGREES = -65.0
-        const val CAMERA_PITCH_60_DEGREES = -60.0
         const val CAMERA_RECENTER_DURATION_SECONDS = 2.0
         // MSDK is given two seconds to rotate; one extra second allows callback delivery.
         const val CAMERA_PITCH_COMMAND_TIMEOUT_MS = 3_000L

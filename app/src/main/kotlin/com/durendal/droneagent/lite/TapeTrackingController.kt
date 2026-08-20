@@ -17,9 +17,10 @@ internal enum class TapeTrackingPhase {
     TURNING,
 }
 
-internal enum class TapeTrackingMode {
-    STRAIGHT,
-    CIRCULAR,
+internal enum class TapeTrackingMode(val followsCurvedPath: Boolean) {
+    STRAIGHT(false),
+    CIRCULAR(true),
+    CURVED_OUT_AND_BACK(true),
 }
 
 
@@ -173,7 +174,7 @@ internal class TapeTrackingController {
 
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        if (mode.followsCurvedPath) {
             observeCircularPath(observation, nowNanos)
             return
         }
@@ -312,7 +313,7 @@ internal class TapeTrackingController {
             nowNanos - endpointVerificationStartedAtNanos >=
             ENDPOINT_VERIFICATION_TIMEOUT_NANOS
         ) {
-            if (mode == TapeTrackingMode.CIRCULAR) {
+            if (mode.followsCurvedPath) {
                 beginCircularReacquisition()
             } else {
                 resetAppliedCommands()
@@ -343,7 +344,7 @@ internal class TapeTrackingController {
             nowNanos >= postTurnRecoveryUntilNanos
         ) {
             awaitingPostTurnDetection = false
-            if (mode == TapeTrackingMode.CIRCULAR) {
+            if (mode.followsCurvedPath) {
                 beginCircularReacquisition()
             } else {
                 // The bounded search is over and nothing was found. Hovering in
@@ -373,7 +374,7 @@ internal class TapeTrackingController {
                         phase == TapeTrackingPhase.RECOVERING_AFTER_TURN
                     ) {
                         desiredForwardSpeed(nowNanos)
-                    } else if (mode == TapeTrackingMode.CIRCULAR) {
+                    } else if (mode.followsCurvedPath) {
                         0.0
                     } else {
                         desiredForwardSpeed(nowNanos)
@@ -569,7 +570,11 @@ internal class TapeTrackingController {
         endpointReferenceBounds = trackedObservation.bounds
         consecutiveEndpointMisses = 0
         acceptCircularObservation(trackedObservation, nowNanos)
+        // Seeing the same in-frame terminus again is not proof that the route continues.
+        // Keep the endpoint probe authoritative until the tape disappears or a path
+        // explicitly reaching beyond the frame returns.
         if (
+            !trackedObservation.endpointCandidate &&
             trackedObservation.longSideFraction >=
             CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION &&
             trackedObservation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
@@ -943,12 +948,12 @@ internal class TapeTrackingController {
     private fun desiredYawRate(purePursuitYawRate: Double?): Double {
         val angle = controlledAngleDegrees ?: return 0.0
         val deadZone =
-            if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_DEAD_ZONE_DEGREES
+            if (mode.followsCurvedPath) CIRCULAR_YAW_DEAD_ZONE_DEGREES
             else YAW_DEAD_ZONE_DEGREES
         val modeMaximumYawRate = when {
             phase == TapeTrackingPhase.VERIFYING_ENDPOINT ->
                 ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND
-            mode == TapeTrackingMode.CIRCULAR ->
+            mode.followsCurvedPath ->
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
             else -> MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND
         }
@@ -957,13 +962,13 @@ internal class TapeTrackingController {
                 // In-place alignment only, and bounded: a near-field-only path is
                 // enough to point at, never enough to chase.
                 minOf(modeMaximumYawRate, NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND)
-            } else if (lateralCorrectionActive && mode != TapeTrackingMode.CIRCULAR) {
+            } else if (lateralCorrectionActive && !mode.followsCurvedPath) {
                 minOf(modeMaximumYawRate, ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND)
             } else {
                 modeMaximumYawRate
             }
         val gain =
-            if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_PROPORTIONAL_GAIN
+            if (mode.followsCurvedPath) CIRCULAR_YAW_PROPORTIONAL_GAIN
             else YAW_PROPORTIONAL_GAIN
         val angleFeedback = if (abs(angle) <= deadZone) 0.0 else angle * gain
         return (purePursuitYawRate ?: angleFeedback)
@@ -1049,7 +1054,7 @@ internal class TapeTrackingController {
         }
         if (!lateralCorrectionActive) return 0.0
         val maximumCenteringSpeed =
-            if (mode == TapeTrackingMode.CIRCULAR) {
+            if (mode.followsCurvedPath) {
                 CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND
             } else {
                 MAX_CENTERING_SPEED_METERS_PER_SECOND
@@ -1085,7 +1090,7 @@ internal class TapeTrackingController {
             return if (
                 nowNanos - endpointVerificationStartedAtNanos <= ENDPOINT_PROBE_DURATION_NANOS
             ) {
-                if (mode == TapeTrackingMode.CIRCULAR) {
+                if (mode.followsCurvedPath) {
                     CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND
                 } else {
                     ENDPOINT_PROBE_SPEED_METERS_PER_SECOND
@@ -1094,7 +1099,7 @@ internal class TapeTrackingController {
                 0.0
             }
         }
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        if (mode.followsCurvedPath) {
             if (phase != TapeTrackingPhase.TRACKING) return 0.0
             val angle = controlledAngleDegrees ?: return 0.0
             val offset = controlledHorizontalOffsetFraction ?: return 0.0
@@ -1138,14 +1143,14 @@ internal class TapeTrackingController {
     }
 
     private fun postTurnRecoveryDurationNanos(): Long =
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        if (mode.followsCurvedPath) {
             CIRCULAR_POST_TURN_RECOVERY_NANOS
         } else {
             POST_TURN_RECOVERY_NANOS
         }
 
     private fun postTurnRecoverySpeedMetersPerSecond(): Double =
-        if (mode == TapeTrackingMode.CIRCULAR) {
+        if (mode.followsCurvedPath) {
             CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
         } else {
             POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
@@ -1308,7 +1313,10 @@ internal class TapeTrackingController {
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
         // Endpoint qualification likewise requires a long route before misses may trigger a turn.
         const val CIRCULAR_ENDPOINT_READY_MIN_FRACTION = 0.60
-        const val CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES = 30.0
+        // A real curved endpoint approached at 71.6°. The in-frame terminus,
+        // near-edge root, centered near field and three-frame confirmation
+        // distinguish an endpoint; a straight-tape angle limit rejects valid arcs.
+        const val CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES = 75.0
         const val CIRCULAR_ENDPOINT_READY_MAX_OFFSET_FRACTION = 0.20
         const val CIRCULAR_ENDPOINT_READY_CONFIRMATION_COUNT = 3
         const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
