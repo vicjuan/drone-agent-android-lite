@@ -8,6 +8,7 @@ import kotlin.math.roundToInt
 internal data class TapePathEstimate(
     val nearFieldCenterX: Double,
     val nearFieldCenterY: Double,
+    val nearFieldAngleFromVerticalDegrees: Double,
     val lookaheadCenterX: Double,
     val lookaheadCenterY: Double,
     val lookaheadAngleFromVerticalDegrees: Double,
@@ -33,13 +34,16 @@ internal data class TapePathBounds(
  *
  * The aircraft keeps the camera-down path roughly vertical while following it, so tracing the
  * connected run nearest the previous row gives a cheap local centerline without mistaking the
- * contour's bounding-box chord for its direction. The steering tangent is measured 40% of the
- * traced arc ahead, matching the look-ahead convention proven in the full drone-agent vision
- * pipeline. A path that turns horizontal enough to stop producing a bounded local run fails
- * closed instead of inventing a direction.
+ * contour's bounding-box chord for its direction. The near-field tangent controls current
+ * alignment. The Pure Pursuit target stays ahead on the same trace, but its arc distance is
+ * capped so a visible hairpin cannot move the target onto the returning leg.
+ *
+ * [estimateVerticalPath] walks rows upward and fails closed once the path turns horizontal
+ * enough to stop producing a bounded local run. [estimateHorizontalFallback] then walks
+ * columns instead, so an arc lying across the frame is still followable rather than lost.
  */
 internal class TapePathDirectionEstimator {
-    fun estimate(
+    fun estimateVerticalPath(
         mask: ByteArray,
         frameWidth: Int,
         frameHeight: Int,
@@ -117,17 +121,16 @@ internal class TapePathDirectionEstimator {
         val widthConsistency = minOf(medianConsistency, rangeConsistency)
         if (widthConsistency < MIN_WIDTH_CONSISTENCY) return null
 
-        val targetArc = arcLength * LOOKAHEAD_ARC_FRACTION
+        val targetArc = lookaheadArcLength(arcLength, frameShortSide)
         var lookaheadIndex = 0
         while (lookaheadIndex < pointCount - 1 && cumulativeArc[lookaheadIndex] < targetArc) {
             lookaheadIndex++
         }
-        val tangentSpan = (pointCount / 20).coerceIn(MIN_TANGENT_HALF_SPAN, MAX_TANGENT_HALF_SPAN)
-        val behind = (lookaheadIndex - tangentSpan).coerceAtLeast(0)
-        val ahead = (lookaheadIndex + tangentSpan).coerceAtMost(pointCount - 1)
-        val deltaX = pointsX[ahead] - pointsX[behind]
-        val deltaY = pointsY[ahead] - pointsY[behind]
-        if (deltaX == 0.0 && deltaY == 0.0) return null
+        val nearFieldTangentIndex = minOf(NEAR_FIELD_SAMPLE_COUNT / 2, pointCount - 1)
+        val nearFieldAngle =
+            tangentAngle(pointsX, pointsY, pointCount, nearFieldTangentIndex) ?: return null
+        val lookaheadAngle =
+            tangentAngle(pointsX, pointsY, pointCount, lookaheadIndex) ?: return null
 
         val anchorSamples = minOf(NEAR_FIELD_SAMPLE_COUNT, pointCount)
         var nearFieldCenterX = 0.0
@@ -157,8 +160,8 @@ internal class TapePathDirectionEstimator {
             nearFieldCenterY = nearFieldCenterY,
             lookaheadCenterX = pointsX[lookaheadIndex],
             lookaheadCenterY = pointsY[lookaheadIndex],
-            lookaheadAngleFromVerticalDegrees =
-                TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY),
+            nearFieldAngleFromVerticalDegrees = nearFieldAngle,
+            lookaheadAngleFromVerticalDegrees = lookaheadAngle,
             arcLengthFraction = arcLengthFraction,
             medianWidthFraction = medianWidthFraction,
             widthConsistency = widthConsistency,
@@ -264,7 +267,7 @@ internal class TapePathDirectionEstimator {
         )
         if (widthConsistency < MIN_WIDTH_CONSISTENCY) return null
 
-        val targetArc = trace.arcLength * LOOKAHEAD_ARC_FRACTION
+        val targetArc = lookaheadArcLength(trace.arcLength, frameShortSide)
         var lookaheadIndex = 0
         while (
             lookaheadIndex < trace.pointCount - 1 &&
@@ -272,13 +275,22 @@ internal class TapePathDirectionEstimator {
         ) {
             lookaheadIndex++
         }
-        val tangentSpan =
-            (trace.pointCount / 20).coerceIn(MIN_TANGENT_HALF_SPAN, MAX_TANGENT_HALF_SPAN)
-        val behind = (lookaheadIndex - tangentSpan).coerceAtLeast(0)
-        val ahead = (lookaheadIndex + tangentSpan).coerceAtMost(trace.pointCount - 1)
-        val deltaX = trace.pointsX[ahead] - trace.pointsX[behind]
-        val deltaY = trace.pointsY[ahead] - trace.pointsY[behind]
-        if (deltaX == 0.0 && deltaY == 0.0) return null
+        val nearFieldTangentIndex =
+            minOf(NEAR_FIELD_SAMPLE_COUNT / 2, trace.pointCount - 1)
+        val nearFieldAngle =
+            tangentAngle(
+                trace.pointsX,
+                trace.pointsY,
+                trace.pointCount,
+                nearFieldTangentIndex,
+            ) ?: return null
+        val lookaheadAngle =
+            tangentAngle(
+                trace.pointsX,
+                trace.pointsY,
+                trace.pointCount,
+                lookaheadIndex,
+            ) ?: return null
 
         var pathTop = frameHeight
         var pathBottom = 0
@@ -295,8 +307,8 @@ internal class TapePathDirectionEstimator {
             nearFieldCenterY = trace.nearFieldCenterY,
             lookaheadCenterX = trace.pointsX[lookaheadIndex],
             lookaheadCenterY = trace.pointsY[lookaheadIndex],
-            lookaheadAngleFromVerticalDegrees =
-                TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY),
+            nearFieldAngleFromVerticalDegrees = nearFieldAngle,
+            lookaheadAngleFromVerticalDegrees = lookaheadAngle,
             arcLengthFraction = arcLengthFraction,
             medianWidthFraction = medianWidth / frameShortSide,
             widthConsistency = widthConsistency,
@@ -473,6 +485,28 @@ internal class TapePathDirectionEstimator {
         val nearFieldCenterY: Double,
     )
 
+    private fun lookaheadArcLength(arcLength: Double, frameShortSide: Double): Double =
+        minOf(
+            arcLength * LOOKAHEAD_ARC_FRACTION,
+            frameShortSide * MAX_LOOKAHEAD_FRAME_FRACTION,
+        )
+
+    private fun tangentAngle(
+        pointsX: DoubleArray,
+        pointsY: DoubleArray,
+        pointCount: Int,
+        centerIndex: Int,
+    ): Double? {
+        val halfSpan =
+            (pointCount / 20).coerceIn(MIN_TANGENT_HALF_SPAN, MAX_TANGENT_HALF_SPAN)
+        val behind = (centerIndex - halfSpan).coerceAtLeast(0)
+        val ahead = (centerIndex + halfSpan).coerceAtMost(pointCount - 1)
+        val deltaX = pointsX[ahead] - pointsX[behind]
+        val deltaY = pointsY[ahead] - pointsY[behind]
+        if (deltaX == 0.0 && deltaY == 0.0) return null
+        return TapeOrientation.deviationFromVerticalDegrees(deltaX, deltaY)
+    }
+
     private fun curvatureDegrees(
         pointsX: DoubleArray,
         pointsY: DoubleArray,
@@ -594,6 +628,7 @@ internal class TapePathDirectionEstimator {
 
     private companion object {
         const val LOOKAHEAD_ARC_FRACTION = 0.40
+        const val MAX_LOOKAHEAD_FRAME_FRACTION = 0.40
         const val MIN_SAMPLE_COUNT = 12
         const val MIN_ARC_LENGTH_FRACTION = 0.12
         const val MIN_LOCAL_WIDTH_FRACTION = 0.025

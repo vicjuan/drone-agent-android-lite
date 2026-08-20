@@ -41,10 +41,33 @@ class TapeOverlayView(context: Context) : View(context) {
         isFakeBoldText = true
     }
 
+    // The overlay redraws at camera frame rate, so every reusable value is resolved once
+    // here instead of per draw: dp conversions, font metrics and the two rectangles.
+    private val boxCornerRadius = density(6f)
+    private val labelCornerRadius = density(4f)
+    private val labelPadding = density(6f)
+    private val anchorRadius = density(6f)
+    private val targetRadius = density(10f)
+    private val searchLabelLeft = density(16f)
+    private val searchLabelTop = density(72f)
+    private val labelBaselineOffset = labelPadding - labelPaint.fontMetrics.top
+    private val labelTextHeight = labelPaint.fontMetrics.run { bottom - top }
+    private val searchLabelWidth = labelPaint.measureText(SEARCH_LABEL)
+
+    private val detectionBounds = RectF()
+    private val labelBounds = RectF()
+
     private var detection: TapeDetection? = null
+    private var detectionLabel = ""
 
     fun showDetection(value: TapeDetection?) {
         detection = value
+        detectionLabel = value?.let {
+            formatTapeDetectionLabel(
+                confidence = it.confidence,
+                angleFromVerticalDegrees = it.angleFromVerticalDegrees,
+            )
+        } ?: ""
         postInvalidateOnAnimation()
     }
 
@@ -64,13 +87,13 @@ class TapeOverlayView(context: Context) : View(context) {
         val previewHeight = result.sourceHeight * previewScale
         val previewLeft = (width - previewWidth) / 2f
         val previewTop = (height - previewHeight) / 2f
-        val bounds = RectF(
+        detectionBounds.set(
             previewLeft + (source.left * previewWidth).toFloat(),
             previewTop + (source.top * previewHeight).toFloat(),
             previewLeft + (source.right * previewWidth).toFloat(),
             previewTop + (source.bottom * previewHeight).toFloat(),
         )
-        canvas.drawRoundRect(bounds, density(6f), density(6f), boxPaint)
+        canvas.drawRoundRect(detectionBounds, boxCornerRadius, boxCornerRadius, boxPaint)
 
         val anchorX = previewLeft + (result.anchorXFraction * previewWidth).toFloat()
         val anchorY = previewTop + (result.anchorYFraction * previewHeight).toFloat()
@@ -79,8 +102,7 @@ class TapeOverlayView(context: Context) : View(context) {
         val targetX = previewLeft + previewWidth / 2f
         val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION
         canvas.drawLine(anchorX, anchorY, lookaheadX, lookaheadY, railPaint)
-        canvas.drawCircle(anchorX, anchorY, density(6f), anchorPaint)
-        val targetRadius = density(10f)
+        canvas.drawCircle(anchorX, anchorY, anchorRadius, anchorPaint)
         canvas.drawLine(
             targetX - targetRadius,
             targetY,
@@ -96,49 +118,24 @@ class TapeOverlayView(context: Context) : View(context) {
             targetPaint,
         )
 
-        val label = formatTapeDetectionLabel(
-            confidence = result.confidence,
-            angleFromVerticalDegrees = result.angleFromVerticalDegrees,
-        )
-        val padding = density(6f)
-        val textWidth = labelPaint.measureText(label)
-        val textHeight = labelPaint.fontMetrics.run { bottom - top }
-        val labelTop = (bounds.top - textHeight - padding * 2).coerceAtLeast(0f)
-        val labelBounds = RectF(
-            bounds.left,
-            labelTop,
-            bounds.left + textWidth + padding * 2,
-            labelTop + textHeight + padding * 2,
-        )
-        canvas.drawRoundRect(labelBounds, density(4f), density(4f), labelBackgroundPaint)
-        canvas.drawText(
-            label,
-            labelBounds.left + padding,
-            labelBounds.top + padding - labelPaint.fontMetrics.top,
-            labelPaint,
-        )
+        val labelTop =
+            (detectionBounds.top - labelTextHeight - labelPadding * 2).coerceAtLeast(0f)
+        drawLabel(canvas, detectionLabel, detectionBounds.left, labelTop, labelPaint.measureText(detectionLabel))
     }
 
     private fun drawSearchStatus(canvas: Canvas) {
-        val label = "OpenCV • 搜尋黑膠帶"
-        val padding = density(6f)
-        val left = density(16f)
-        val top = density(72f)
-        val textWidth = labelPaint.measureText(label)
-        val textHeight = labelPaint.fontMetrics.run { bottom - top }
-        val bounds = RectF(
+        drawLabel(canvas, SEARCH_LABEL, searchLabelLeft, searchLabelTop, searchLabelWidth)
+    }
+
+    private fun drawLabel(canvas: Canvas, label: String, left: Float, top: Float, textWidth: Float) {
+        labelBounds.set(
             left,
             top,
-            left + textWidth + padding * 2,
-            top + textHeight + padding * 2,
+            left + textWidth + labelPadding * 2,
+            top + labelTextHeight + labelPadding * 2,
         )
-        canvas.drawRoundRect(bounds, density(4f), density(4f), labelBackgroundPaint)
-        canvas.drawText(
-            label,
-            bounds.left + padding,
-            bounds.top + padding - labelPaint.fontMetrics.top,
-            labelPaint,
-        )
+        canvas.drawRoundRect(labelBounds, labelCornerRadius, labelCornerRadius, labelBackgroundPaint)
+        canvas.drawText(label, labelBounds.left + labelPadding, labelBounds.top + labelBaselineOffset, labelPaint)
     }
 
     private fun density(value: Float): Float = value * resources.displayMetrics.density
@@ -146,6 +143,7 @@ class TapeOverlayView(context: Context) : View(context) {
     private companion object {
         val DETECTED_COLOR = Color.rgb(0, 230, 118)
         const val TRACKING_TARGET_Y_FRACTION = 0.94f
+        const val SEARCH_LABEL = "OpenCV • 搜尋黑膠帶"
     }
 }
 
