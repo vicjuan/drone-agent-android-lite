@@ -926,8 +926,8 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `stable circular path disappearance triggers a low speed endpoint probe and turnaround`() {
-        val controller = circularTrackingController()
+    fun `curved out and back path disappearance triggers a low speed endpoint probe and turnaround`() {
+        val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
         repeat(3) { index ->
             controller.observe(
                 observation(4.0, 0.8, 0.02),
@@ -963,6 +963,39 @@ class TapeTrackingControllerTest {
             recovery.forwardSpeedMetersPerSecond,
             0.0,
         )
+    }
+
+    @Test
+    fun `curved out and back accepts the steep endpoint geometry from flight`() {
+        val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
+        repeat(3) { index ->
+            controller.observe(
+                observation(
+                    angleDegrees = 71.6,
+                    longSideFraction = 0.92,
+                    nearFieldOffsetFraction = 0.10,
+                    bounds = NormalizedRect(0.59, 0.52, 1.0, 1.0),
+                    lookahead = TapeLookahead(xFraction = 0.759, yFraction = 0.817),
+                    heightAboveGroundMeters = 0.5,
+                ),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        controller.observe(null, seconds(3))
+        controller.observe(null, seconds(3) + 250_000_000L)
+
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(seconds(3) + 250_000_000L).phase,
+        )
+
+        repeat(3) { index ->
+            controller.observe(null, seconds(5) + index * 250_000_000L)
+        }
+        val turning = controller.tick(seconds(5) + 500_000_000L)
+
+        assertTrue(turning.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, turning.phase)
     }
 
     @Test
@@ -1077,7 +1110,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular endpoint probe is cancelled when the tracked path returns`() {
+    fun `circular endpoint probe is cancelled when a continuing path returns`() {
         val controller = circularTrackingController()
         repeat(3) { index ->
             controller.observe(
@@ -1093,12 +1126,63 @@ class TapeTrackingControllerTest {
             controller.tick(seconds(3) + 500_000_000L).phase,
         )
 
-        controller.observe(observation(5.0, 0.82, 0.03), seconds(4))
+        controller.observe(
+            observation(5.0, 0.82, 0.03, endpointCandidate = false),
+            seconds(4),
+        )
         val resumed = controller.tick(seconds(4))
 
         assertFalse(resumed.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
+    fun `endpoint terminus reappearing during probe still turns after final disappearance`() {
+        val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
+        repeat(3) { index ->
+            controller.observe(
+                observation(
+                    angleDegrees = 71.6,
+                    longSideFraction = 0.92,
+                    nearFieldOffsetFraction = 0.10,
+                    bounds = NormalizedRect(0.59, 0.52, 1.0, 1.0),
+                    lookahead = TapeLookahead(xFraction = 0.759, yFraction = 0.817),
+                    heightAboveGroundMeters = 0.5,
+                ),
+                seconds(2) + index * 250_000_000L,
+            )
+        }
+        controller.observe(null, seconds(3))
+        controller.observe(null, seconds(3) + 250_000_000L)
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(seconds(3) + 250_000_000L).phase,
+        )
+
+        controller.observe(
+            observation(
+                angleDegrees = 52.1,
+                longSideFraction = 1.048,
+                nearFieldOffsetFraction = 0.08,
+                bounds = NormalizedRect(0.59, 0.0, 1.0, 1.0),
+                lookahead = TapeLookahead(xFraction = 0.77, yFraction = 0.63),
+                heightAboveGroundMeters = 0.5,
+            ),
+            seconds(4),
+        )
+        assertEquals(
+            TapeTrackingPhase.VERIFYING_ENDPOINT,
+            controller.tick(seconds(4)).phase,
+        )
+
+        repeat(3) { index ->
+            controller.observe(null, seconds(5) + index * 250_000_000L)
+        }
+        val turning = controller.tick(seconds(5) + 500_000_000L)
+
+        assertTrue(turning.endpointReached)
+        assertEquals(TapeTrackingPhase.TURNING, turning.phase)
     }
 
     @Test
@@ -1154,9 +1238,11 @@ class TapeTrackingControllerTest {
         return controller
     }
 
-    private fun circularTrackingController(): TapeTrackingController =
+    private fun circularTrackingController(
+        mode: TapeTrackingMode = TapeTrackingMode.CIRCULAR,
+    ): TapeTrackingController =
         TapeTrackingController().also {
-            it.start(0L, TapeTrackingMode.CIRCULAR)
+            it.start(0L, mode)
             assertEquals(TapeTrackingPhase.TRACKING, it.tick(seconds(2)).phase)
         }
 
