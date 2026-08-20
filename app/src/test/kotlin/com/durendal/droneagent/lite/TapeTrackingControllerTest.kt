@@ -475,7 +475,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `three consistent centered candidates reacquire a new circular path`() {
+    fun `two consistent centered candidates reacquire a new circular path`() {
         val controller = circularTrackingController()
         controller.observe(observation(80.0, 0.8, 0.02), seconds(2))
         controller.observe(null, seconds(3))
@@ -485,26 +485,29 @@ class TapeTrackingControllerTest {
             controller.tick(seconds(6)).phase,
         )
 
-        val centeredCandidates = listOf(
+        val firstCandidateAt = seconds(7)
+        controller.observe(
             observation(6.0, 0.75, 0.06),
-            observation(5.0, 0.77, 0.04),
-            observation(4.0, 0.79, 0.05),
+            firstCandidateAt,
         )
-        var reacquired: TapeTrackingDecision? = null
-        centeredCandidates.forEachIndexed { index, candidate ->
-            val now = seconds(7) + index * 250_000_000L
-            controller.observe(candidate, now)
-            reacquired = controller.tick(now)
-            if (index < centeredCandidates.lastIndex) {
-                assertEquals(TapeTrackingPhase.REACQUIRING_PATH, reacquired?.phase)
-            }
-        }
+        val awaitingSecondCandidate = controller.tick(firstCandidateAt)
+        assertEquals(
+            TapeTrackingPhase.REACQUIRING_PATH,
+            awaitingSecondCandidate.phase,
+        )
+        assertEquals(0.0, awaitingSecondCandidate.forwardSpeedMetersPerSecond, 0.0)
 
-        val decision = checkNotNull(reacquired)
-        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        val secondCandidateAt = firstCandidateAt + 250_000_000L
+        controller.observe(
+            observation(5.0, 0.77, 0.04),
+            secondCandidateAt,
+        )
+        val reacquired = controller.tick(secondCandidateAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, reacquired.phase)
         assertEquals(
             TapeTrackingController.CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND,
-            decision.forwardSpeedMetersPerSecond,
+            reacquired.forwardSpeedMetersPerSecond,
             0.0,
         )
     }
@@ -539,7 +542,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `stale circular reacquisition candidate still requires three fresh detections`() {
+    fun `stale circular reacquisition candidate still requires two fresh detections`() {
         val controller = circularTrackingController()
         controller.observe(observation(80.0, 0.8, 0.02), seconds(2))
         controller.observe(null, seconds(3))
@@ -553,17 +556,25 @@ class TapeTrackingControllerTest {
                 TapeTrackingController.REACQUISITION_CANDIDATE_MAX_GAP_NANOS +
                 1L,
         )
-        repeat(2) { index ->
-            controller.observe(
-                observation(-62.0, 0.95, -0.14),
-                seconds(6) + index * 200_000_000L,
-            )
-        }
 
-        val awaitingThirdCandidate = controller.tick(seconds(6) + 200_000_000L)
-        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, awaitingThirdCandidate.phase)
-        assertEquals(0.0, awaitingThirdCandidate.yawRateDegreesPerSecond, 0.0)
-        assertEquals(0.0, awaitingThirdCandidate.forwardSpeedMetersPerSecond, 0.0)
+        val firstFreshCandidateAt = seconds(6)
+        controller.observe(
+            observation(-62.0, 0.95, -0.14),
+            firstFreshCandidateAt,
+        )
+        val awaitingSecondCandidate = controller.tick(firstFreshCandidateAt)
+        assertEquals(TapeTrackingPhase.REACQUIRING_PATH, awaitingSecondCandidate.phase)
+        assertEquals(0.0, awaitingSecondCandidate.forwardSpeedMetersPerSecond, 0.0)
+
+        val secondFreshCandidateAt = firstFreshCandidateAt + 200_000_000L
+        controller.observe(
+            observation(-62.0, 0.95, -0.14),
+            secondFreshCandidateAt,
+        )
+        assertEquals(
+            TapeTrackingPhase.ALIGNING_CURVE,
+            controller.tick(secondFreshCandidateAt).phase,
+        )
     }
 
     @Test

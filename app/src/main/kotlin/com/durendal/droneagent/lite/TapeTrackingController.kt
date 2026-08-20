@@ -1304,10 +1304,12 @@ internal class TapeTrackingController {
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
         const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
         // A lost-path reacquisition must be a substantial route, not a short floor feature.
+        // Flight evidence after the detector hardening showed that waiting for a third
+        // mutually consistent frame only prolonged a stationary tail reacquisition.
         const val CIRCULAR_REACQUISITION_MIN_PATH_FRACTION = 0.60
         const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
         const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
-        const val REACQUISITION_CONFIRMATION_COUNT = 3
+        const val REACQUISITION_CONFIRMATION_COUNT = 2
         // Detector flicker on wrinkled tape may insert null or short-fragment frames.
         const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
