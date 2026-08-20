@@ -438,6 +438,9 @@ internal class TapeTrackingController {
         }
         if (observation == null) {
             circularDetectionGap = true
+            if (!circularEndpointQualified) {
+                consecutiveCircularEndpointReadyDetections = 0
+            }
             if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
                 expireCircularReacquisitionCandidateIfStale(nowNanos)
             } else {
@@ -1313,14 +1316,17 @@ internal class TapeTrackingController {
         // Detector flicker on wrinkled tape may insert null or short-fragment frames.
         const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
-        // Endpoint qualification likewise requires a long route before misses may trigger a turn.
+        // Endpoint qualification requires a long, centered route with an in-frame terminus.
+        // The 2026-08-20 flight produced two such consecutive frames before the endpoint
+        // passed under the aircraft and detector flicker began. A single frame remains
+        // insufficient, while requiring a third prevents a real endpoint from reaching
+        // the existing disappearance probe.
         const val CIRCULAR_ENDPOINT_READY_MIN_FRACTION = 0.60
-        // A real curved endpoint approached at 71.6°. The in-frame terminus,
-        // near-edge root, centered near field and three-frame confirmation
-        // distinguish an endpoint; a straight-tape angle limit rejects valid arcs.
+        // A real curved endpoint approached at 71.6°. The in-frame terminus, near-edge
+        // root and centered near field distinguish an endpoint without rejecting valid arcs.
         const val CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES = 75.0
         const val CIRCULAR_ENDPOINT_READY_MAX_OFFSET_FRACTION = 0.20
-        const val CIRCULAR_ENDPOINT_READY_CONFIRMATION_COUNT = 3
+        const val CIRCULAR_ENDPOINT_READY_CONFIRMATION_COUNT = 2
         const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
         const val CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION = 0.60
         const val CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.02

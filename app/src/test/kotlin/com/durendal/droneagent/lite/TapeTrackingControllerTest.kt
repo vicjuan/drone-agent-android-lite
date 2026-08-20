@@ -937,19 +937,24 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `curved out and back path disappearance triggers a low speed endpoint probe and turnaround`() {
+    fun `two qualified endpoint frames before detector loss trigger probe and turnaround`() {
+        val singleFrameController =
+            circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
+        singleFrameController.observe(observation(4.0, 0.8, 0.02), seconds(2))
+        singleFrameController.observe(null, seconds(2) + 250_000_000L)
+        assertEquals(
+            TapeTrackingPhase.TRACKING,
+            singleFrameController.tick(seconds(2) + 250_000_000L).phase,
+        )
+
         val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
+        controller.observe(observation(4.0, 0.8, 0.02), seconds(3))
+        controller.observe(observation(4.0, 0.8, 0.02), seconds(3) + 250_000_000L)
         repeat(3) { index ->
-            controller.observe(
-                observation(4.0, 0.8, 0.02),
-                seconds(2) + index * 250_000_000L,
-            )
-        }
-        repeat(3) { index ->
-            controller.observe(null, seconds(3) + index * 250_000_000L)
+            controller.observe(null, seconds(4) + index * 250_000_000L)
         }
 
-        val probing = controller.tick(seconds(3) + 500_000_000L)
+        val probing = controller.tick(seconds(4) + 500_000_000L)
         assertEquals(TapeTrackingPhase.VERIFYING_ENDPOINT, probing.phase)
         assertEquals(
             TapeTrackingController.CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND,
@@ -958,16 +963,16 @@ class TapeTrackingControllerTest {
         )
 
         repeat(3) { index ->
-            controller.observe(null, seconds(5) + index * 250_000_000L)
+            controller.observe(null, seconds(6) + index * 250_000_000L)
         }
-        val turning = controller.tick(seconds(5) + 500_000_000L)
+        val turning = controller.tick(seconds(6) + 500_000_000L)
 
         assertTrue(turning.endpointReached)
         assertEquals(TapeTrackingPhase.TURNING, turning.phase)
 
-        controller.resumeAfterTurn(seconds(6))
-        assertEquals(TapeTrackingPhase.RECENTERING, controller.tick(seconds(6)).phase)
-        val recovery = controller.tick(seconds(8))
+        controller.resumeAfterTurn(seconds(7))
+        assertEquals(TapeTrackingPhase.RECENTERING, controller.tick(seconds(7)).phase)
+        val recovery = controller.tick(seconds(9))
         assertEquals(TapeTrackingPhase.RECOVERING_AFTER_TURN, recovery.phase)
         assertEquals(
             TapeTrackingController.CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND,

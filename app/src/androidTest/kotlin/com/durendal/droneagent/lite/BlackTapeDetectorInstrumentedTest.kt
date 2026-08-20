@@ -499,6 +499,37 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun latestFlightProvidesTwoQualifiedEndpointFramesBeforeDetectorFlicker() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-endpoint-missed-1.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-2.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-3.png", width, height),
+                    rgbaAsset("flight-endpoint-missed-4.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    detector.setDetectionMode(
+                        if (index == 0) TapeDetectionMode.STRAIGHT else TapeDetectionMode.PATH,
+                    )
+                },
+            )
+
+        val endpointEvidence = detections.mapIndexed { index, detection ->
+            "$index:${detection?.quality}:${detection?.endpointCandidate}:${diagnostics[index]}"
+        }
+        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it != null })
+        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it?.endpointCandidate == true })
+        assertTrue(endpointEvidence.joinToString("\n"), detections.drop(2).none { it?.endpointCandidate == true })
+    }
+
+    @Test
     fun flightBoardBoundaryIsNotReacquiredAsTape() {
         val width = 1920
         val height = 1080
