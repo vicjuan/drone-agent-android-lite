@@ -29,8 +29,7 @@ internal data class TapeTrackingObservation(
     val longSideFraction: Double,
     val nearFieldOffsetFraction: Double,
     val bounds: NormalizedRect,
-    val lookaheadXFraction: Double?,
-    val lookaheadYFraction: Double?,
+    val lookahead: TapeLookahead?,
     val frameWidthPixels: Int,
     val frameHeightPixels: Int,
     val heightAboveGroundMeters: Double?,
@@ -39,11 +38,6 @@ internal data class TapeTrackingObservation(
         require(angleFromVerticalDegrees in -90.0..90.0)
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
-        require(lookaheadXFraction == null || lookaheadXFraction in 0.0..1.0)
-        require(lookaheadYFraction == null || lookaheadYFraction in 0.0..1.0)
-        require((lookaheadXFraction == null) == (lookaheadYFraction == null)) {
-            "a look-ahead point is either fully known or absent"
-        }
         require(frameWidthPixels > 0 && frameHeightPixels > 0)
         require(heightAboveGroundMeters == null || (
             heightAboveGroundMeters.isFinite() && heightAboveGroundMeters > 0.0
@@ -824,18 +818,17 @@ internal class TapeTrackingController {
         // A path the detector could not follow far enough reports no look-ahead.
         // Holding the previous one would steer from evidence this frame does not
         // have, so Pure Pursuit loses its target instead of inheriting a stale one.
-        val lookaheadX = observation.lookaheadXFraction
-        val lookaheadY = observation.lookaheadYFraction
-        if (lookaheadX == null || lookaheadY == null) {
+        val lookahead = observation.lookahead
+        if (lookahead == null) {
             controlledLookaheadXFraction = null
             controlledLookaheadYFraction = null
         } else {
             controlledLookaheadXFraction = controlledLookaheadXFraction?.let {
-                exponentialAverage(it, lookaheadX, STABILIZED_FILTER_ALPHA)
-            } ?: lookaheadX
+                exponentialAverage(it, lookahead.xFraction, STABILIZED_FILTER_ALPHA)
+            } ?: lookahead.xFraction
             controlledLookaheadYFraction = controlledLookaheadYFraction?.let {
-                exponentialAverage(it, lookaheadY, STABILIZED_FILTER_ALPHA)
-            } ?: lookaheadY
+                exponentialAverage(it, lookahead.yFraction, STABILIZED_FILTER_ALPHA)
+            } ?: lookahead.yFraction
         }
         lookaheadFrameAspectRatio =
             observation.frameWidthPixels.toDouble() / observation.frameHeightPixels

@@ -21,9 +21,13 @@ import kotlin.math.min
  * brown board part of the dark class. Geometry, colour context and short-term
  * overlap reject scenery and keep the box on one physical strip.
  */
-class BlackTapeDetector(
+class BlackTapeDetector internal constructor(
     private val onResult: (TapeDetection?) -> Unit,
     private val onError: (Throwable) -> Unit = {},
+    // Replay evidence is opt-in and owned by the caller: the detector knows the
+    // frame and its masks, but only the Activity knows gimbal pose and height.
+    private val captureRecorder: TapeCaptureRecorder? = null,
+    private val captureFlightContext: () -> Map<String, String> = ::emptyMap,
 ) : AutoCloseable {
 
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -54,6 +58,11 @@ class BlackTapeDetector(
     private val pathDirectionEstimator = TapePathDirectionEstimator()
     private var candidateMaskBytes = ByteArray(0)
 
+    // Non-null only while the current frame is being captured. detect() runs on
+    // the single detector thread, so a plain field is the whole synchronisation.
+    private var capturePlanes: MutableList<TapeCapturePlane>? = null
+    private var capturePlaneBytes = ByteArray(0)
+
     init {
         check(OpenCVLoader.initLocal()) { "OpenCV native runtime failed to initialize" }
     }
@@ -78,7 +87,7 @@ class BlackTapeDetector(
         try {
             worker.execute {
                 try {
-                    val result = detect(copy, width, height)
+                    val result = detect(copy, width, height, now)
                     if (!closed.get()) onResult(result)
                 } catch (error: Throwable) {
                     if (!closed.get()) onError(error)
@@ -90,6 +99,25 @@ class BlackTapeDetector(
             processing.set(false)
             if (!closed.get()) onError(error)
         }
+    }
+
+    /**
+     * Re-runs one stored capture through the live pipeline on the calling thread.
+     *
+     * This is the offline replay entry point: it exists so a recorded failure can
+     * be re-examined against the current build instead of against a screen
+     * recording. It must only be used on a detector that is not receiving frames,
+     * because [detect] carries this frame's diagnostics and the previous frame's
+     * tracking state in fields owned by the detector thread. Replaying a recorded
+     * sequence therefore means a detector of its own, fed the captures in order.
+     */
+    internal fun replay(capture: TapeCapture): TapeDetection? {
+        val frame = capture.frame
+        require(frame.channels == RGBA_CHANNELS.toInt()) {
+            "replay needs an RGBA frame, capture holds ${frame.channels} channels"
+        }
+        val frameNanos = capture.metadata["frame.acceptedAtNanos"]?.toLongOrNull() ?: 0L
+        return detect(frame.pixels, frame.width, frame.height, frameNanos)
     }
 
     internal fun setDetectionMode(mode: TapeDetectionMode) {
@@ -145,7 +173,26 @@ class BlackTapeDetector(
         if (closed.compareAndSet(false, true)) worker.shutdownNow()
     }
 
-    private fun detect(rgbaBytes: ByteArray, width: Int, height: Int): TapeDetection? {
+    /**
+     * Runs one frame and, when the recorder is armed, keeps that frame and its
+     * masks as replayable evidence. Capture is assembled after the pipeline has
+     * finished so a rejected frame is recorded exactly like an accepted one.
+     */
+    private fun detect(
+        rgbaBytes: ByteArray,
+        width: Int,
+        height: Int,
+        frameNanos: Long,
+    ): TapeDetection? {
+        val capturing = captureRecorder?.isArmed == true
+        capturePlanes = if (capturing) ArrayList() else null
+        val verdict = detectFrame(rgbaBytes, width, height)
+        if (capturing) offerCapture(rgbaBytes, width, height, frameNanos, verdict)
+        capturePlanes = null
+        return verdict
+    }
+
+    private fun detectFrame(rgbaBytes: ByteArray, width: Int, height: Int): TapeDetection? {
         val source = Mat(height, width, org.opencv.core.CvType.CV_8UC4)
         val resized = Mat()
         val rgb = Mat()
@@ -245,6 +292,7 @@ class BlackTapeDetector(
                     Imgproc.THRESH_BINARY_INV,
                 )
             }
+            recordCapturePlane("blackMask", blackMask)
             val separation = classSeparation(blurred, effectiveThreshold)
             lastClassSeparation = separation
             if (separation < MIN_CLASS_SEPARATION_LUMINANCE) {
@@ -256,6 +304,7 @@ class BlackTapeDetector(
             lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
             lastFloorFraction =
                 Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
+            recordCapturePlane("floorMask", floorMask)
             Imgproc.morphologyEx(
                 blackMask,
                 bridgedBlackMask,
@@ -272,6 +321,10 @@ class BlackTapeDetector(
                 Core.bitwise_or(bridgedBlackMask, directionalBridgeMask, bridgedBlackMask)
             }
             Imgproc.morphologyEx(bridgedBlackMask, cleanedBlackMask, Imgproc.MORPH_OPEN, openKernel)
+            recordCapturePlane("bridgedBlackMask", bridgedBlackMask)
+            // findContours may consume its input, so the accepted-component mask
+            // is recorded while it still describes this frame.
+            recordCapturePlane("cleanedBlackMask", cleanedBlackMask)
             Imgproc.findContours(
                 cleanedBlackMask,
                 contours,
@@ -361,8 +414,10 @@ class BlackTapeDetector(
                 nearFieldOffsetFraction = winner.nearFieldOffsetFraction,
                 anchorXFraction = winner.anchorXFraction,
                 anchorYFraction = winner.anchorYFraction,
-                lookaheadXFraction = winner.lookaheadXFraction,
-                lookaheadYFraction = winner.lookaheadYFraction,
+                lookahead = TapeLookahead(
+                    xFraction = winner.lookaheadXFraction,
+                    yFraction = winner.lookaheadYFraction,
+                ),
             )
         } finally {
             candidateMask.release()
@@ -700,7 +755,82 @@ class BlackTapeDetector(
         return deltaX * deltaX + deltaY * deltaY <= MAX_ANCHOR_STEP_FRACTION_SQUARED
     }
 
+    /**
+     * Copies [mat] into the frame's evidence. Called unconditionally from the
+     * pipeline and cheap when capture is off, so the pipeline reads the same
+     * whether or not an operator is collecting evidence.
+     */
+    private fun recordCapturePlane(name: String, mat: Mat) {
+        val planes = capturePlanes ?: return
+        if (mat.empty() || mat.channels() != 1) return
+        val required = (mat.total() * mat.channels()).toInt()
+        if (capturePlaneBytes.size < required) capturePlaneBytes = ByteArray(required)
+        mat.get(0, 0, capturePlaneBytes)
+        planes.add(
+            TapeCapturePlane(
+                name = name,
+                width = mat.cols(),
+                height = mat.rows(),
+                channels = 1,
+                pixels = capturePlaneBytes.copyOf(required),
+            ),
+        )
+    }
+
+    private fun offerCapture(
+        rgbaBytes: ByteArray,
+        width: Int,
+        height: Int,
+        frameNanos: Long,
+        verdict: TapeDetection?,
+    ) {
+        val recorder = captureRecorder ?: return
+        val planes = capturePlanes ?: return
+        val metadata = LinkedHashMap<String, String>()
+        metadata["frame.acceptedAtNanos"] = frameNanos.toString()
+        metadata["detector.mode"] = lastDetectionMode.name
+        metadata["detector.diagnostics"] = diagnosticsSummary()
+        metadata["detection"] = if (verdict == null) "none" else "accepted"
+        if (verdict != null) {
+            metadata["detection.confidence"] = verdict.confidence.toString()
+            metadata["detection.angleFromVerticalDegrees"] =
+                verdict.angleFromVerticalDegrees.toString()
+            metadata["detection.longSideFraction"] = verdict.longSideFraction.toString()
+            metadata["detection.nearFieldOffsetFraction"] =
+                verdict.nearFieldOffsetFraction.toString()
+            metadata["detection.anchorXFraction"] = verdict.anchorXFraction.toString()
+            metadata["detection.anchorYFraction"] = verdict.anchorYFraction.toString()
+            metadata["detection.lookaheadXFraction"] =
+                verdict.lookahead?.xFraction?.toString() ?: "none"
+            metadata["detection.lookaheadYFraction"] =
+                verdict.lookahead?.yFraction?.toString() ?: "none"
+            metadata["detection.quality"] = verdict.quality.name
+        }
+        // Flight state last so a detector key can never be shadowed by it.
+        runCatching { captureFlightContext() }
+            .onSuccess { context -> context.forEach { (key, value) -> metadata[key] = value } }
+            .onFailure { metadata["flightContext.error"] = it.message ?: it::class.java.simpleName }
+        recorder.offer(
+            TapeCapture(
+                metadata = metadata,
+                frame = TapeCapturePlane(
+                    name = TapeCapture.FRAME_PLANE_NAME,
+                    width = width,
+                    height = height,
+                    channels = RGBA_CHANNELS.toInt(),
+                    pixels = rgbaBytes,
+                ),
+                masks = planes,
+            ),
+        )
+    }
+
     private fun registerDetectionMiss() {
+        // The frame that first loses a tracked path is the one worth replaying;
+        // the recorder reaches back for the run-up that explains it.
+        if (consecutiveDetectionMisses == 0 && previousBounds != null) {
+            captureRecorder?.trigger("path-lost")
+        }
         consecutiveDetectionMisses++
         if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) {
             previousBounds = null

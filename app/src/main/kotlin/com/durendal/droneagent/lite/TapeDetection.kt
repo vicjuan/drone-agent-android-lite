@@ -11,6 +11,10 @@ import kotlin.math.atan2
  * runs but has no trustworthy path ahead, so translation must stop and only a
  * bounded in-place alignment is allowed. [LOST] means even the near field is
  * not credible and every motion command must be zero.
+ *
+ * [LOST] is deliberately never a property of a [TapeDetection]: a lost path is
+ * reported as no detection at all. Keeping it in this enum is what lets the
+ * controller answer every frame — detected or not — with one quality value.
  */
 enum class PathQuality {
     FULL_PATH,
@@ -28,14 +32,31 @@ internal enum class TapeDetectionMode {
 }
 
 /**
+ * The point on the tape the aircraft should steer toward, in source-frame
+ * proportions.
+ *
+ * The two coordinates travel together because half a look-ahead point is not a
+ * weaker look-ahead, it is a bug: a path is either followed far enough ahead to
+ * aim at, or it is not followed far enough at all.
+ */
+data class TapeLookahead(
+    val xFraction: Double,
+    val yFraction: Double,
+) {
+    init {
+        require(xFraction in 0.0..1.0) { "lookahead x must be a frame fraction" }
+        require(yFraction in 0.0..1.0) { "lookahead y must be a frame fraction" }
+    }
+}
+
+/**
  * A black-tape candidate expressed in source-frame proportions.
  *
- * [lookaheadXFraction] and [lookaheadYFraction] are null unless [quality] is
- * [PathQuality.FULL_PATH]: a near-field-only path must never hand a lookahead
- * point to the controller. [directEvidenceFraction] is the share of the
- * accepted path supported by raw segmentation pixels rather than by glare
- * bridging, so a mostly-repaired path can never look as credible as an
- * observed one.
+ * [quality] is derived from [lookahead] rather than stored, and [lookahead] has
+ * no default, so a caller cannot claim [PathQuality.FULL_PATH] for a path it
+ * could not follow ahead, nor arrive at one by omission. That
+ * equivalence is the contract itself: a trustworthy look-ahead point is exactly
+ * what separates a path the controller may pursue from one it may only align to.
  */
 data class TapeDetection(
     val sourceWidth: Int,
@@ -47,12 +68,18 @@ data class TapeDetection(
     val nearFieldOffsetFraction: Double,
     val anchorXFraction: Double = bounds.centerX,
     val anchorYFraction: Double = bounds.bottom,
-    val lookaheadXFraction: Double? = bounds.centerX,
-    val lookaheadYFraction: Double? = bounds.top,
-    val quality: PathQuality = PathQuality.FULL_PATH,
-    val curvatureNormalized: Double? = null,
-    val directEvidenceFraction: Double = 1.0,
+    /**
+     * Deliberately has no default. A default derived from [bounds] would hand
+     * every forgetful caller a made-up look-ahead point and, with it,
+     * [PathQuality.FULL_PATH] — the exact silent promotion this contract exists
+     * to prevent. Whether the path was followed far enough to aim at is a fact
+     * the measurement stage knows and must state.
+     */
+    val lookahead: TapeLookahead?,
 ) {
+    val quality: PathQuality
+        get() = if (lookahead == null) PathQuality.NEAR_FIELD_ONLY else PathQuality.FULL_PATH
+
     init {
         require(sourceWidth > 0 && sourceHeight > 0)
         require(confidence in 0.0..1.0)
@@ -60,14 +87,6 @@ data class TapeDetection(
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
         require(anchorXFraction in 0.0..1.0 && anchorYFraction in 0.0..1.0)
-        require(lookaheadXFraction == null || lookaheadXFraction in 0.0..1.0)
-        require(lookaheadYFraction == null || lookaheadYFraction in 0.0..1.0)
-        require(directEvidenceFraction in 0.0..1.0)
-        require(quality != PathQuality.LOST) { "a LOST path is reported as no detection" }
-        require(
-            quality == PathQuality.FULL_PATH ||
-                (lookaheadXFraction == null && lookaheadYFraction == null),
-        ) { "only FULL_PATH may carry a lookahead point" }
     }
 }
 

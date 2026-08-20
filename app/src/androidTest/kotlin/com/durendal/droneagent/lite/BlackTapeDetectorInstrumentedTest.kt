@@ -619,10 +619,10 @@ class BlackTapeDetectorInstrumentedTest {
      * missing look-ahead is a failure of the case rather than a value to skip.
      */
     private val TapeDetection.lookaheadX: Double
-        get() = requireNotNull(lookaheadXFraction) { "expected a FULL_PATH look-ahead point" }
+        get() = requireNotNull(lookahead) { "expected a FULL_PATH look-ahead point" }.xFraction
 
     private val TapeDetection.lookaheadY: Double
-        get() = requireNotNull(lookaheadYFraction) { "expected a FULL_PATH look-ahead point" }
+        get() = requireNotNull(lookahead) { "expected a FULL_PATH look-ahead point" }.yFraction
 
     private fun rgbaFrame(
         width: Int,

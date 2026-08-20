@@ -29,6 +29,7 @@ import dji.v5.manager.SDKManager
 import dji.v5.manager.aircraft.perception.PerceptionManager
 import dji.v5.manager.aircraft.perception.listener.ObstacleDataListener
 import dji.v5.manager.interfaces.SDKManagerCallback
+import java.io.File
 import kotlin.math.abs
 
 /**
@@ -75,6 +76,7 @@ class MainActivity : Activity() {
     private lateinit var cameraDownButton: PillButton
     private lateinit var cameraPitch65Button: PillButton
     private lateinit var cameraPitch60Button: PillButton
+    private lateinit var captureButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var leftPad: StickPadView
@@ -150,6 +152,7 @@ class MainActivity : Activity() {
     /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
     private var gimbalActive = false
     private var selectedCameraPitchDegrees: Double? = null
+    private var captureRecorder: TapeCaptureRecorder? = null
     private var cameraPitchCommandPending = false
     private var cameraPitchCommandGeneration = 0L
     private val cameraPitchCommandTimeoutRunnable = Runnable {
@@ -231,12 +234,22 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         flightLog = FlightLog(this)
+        captureRecorder = runCatching {
+            TapeCaptureRecorder(
+                root = File(getExternalFilesDir(null), TAPE_CAPTURE_DIRECTORY),
+                log = flightLog::write,
+            )
+        }.onFailure { error ->
+            flightLog.write("tape capture unavailable: $error")
+        }.getOrNull()
         tapeDetector = runCatching {
             BlackTapeDetector(
                 onResult = ::handleTapeDetection,
                 onError = { error ->
                     runOnUiThread { flightLog.write("OpenCV detection failed: $error") }
                 },
+                captureRecorder = captureRecorder,
+                captureFlightContext = ::tapeCaptureFlightContext,
             )
         }.onFailure { error ->
             flightLog.write("OpenCV initialization failed: $error")
@@ -256,6 +269,7 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacksAndMessages(null)
         tapeTracking.stop()
         tapeTrackingStartPending = false
+        captureRecorder?.disarm()
         if (avoidance.closedConfirmed) avoidanceCheck.ensureBrake {}
         if (stickOwned) virtualStick.disable {}
         virtualStick.close()
@@ -330,8 +344,7 @@ class MainActivity : Activity() {
                         longSideFraction = it.longSideFraction,
                         nearFieldOffsetFraction = it.nearFieldOffsetFraction,
                         bounds = it.bounds,
-                        lookaheadXFraction = it.lookaheadXFraction,
-                        lookaheadYFraction = it.lookaheadYFraction,
+                        lookahead = it.lookahead,
                         frameWidthPixels = it.sourceWidth,
                         frameHeightPixels = it.sourceHeight,
                         heightAboveGroundMeters = usableHeightMeters()?.takeIf { height ->
@@ -360,8 +373,8 @@ class MainActivity : Activity() {
                         it.angleFromVerticalDegrees,
                         it.anchorXFraction,
                         it.anchorYFraction,
-                        it.lookaheadXFraction,
-                        it.lookaheadYFraction,
+                        it.lookahead?.xFraction,
+                        it.lookahead?.yFraction,
                         it.bounds.centerX - 0.5,
                         it.longSideFraction,
                         it.bounds,
@@ -440,10 +453,60 @@ class MainActivity : Activity() {
         cameraPitch60Button = PillButton("鏡頭 -60°", StickPadView.CYAN) {
             moveCameraToPitch(CAMERA_PITCH_60_DEGREES)
         }
+        captureButton = PillButton("錄製影格證據", StickPadView.AMBER) { toggleFrameCapture() }
         addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
         addView(cameraPitch65Button, actionParams(marginEnd = dp(10)))
-        addView(cameraPitch60Button, actionParams())
+        addView(cameraPitch60Button, actionParams(marginEnd = dp(10)))
+        addView(captureButton, actionParams())
     }
+
+    /**
+     * Arms or disarms replayable frame capture. Only the operator turns this on:
+     * it retains several full-resolution frames and writes them to storage, and
+     * the evidence is only worth keeping around a run the operator is watching.
+     */
+    private fun toggleFrameCapture() {
+        val recorder = captureRecorder
+        if (recorder == null) {
+            render("影格證據儲存無法使用")
+            return
+        }
+        if (recorder.isArmed) {
+            recorder.disarm()
+            captureButton.text = "錄製影格證據"
+            // Queued is not saved: report what reached storage, and say so plainly
+            // when the writer could not keep up, rather than implying evidence
+            // exists that was dropped.
+            val dropped = recorder.droppedCaptureCount + recorder.failedCaptureCount
+            render(
+                if (dropped == 0) {
+                    "影格證據已停止，已保存 ${recorder.savedCaptureCount} 張"
+                } else {
+                    "影格證據已停止，已保存 ${recorder.savedCaptureCount} 張，" +
+                        "另有 $dropped 張未能保存（寫入跟不上）"
+                },
+            )
+        } else {
+            recorder.arm()
+            captureButton.text = "停止錄製影格"
+            render("影格證據錄製中：路徑消失時自動保存前後影格")
+        }
+    }
+
+    /**
+     * Flight state a capture cannot reconstruct from the frame itself. Camera
+     * pitch is the commanded-and-accepted value, so a capture taken while a
+     * pitch command is in flight reports it as unknown rather than guessing.
+     */
+    private fun tapeCaptureFlightContext(): Map<String, String> = linkedMapOf(
+        "gimbal.pitchDegrees" to (selectedCameraPitchDegrees?.toString() ?: "unknown"),
+        "aircraft.heightMeters" to (usableHeightMeters()?.toString() ?: "unknown"),
+        "aircraft.heightSource" to heightSource.name,
+        "aircraft.headingDegrees" to (aircraftHeadingDegrees?.toString() ?: "unknown"),
+        "aircraft.flying" to flying.toString(),
+        "tracking.mode" to (activeTapeTrackingMode?.name ?: "off"),
+        "tracking.phase" to renderedTapeTrackingPhase.name,
+    )
 
     private fun actionParams(marginStart: Int = 0, marginEnd: Int = 0) =
         LinearLayout.LayoutParams(
@@ -1016,6 +1079,7 @@ class MainActivity : Activity() {
         val turning = headingTurn != null
         holdButton.available =
             ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
+        captureButton.available = captureRecorder != null
         val cameraPitchAvailable = ready && !cameraPitchCommandPending
         cameraDownButton.available = cameraPitchAvailable
         cameraPitch65Button.available = cameraPitchAvailable
@@ -2343,6 +2407,7 @@ class MainActivity : Activity() {
         /** Three misses prevent a single noisy frame from flashing the box off. */
         const val TAPE_MISSES_TO_CLEAR = 3
         const val TAPE_TRACKING_TICK_MS = 100L
+        const val TAPE_CAPTURE_DIRECTORY = "tape-captures"
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
         const val CAMERA_PITCH_65_DEGREES = -65.0
         const val CAMERA_PITCH_60_DEGREES = -60.0
