@@ -472,6 +472,33 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun trackedTapeSurvivesLatestFlightReflection() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-reflection-pause-establish.png", width, height),
+                    rgbaAsset("flight-reflection-pause-before.png", width, height),
+                    rgbaAsset("flight-reflection-pause-at.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    detector.setDetectionMode(
+                        if (index == 0) TapeDetectionMode.STRAIGHT else TapeDetectionMode.PATH,
+                    )
+                },
+            )
+        assertTrue(diagnostics.first(), detections.first() != null)
+        detections.forEachIndexed { index, detection ->
+            assertEquals(diagnostics[index], PathQuality.FULL_PATH, detection?.quality)
+        }
+    }
+
+    @Test
     fun flightBoardBoundaryIsNotReacquiredAsTape() {
         val width = 1920
         val height = 1080

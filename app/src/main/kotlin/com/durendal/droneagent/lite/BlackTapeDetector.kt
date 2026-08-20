@@ -1314,12 +1314,12 @@ class BlackTapeDetector internal constructor(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
-        // A tracked path may cross a floor-material boundary, so surrounding
-        // coverage stays relaxed. Glare can also widen its black component until
-        // the side window contains tape pixels; relax that gate only after CIELAB
-        // confirms the same board as the established route.
+        // A tracked path may cross a floor-material boundary, and glare can make
+        // flood-fill miss every pixel in one side window. Once overlap and CIELAB
+        // confirm the established route, keep only the surrounding-floor gate;
+        // acquisition remains strict, and continuity still expires after bounded misses.
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
-        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.18
+        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.0
 
         /**
          * Thinning retracts a border-cut ribbon's medial axis by half its width,
