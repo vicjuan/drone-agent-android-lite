@@ -238,9 +238,13 @@ class TapeTrackingControllerTest {
         controller.resumeAfterTurn(seconds(7))
         val recenter = controller.tick(seconds(7))
         assertEquals(TapeTrackingPhase.RECENTERING, recenter.phase)
-        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(9)).phase)
+        assertEquals(
+            TapeTrackingPhase.RECOVERING_AFTER_TURN,
+            controller.tick(seconds(9)).phase,
+        )
         controller.observe(observation(0.0, 0.35), seconds(9))
         val resumed = controller.tick(seconds(9))
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
         assertFalse(resumed.endpointReached)
         assertEquals(0.15, resumed.forwardSpeedMetersPerSecond, 0.0)
     }
@@ -253,8 +257,10 @@ class TapeTrackingControllerTest {
 
         controller.resumeAfterTurn(seconds(7))
         assertEquals(0.0, controller.tick(seconds(7)).forwardSpeedMetersPerSecond, 0.0)
+        // The reacquisition move is its own bounded phase now, so an advance with
+        // nothing detected can never be mistaken for following a path.
         val recovery = controller.tick(seconds(9))
-        assertEquals(TapeTrackingPhase.TRACKING, recovery.phase)
+        assertEquals(TapeTrackingPhase.RECOVERING_AFTER_TURN, recovery.phase)
         assertEquals(0.15, recovery.forwardSpeedMetersPerSecond, 0.0)
 
         val waiting = controller.tick(seconds(12))
@@ -390,7 +396,7 @@ class TapeTrackingControllerTest {
     @Test
     fun `sharp curve alignment requires three stable detections before moving`() {
         val controller = circularTrackingController()
-        controller.observe(observation(46.0, 0.8), seconds(2))
+        controller.observe(observation(55.0, 0.8), seconds(2))
         assertEquals(TapeTrackingPhase.ALIGNING_CURVE, controller.tick(seconds(2)).phase)
 
         val samples = listOf(
@@ -724,6 +730,74 @@ class TapeTrackingControllerTest {
         )
         assertTrue(decision.purePursuitYawRateDegreesPerSecond < 0.0)
         assertTrue(decision.yawRateDegreesPerSecond < 0.0)
+    }
+
+    @Test
+    fun `circular mode pursues a moderate curve toward lookahead instead of local tangent`() {
+        val controller = circularTrackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 52.4,
+                longSideFraction = 1.34,
+                nearFieldOffsetFraction = -0.266,
+                lookahead = TapeLookahead(xFraction = 0.327, yFraction = 0.674),
+                endpointCandidate = false,
+                heightAboveGroundMeters = 0.56,
+            ),
+            seconds(2),
+        )
+
+        val decision = controller.tick(seconds(2))
+
+        assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND,
+            decision.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+        assertTrue(decision.purePursuitYawRateDegreesPerSecond < 0.0)
+        assertTrue(
+            "the look-ahead is left even though the local tangent leans right: $decision",
+            decision.yawRateDegreesPerSecond < 0.0,
+        )
+    }
+
+    @Test
+    fun `sharp flight lookahead turns at full circular rate while advancing`() {
+        val controller = circularTrackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 71.6,
+                longSideFraction = 1.02,
+                nearFieldOffsetFraction = 0.10,
+                lookahead = TapeLookahead(xFraction = 0.728, yFraction = 0.814),
+                endpointCandidate = false,
+                heightAboveGroundMeters = 0.59,
+            ),
+            seconds(2),
+        )
+
+        val initial = controller.tick(seconds(2))
+        controller.tick(seconds(2) + 250_000_000L)
+        val turning = controller.tick(seconds(2) + 500_000_000L)
+
+        assertEquals(TapeTrackingPhase.TRACKING, turning.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND,
+            turning.forwardSpeedMetersPerSecond,
+            0.0,
+        )
+        assertTrue(initial.rightSpeedMetersPerSecond > 0.0)
+        assertTrue(
+            "lateral correction must not cap circular yaw at the old 2 deg/s: $turning",
+            turning.yawRateDegreesPerSecond >
+                TapeTrackingController.ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND,
+        )
+        assertEquals(
+            TapeTrackingController.CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
+            turning.yawRateDegreesPerSecond,
+            0.0,
+        )
     }
 
     @Test
@@ -1118,6 +1192,10 @@ class TapeTrackingControllerTest {
         nearFieldOffsetFraction: Double = 0.0,
         bounds: NormalizedRect = verticalBounds(longSideFraction, nearFieldOffsetFraction),
         lookahead: TapeLookahead? = TapeLookahead(xFraction = 0.5, yFraction = 0.60),
+        quality: PathQuality =
+            if (lookahead == null) PathQuality.NEAR_FIELD_ONLY else PathQuality.FULL_PATH,
+        endpointCandidate: Boolean = true,
+        closedLoop: Boolean = false,
         heightAboveGroundMeters: Double? = null,
     ) = TapeTrackingObservation(
         angleFromVerticalDegrees = angleDegrees,
@@ -1125,6 +1203,9 @@ class TapeTrackingControllerTest {
         nearFieldOffsetFraction = nearFieldOffsetFraction,
         bounds = bounds,
         lookahead = lookahead,
+        quality = quality,
+        endpointCandidate = endpointCandidate,
+        closedLoop = closedLoop,
         frameWidthPixels = 1600,
         frameHeightPixels = 900,
         heightAboveGroundMeters = heightAboveGroundMeters,
