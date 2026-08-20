@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.hypot
 
 /**
  * Finds a dark, tape-shaped region on brown corrugated board. Otsu adapts to
@@ -40,6 +41,8 @@ class BlackTapeDetector internal constructor(
     private var previousPathMedianWidthFraction: Double? = null
     private var previousRouteStartXFraction: Double? = null
     private var previousRouteStartYFraction: Double? = null
+    private var boardReferenceA: Double? = null
+    private var boardReferenceB: Double? = null
     @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
@@ -48,6 +51,8 @@ class BlackTapeDetector internal constructor(
     @Volatile private var lastContourCount = 0
     private val rejectionCounts = IntArray(TapeCandidateRejection.entries.size)
     private var luminanceBytes = ByteArray(0)
+    private var labBytes = ByteArray(0)
+    private var blackMaskBytes = ByteArray(0)
     @Volatile private var lastDetectionMode = TapeDetectionMode.PATH
     @Volatile private var lastPathSampleCount = 0
     @Volatile private var lastPathAxis = "NONE"
@@ -143,6 +148,8 @@ class BlackTapeDetector internal constructor(
                 previousPathMedianWidthFraction = null
                 previousRouteStartXFraction = null
                 previousRouteStartYFraction = null
+                boardReferenceA = null
+                boardReferenceB = null
                 consecutiveDetectionMisses = 0
             }
         } catch (error: RuntimeException) {
@@ -156,7 +163,7 @@ class BlackTapeDetector internal constructor(
                 "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
                 "coverage=%.2f branches=%d region=%s candidate=[%s] arcReject=[%s] " +
                 "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
-                "edge:%d chroma:%d floor:%d noCenterline:%d noNearField:%d " +
+                "edge:%d chroma:%d floor:%d boardColor:%d noCenterline:%d noNearField:%d " +
                 "branch:%d shortLookahead:%d"
             ).format(
             lastDetectionMode,
@@ -183,6 +190,7 @@ class BlackTapeDetector internal constructor(
             rejectionCounts[TapeCandidateRejection.HORIZONTAL_FRAME_EDGE.ordinal],
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal],
             rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal],
+            rejectionCounts[TapeCandidateRejection.BOARD_COLOR_CONTEXT.ordinal],
             rejectionCounts[TapeCandidateRejection.NO_CENTERLINE.ordinal],
             rejectionCounts[TapeCandidateRejection.NO_NEAR_FIELD_COMPONENT.ordinal],
             rejectionCounts[TapeCandidateRejection.AMBIGUOUS_BRANCH.ordinal],
@@ -333,6 +341,15 @@ class BlackTapeDetector internal constructor(
             lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
             lastFloorFraction =
                 Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
+            val analysisPixelCount = analysis.cols() * analysis.rows()
+            if (labBytes.size != analysisPixelCount * LAB_CHANNELS) {
+                labBytes = ByteArray(analysisPixelCount * LAB_CHANNELS)
+            }
+            if (blackMaskBytes.size != analysisPixelCount) {
+                blackMaskBytes = ByteArray(analysisPixelCount)
+            }
+            lab.get(0, 0, labBytes)
+            blackMask.get(0, 0, blackMaskBytes)
             recordCapturePlane("floorMask", floorMask)
             Imgproc.morphologyEx(
                 blackMask,
@@ -418,6 +435,7 @@ class BlackTapeDetector internal constructor(
                 return null
             }
             consecutiveDetectionMisses = 0
+            updateBoardReference(winner.boardColor)
             val rect = winner.bounds
             lastPathCurvatureDegrees = winner.totalPathTurnDegrees
             lastPathCurvatureSmoothness = winner.turnConsistency
@@ -676,11 +694,43 @@ class BlackTapeDetector internal constructor(
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal] += 1
             return null
         }
+        val boardColor = boardColorContext(estimate, frameWidth, frameHeight)
+        val boardColorHasEnoughSamples =
+            boardColor != null && boardColor.pairCount >= MIN_BOARD_COLOR_PAIR_COUNT
+        val boardColorMatchesReference =
+            boardColorHasEnoughSamples &&
+                boardColor?.referenceDistance?.let {
+                    it <= MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+                } == true
+        if (boardColor != null) {
+            lastCandidateMetrics +=
+                " board=%.2f/%d ref=%s".format(
+                    boardColor.compatiblePairFraction,
+                    boardColor.pairCount,
+                    boardColor.referenceDistance?.let { "%.1f".format(it) } ?: "none",
+                )
+            if (
+                boardColorHasEnoughSamples &&
+                (
+                    boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION ||
+                        boardColor.referenceDistance?.let {
+                            it > MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+                        } == true
+                    )
+            ) {
+                rejectionCounts[TapeCandidateRejection.BOARD_COLOR_CONTEXT.ordinal] += 1
+                return null
+            }
+        }
         val context = floorContext(floorMask, refinedBounds)
         val minimumSurroundingFloor =
             if (overlapsPrevious) MIN_TRACKED_PATH_SURROUNDING_FLOOR else MIN_PATH_SURROUNDING_FLOOR
         val minimumSideFloor =
-            if (overlapsPrevious) MIN_TRACKED_PATH_SIDE_FLOOR else MIN_PATH_SIDE_FLOOR
+            if (overlapsPrevious && boardColorMatchesReference) {
+                MIN_TRACKED_PATH_SIDE_FLOOR
+            } else {
+                MIN_PATH_SIDE_FLOOR
+            }
         lastCandidateMetrics +=
             " floor=%.3f side=%.3f".format(
                 context.surroundingFraction,
@@ -738,6 +788,7 @@ class BlackTapeDetector internal constructor(
             closedLoop = estimate.topology.closedLoop,
             branchCount = estimate.topology.branchCount,
             centerline = centerlinePath(estimate, measurement, verdict, frameWidth, frameHeight),
+            boardColor = boardColor,
         )
     }
 
@@ -922,6 +973,123 @@ class BlackTapeDetector internal constructor(
             minimumSideFraction = minimumVisibleSideFraction,
         )
     }
+    /**
+     * Samples CIELAB chroma symmetrically outside the two tape edges. A real strip
+     * on one board sees the same material on both sides; a dark board edge sees
+     * different materials even when both passed the coarse floor flood-fill.
+     *
+     * L* is deliberately ignored so a cast shadow or exposure gradient does not
+     * turn one physical board into two colours.
+     */
+    private fun boardColorContext(
+        estimate: CenterlineEstimate,
+        frameWidth: Int,
+        frameHeight: Int,
+    ): BoardColorContext? {
+        val points = estimate.points
+        if (points.size < 2) return null
+        val sampleStep = max(1, points.size / MAX_BOARD_COLOR_SAMPLES)
+        var pairCount = 0
+        var compatiblePairCount = 0
+        var leftASum = 0.0
+        var leftBSum = 0.0
+        var rightASum = 0.0
+        var rightBSum = 0.0
+
+        for (index in points.indices step sampleStep) {
+            val previous = points[max(0, index - BOARD_COLOR_TANGENT_SPAN)]
+            val next = points[min(points.lastIndex, index + BOARD_COLOR_TANGENT_SPAN)]
+            val tangentX = next.x - previous.x
+            val tangentY = next.y - previous.y
+            val tangentLength = hypot(tangentX, tangentY)
+            if (tangentLength <= 0.0) continue
+
+            val point = points[index]
+            val normalX = -tangentY / tangentLength
+            val normalY = tangentX / tangentLength
+            val sampleDistance = max(
+                MIN_BOARD_COLOR_SAMPLE_DISTANCE_PIXELS,
+                point.widthPixels * BOARD_COLOR_SAMPLE_DISTANCE_WIDTH_FACTOR,
+            )
+            val leftX = (point.x + normalX * sampleDistance).toInt()
+            val leftY = (point.y + normalY * sampleDistance).toInt()
+            val rightX = (point.x - normalX * sampleDistance).toInt()
+            val rightY = (point.y - normalY * sampleDistance).toInt()
+            if (
+                leftX !in 0 until frameWidth || leftY !in 0 until frameHeight ||
+                rightX !in 0 until frameWidth || rightY !in 0 until frameHeight
+            ) {
+                continue
+            }
+
+            val leftPixel = leftY * frameWidth + leftX
+            val rightPixel = rightY * frameWidth + rightX
+            if (
+                blackMaskBytes[leftPixel] != 0.toByte() ||
+                blackMaskBytes[rightPixel] != 0.toByte()
+            ) {
+                continue
+            }
+            val leftLab = leftPixel * LAB_CHANNELS
+            val rightLab = rightPixel * LAB_CHANNELS
+            val leftA = (labBytes[leftLab + LAB_A_CHANNEL].toInt() and 0xFF).toDouble()
+            val leftB = (labBytes[leftLab + LAB_B_CHANNEL].toInt() and 0xFF).toDouble()
+            val rightA = (labBytes[rightLab + LAB_A_CHANNEL].toInt() and 0xFF).toDouble()
+            val rightB = (labBytes[rightLab + LAB_B_CHANNEL].toInt() and 0xFF).toDouble()
+            if (hypot(leftA - rightA, leftB - rightB) <= MAX_BOARD_SIDE_CHROMA_DISTANCE) {
+                compatiblePairCount++
+            }
+            pairCount++
+            leftASum += leftA
+            leftBSum += leftB
+            rightASum += rightA
+            rightBSum += rightB
+        }
+        if (pairCount == 0) return null
+
+        val leftA = leftASum / pairCount
+        val leftB = leftBSum / pairCount
+        val rightA = rightASum / pairCount
+        val rightB = rightBSum / pairCount
+        val referenceA = boardReferenceA
+        val referenceB = boardReferenceB
+        val referenceDistance =
+            if (referenceA == null || referenceB == null) {
+                null
+            } else {
+                max(
+                    hypot(leftA - referenceA, leftB - referenceB),
+                    hypot(rightA - referenceA, rightB - referenceB),
+                )
+            }
+        return BoardColorContext(
+            pairCount = pairCount,
+            compatiblePairFraction = compatiblePairCount.toDouble() / pairCount,
+            meanA = (leftA + rightA) / 2.0,
+            meanB = (leftB + rightB) / 2.0,
+            referenceDistance = referenceDistance,
+        )
+    }
+
+    private fun updateBoardReference(context: BoardColorContext?) {
+        if (
+            context == null ||
+            context.pairCount < MIN_BOARD_COLOR_PAIR_COUNT ||
+            context.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION
+        ) {
+            return
+        }
+        val previousA = boardReferenceA
+        val previousB = boardReferenceB
+        if (previousA == null || previousB == null) {
+            boardReferenceA = context.meanA
+            boardReferenceB = context.meanB
+            return
+        }
+        boardReferenceA = previousA + BOARD_REFERENCE_FILTER_ALPHA * (context.meanA - previousA)
+        boardReferenceB = previousB + BOARD_REFERENCE_FILTER_ALPHA * (context.meanB - previousB)
+    }
+
 
     private fun maskFraction(mask: Mat, bounds: Rect): Double =
         countNonZero(mask, bounds).toDouble() / bounds.area().coerceAtLeast(1.0)
@@ -1098,15 +1266,35 @@ class BlackTapeDetector internal constructor(
         val closedLoop: Boolean,
         val branchCount: Int,
         val centerline: TapeCenterlinePath,
+        val boardColor: BoardColorContext?,
     )
     private data class FloorContext(
         val surroundingFraction: Double,
         val minimumSideFraction: Double,
     )
+    private data class BoardColorContext(
+        val pairCount: Int,
+        val compatiblePairFraction: Double,
+        val meanA: Double,
+        val meanB: Double,
+        val referenceDistance: Double?,
+    )
 
 
     private companion object {
         const val RGBA_CHANNELS = 4L
+        const val LAB_CHANNELS = 3
+        const val LAB_A_CHANNEL = 1
+        const val LAB_B_CHANNEL = 2
+        const val MAX_BOARD_COLOR_SAMPLES = 64
+        const val BOARD_COLOR_TANGENT_SPAN = 2
+        const val MIN_BOARD_COLOR_PAIR_COUNT = 10
+        const val MIN_BOARD_COLOR_SAMPLE_DISTANCE_PIXELS = 4.0
+        const val BOARD_COLOR_SAMPLE_DISTANCE_WIDTH_FACTOR = 0.75
+        const val MAX_BOARD_SIDE_CHROMA_DISTANCE = 24.0
+        const val MIN_BOARD_COLOR_PAIR_FRACTION = 0.70
+        const val MAX_BOARD_REFERENCE_CHROMA_DISTANCE = 20.0
+        const val BOARD_REFERENCE_FILTER_ALPHA = 0.15
         const val MAX_ANALYSIS_DIMENSION = 640.0
         const val FRAME_INTERVAL_NANOS = 250_000_000L
         const val SURROUND_SCALE = 0.35
@@ -1126,11 +1314,12 @@ class BlackTapeDetector internal constructor(
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
-        // A tracked path may cross a floor-material boundary, so surrounding coverage
-        // stays relaxed. Both visible sides must still be corrugated board; otherwise
-        // a board edge or a seam on the adjacent floor becomes a plausible continuation.
+        // A tracked path may cross a floor-material boundary, so surrounding
+        // coverage stays relaxed. Glare can also widen its black component until
+        // the side window contains tape pixels; relax that gate only after CIELAB
+        // confirms the same board as the established route.
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
-        const val MIN_TRACKED_PATH_SIDE_FLOOR = MIN_PATH_SIDE_FLOOR
+        const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.18
 
         /**
          * Thinning retracts a border-cut ribbon's medial axis by half its width,
