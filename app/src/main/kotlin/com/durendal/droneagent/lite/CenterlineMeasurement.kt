@@ -62,35 +62,94 @@ internal object CenterlineMeasurement {
         val arcLength = cumulativeArc.last()
         if (arcLength <= 0.0) return null
 
-        val nearFieldIndex = min(NEAR_FIELD_TANGENT_INDEX, points.size - 1)
-        val nearFieldAngle = tangentAngle(points, nearFieldIndex) ?: return null
+        // The extractor's first point is only a route-ordering endpoint. Control starts at the
+        // closest point on the route to the aircraft reference drawn by the overlay.
+        val aircraftX = frameWidth * TRACKING_TARGET_X_FRACTION
+        val aircraftY = frameHeight * TRACKING_TARGET_Y_FRACTION
+        var anchorSegmentIndex = 0
+        var anchorSegmentFraction = 0.0
+        var anchorX = points.first().x
+        var anchorY = points.first().y
+        var anchorDistanceSquared = Double.POSITIVE_INFINITY
+        for (index in 0 until points.lastIndex) {
+            val start = points[index]
+            val end = points[index + 1]
+            val deltaX = end.x - start.x
+            val deltaY = end.y - start.y
+            val segmentLengthSquared = deltaX * deltaX + deltaY * deltaY
+            if (segmentLengthSquared <= 0.0) continue
+            val segmentFraction = (
+                ((aircraftX - start.x) * deltaX + (aircraftY - start.y) * deltaY) /
+                    segmentLengthSquared
+                ).coerceIn(0.0, 1.0)
+            val projectedX = start.x + deltaX * segmentFraction
+            val projectedY = start.y + deltaY * segmentFraction
+            val distanceX = projectedX - aircraftX
+            val distanceY = projectedY - aircraftY
+            val distanceSquared = distanceX * distanceX + distanceY * distanceY
+            if (distanceSquared < anchorDistanceSquared) {
+                anchorSegmentIndex = index
+                anchorSegmentFraction = segmentFraction
+                anchorX = projectedX
+                anchorY = projectedY
+                anchorDistanceSquared = distanceSquared
+            }
+        }
 
-        val targetArc = min(
+        val anchorIndex = (
+            anchorSegmentIndex +
+                if (anchorSegmentFraction >= 0.5) 1 else 0
+            ).coerceIn(0, points.lastIndex)
+        val nearFieldAngle = tangentAngle(points, anchorIndex) ?: return null
+        val anchorSegmentLength =
+            cumulativeArc[anchorSegmentIndex + 1] - cumulativeArc[anchorSegmentIndex]
+        val anchorArc =
+            cumulativeArc[anchorSegmentIndex] + anchorSegmentLength * anchorSegmentFraction
+        val desiredLookaheadDistance = min(
             arcLength * LOOKAHEAD_ARC_FRACTION,
             frameShortSide * MAX_LOOKAHEAD_FRAME_FRACTION,
         )
-        var lookaheadIndex = 0
-        while (lookaheadIndex < points.size - 1 && cumulativeArc[lookaheadIndex] < targetArc) {
+        val lookaheadArc = min(anchorArc + desiredLookaheadDistance, arcLength)
+        val lookaheadDistance = lookaheadArc - anchorArc
+        var lookaheadIndex = anchorSegmentIndex + 1
+        while (
+            lookaheadIndex < points.lastIndex &&
+            cumulativeArc[lookaheadIndex] < lookaheadArc
+        ) {
             lookaheadIndex++
         }
         val lookaheadUsable =
-            cumulativeArc[lookaheadIndex] >= frameShortSide * MIN_LOOKAHEAD_FRAME_FRACTION &&
-                lookaheadIndex > nearFieldIndex
+            lookaheadDistance >= frameShortSide * MIN_LOOKAHEAD_FRAME_FRACTION
         val lookaheadAngle = if (lookaheadUsable) tangentAngle(points, lookaheadIndex) else null
         val lookahead = if (lookaheadAngle == null) {
             null
         } else {
+            val segmentEndArc = cumulativeArc[lookaheadIndex]
+            val segmentStartIndex = (lookaheadIndex - 1).coerceAtLeast(0)
+            val segmentStartArc = cumulativeArc[segmentStartIndex]
+            val segmentFraction =
+                if (segmentEndArc > segmentStartArc) {
+                    ((lookaheadArc - segmentStartArc) / (segmentEndArc - segmentStartArc))
+                        .coerceIn(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            val segmentStart = points[segmentStartIndex]
+            val segmentEnd = points[lookaheadIndex]
             TapeLookahead(
-                xFraction = (points[lookaheadIndex].x / frameWidth).coerceIn(0.0, 1.0),
-                yFraction = (points[lookaheadIndex].y / frameHeight).coerceIn(0.0, 1.0),
+                xFraction = (
+                    segmentStart.x + (segmentEnd.x - segmentStart.x) * segmentFraction
+                    ).div(frameWidth).coerceIn(0.0, 1.0),
+                yFraction = (
+                    segmentStart.y + (segmentEnd.y - segmentStart.y) * segmentFraction
+                    ).div(frameHeight).coerceIn(0.0, 1.0),
             )
         }
 
         val turn = pathTurn(points)
-        val anchor = points.first()
         return CenterlinePathMeasurement(
-            anchorXFraction = (anchor.x / frameWidth).coerceIn(0.0, 1.0),
-            anchorYFraction = (anchor.y / frameHeight).coerceIn(0.0, 1.0),
+            anchorXFraction = (anchorX / frameWidth).coerceIn(0.0, 1.0),
+            anchorYFraction = (anchorY / frameHeight).coerceIn(0.0, 1.0),
             nearFieldAngleFromVerticalDegrees = nearFieldAngle,
             lookahead = lookahead,
             lookaheadAngleFromVerticalDegrees = lookaheadAngle,

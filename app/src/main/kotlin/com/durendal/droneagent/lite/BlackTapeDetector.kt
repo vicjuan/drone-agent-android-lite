@@ -38,8 +38,8 @@ class BlackTapeDetector internal constructor(
     private val lastAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
     private var previousPathMedianWidthFraction: Double? = null
-    private var previousAnchorXFraction: Double? = null
-    private var previousAnchorYFraction: Double? = null
+    private var previousRouteStartXFraction: Double? = null
+    private var previousRouteStartYFraction: Double? = null
     @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
@@ -60,6 +60,7 @@ class BlackTapeDetector internal constructor(
     @Volatile private var lastBranchCount = 0
     @Volatile private var lastRegionDescription = "none"
     @Volatile private var lastArcRejection = "none"
+    @Volatile private var lastCandidateMetrics = "none"
 
     private var candidateMaskBytes = ByteArray(0)
     private var centerlineTape = BooleanArray(0)
@@ -140,8 +141,8 @@ class BlackTapeDetector internal constructor(
             worker.execute {
                 previousBounds = null
                 previousPathMedianWidthFraction = null
-                previousAnchorXFraction = null
-                previousAnchorYFraction = null
+                previousRouteStartXFraction = null
+                previousRouteStartYFraction = null
                 consecutiveDetectionMisses = 0
             }
         } catch (error: RuntimeException) {
@@ -153,7 +154,7 @@ class BlackTapeDetector internal constructor(
         (
             "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
                 "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
-                "coverage=%.2f branches=%d region=%s arcReject=[%s] " +
+                "coverage=%.2f branches=%d region=%s candidate=[%s] arcReject=[%s] " +
                 "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
                 "edge:%d chroma:%d floor:%d noCenterline:%d noNearField:%d " +
                 "branch:%d shortLookahead:%d"
@@ -172,6 +173,7 @@ class BlackTapeDetector internal constructor(
             lastPathCoverage,
             lastBranchCount,
             lastRegionDescription,
+            lastCandidateMetrics,
             lastArcRejection,
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal],
             rejectionCounts[TapeCandidateRejection.AREA.ordinal],
@@ -241,6 +243,7 @@ class BlackTapeDetector internal constructor(
         lastPathAxis = "NONE"
         lastPathCurvatureDegrees = 0.0
         lastPathCurvatureSmoothness = 0.0
+        lastCandidateMetrics = "none"
         // Fluorescent glare can cut completely across glossy tape. A tracked PATH
         // combines its normal isotropic close with narrow directional closes. The
         // wider repair is never used for acquisition: without a previous winner it
@@ -381,7 +384,7 @@ class BlackTapeDetector internal constructor(
                     ) ?: continue
                 if (
                     mode == TapeDetectionMode.PATH &&
-                    !matchesPreviousAnchor(candidate)
+                    !matchesPreviousRouteStart(candidate)
                 ) {
                     rejectionCounts[TapeCandidateRejection.DIRECTION_CONTINUITY.ordinal] += 1
                     continue
@@ -391,7 +394,7 @@ class BlackTapeDetector internal constructor(
                 val selectionScore = candidate.score * continuityBonus
                 highestSelectionScore = max(highestSelectionScore, selectionScore)
                 val counterclockwiseAcquisition =
-                    mode == TapeDetectionMode.PATH && previousAnchorXFraction == null
+                    mode == TapeDetectionMode.PATH && previousRouteStartXFraction == null
                 val shouldSelect = when {
                     best == null -> true
                     bestSelectionScore <
@@ -399,7 +402,7 @@ class BlackTapeDetector internal constructor(
                     counterclockwiseAcquisition &&
                         selectionScore >=
                         highestSelectionScore - DIRECTION_SCORE_TOLERANCE &&
-                        candidate.anchorXFraction > best.anchorXFraction -> true
+                        candidate.routeStartXFraction > best.routeStartXFraction -> true
                     !counterclockwiseAcquisition &&
                         selectionScore > bestSelectionScore -> true
                     else -> false
@@ -420,8 +423,8 @@ class BlackTapeDetector internal constructor(
             lastPathCurvatureSmoothness = winner.turnConsistency
             previousBounds = Rect(rect.x, rect.y, rect.width, rect.height)
             previousPathMedianWidthFraction = winner.pathMedianWidthFraction
-            previousAnchorXFraction = winner.anchorXFraction
-            previousAnchorYFraction = winner.anchorYFraction
+            previousRouteStartXFraction = winner.routeStartXFraction
+            previousRouteStartYFraction = winner.routeStartYFraction
             lastPathAxis = "CENTERLINE"
             lastPathSampleCount = winner.pathSampleCount
             return TapeDetection(
@@ -591,6 +594,20 @@ class BlackTapeDetector internal constructor(
         val coverage = pathCoverage(measurement, regionMask.tapePixelCount, frameShortSide)
         lastPathCoverage = coverage
         lastBranchCount = estimate.topology.branchCount
+        val refinedBounds = centerlineBounds(estimate, frameWidth, frameHeight)
+        lastCandidateMetrics =
+            "#%d bounds=%dx%d@%d,%d anchor=%.3f,%.3f arc=%.3f width=%.3f coverage=%.3f".format(
+                contourIndex,
+                refinedBounds.width,
+                refinedBounds.height,
+                refinedBounds.x,
+                refinedBounds.y,
+                measurement?.anchorXFraction ?: 0.0,
+                measurement?.anchorYFraction ?: 0.0,
+                measurement?.arcLengthFraction ?: 0.0,
+                estimate.components.widthConsistency,
+                coverage,
+            )
         val verdict = TapePathQualityPolicy.evaluate(
             estimate = estimate,
             measurement = measurement,
@@ -605,7 +622,6 @@ class BlackTapeDetector internal constructor(
             return null
         }
 
-        val refinedBounds = centerlineBounds(estimate, frameWidth, frameHeight)
         val overlapsPrevious = overlapsPrevious(refinedBounds)
         // The arc test exists to stop a wall or floor edge being acquired as
         // curved tape. It guards acquisition only: a path already being tracked
@@ -653,7 +669,10 @@ class BlackTapeDetector internal constructor(
         val minimumChannel =
             min(candidateMeanRgb.`val`[0], min(candidateMeanRgb.`val`[1], candidateMeanRgb.`val`[2]))
         val channelBalance = if (maximumChannel > 0.0) minimumChannel / maximumChannel else 0.0
-        if (channelBalance < MIN_TAPE_CHANNEL_BALANCE) {
+        val minimumChannelBalance =
+            if (overlapsPrevious) MIN_TRACKED_TAPE_CHANNEL_BALANCE else MIN_TAPE_CHANNEL_BALANCE
+        lastCandidateMetrics += " chroma=%.3f".format(channelBalance)
+        if (channelBalance < minimumChannelBalance) {
             rejectionCounts[TapeCandidateRejection.CHROMA.ordinal] += 1
             return null
         }
@@ -662,6 +681,11 @@ class BlackTapeDetector internal constructor(
             if (overlapsPrevious) MIN_TRACKED_PATH_SURROUNDING_FLOOR else MIN_PATH_SURROUNDING_FLOOR
         val minimumSideFloor =
             if (overlapsPrevious) MIN_TRACKED_PATH_SIDE_FLOOR else MIN_PATH_SIDE_FLOOR
+        lastCandidateMetrics +=
+            " floor=%.3f side=%.3f".format(
+                context.surroundingFraction,
+                context.minimumSideFraction,
+            )
         if (
             context.surroundingFraction < minimumSurroundingFloor ||
             context.minimumSideFraction < minimumSideFloor
@@ -669,8 +693,12 @@ class BlackTapeDetector internal constructor(
             rejectionCounts[TapeCandidateRejection.FLOOR_CONTEXT.ordinal] += 1
             return null
         }
-        val minimumPathFraction =
-            if (overlapsPrevious) MIN_TRACKED_PATH_FRACTION else MIN_PATH_FRACTION
+        val minimumPathFraction = when {
+            verdict.quality == PathQuality.NEAR_FIELD_ONLY ->
+                TapePathQualityPolicy.MIN_NEAR_FIELD_ARC_FRACTION
+            overlapsPrevious -> MIN_TRACKED_PATH_FRACTION
+            else -> MIN_PATH_FRACTION
+        }
         if (measurement.arcLengthFraction < minimumPathFraction) {
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal] += 1
             return null
@@ -696,6 +724,8 @@ class BlackTapeDetector internal constructor(
             nearFieldOffsetFraction = (anchorXFraction - 0.5).coerceIn(-0.5, 0.5),
             anchorXFraction = anchorXFraction,
             anchorYFraction = measurement.anchorYFraction,
+            routeStartXFraction = (estimate.points.first().x / frameWidth).coerceIn(0.0, 1.0),
+            routeStartYFraction = (estimate.points.first().y / frameHeight).coerceIn(0.0, 1.0),
             lookahead = verdict.lookahead,
             quality = verdict.quality,
             rejection = verdict.rejection,
@@ -748,13 +778,29 @@ class BlackTapeDetector internal constructor(
         frameHeight: Int,
     ): CenterlineEstimate {
         if (estimate.points.isEmpty()) return estimate
-        val points = estimate.points.map { point ->
+        val translatedPoints = estimate.points.map { point ->
             CenterlinePoint(
                 x = point.x + region.x,
                 y = point.y + region.y,
                 widthPixels = point.widthPixels,
             )
         }
+        val previousX = previousRouteStartXFraction
+        val previousY = previousRouteStartYFraction
+        val first = translatedPoints.first()
+        val last = translatedPoints.last()
+        val points =
+            if (previousX != null && previousY != null) {
+                val firstDeltaX = first.x / frameWidth - previousX
+                val firstDeltaY = first.y / frameHeight - previousY
+                val lastDeltaX = last.x / frameWidth - previousX
+                val lastDeltaY = last.y / frameHeight - previousY
+                val firstDistance = firstDeltaX * firstDeltaX + firstDeltaY * firstDeltaY
+                val lastDistance = lastDeltaX * lastDeltaX + lastDeltaY * lastDeltaY
+                if (lastDistance < firstDistance) translatedPoints.asReversed() else translatedPoints
+            } else {
+                translatedPoints
+            }
         val distal = points.last()
         val borderDistance = min(
             min(distal.x, frameWidth - 1.0 - distal.x),
@@ -836,7 +882,10 @@ class BlackTapeDetector internal constructor(
             rejection = verdict.rejection?.name,
             branchCount = estimate.topology.branchCount,
             closedLoop = estimate.topology.closedLoop,
-            endpointCandidate = TapePathQualityPolicy.isEndpointCandidate(estimate.topology, mode = TapeDetectionMode.PATH),
+            endpointCandidate = TapePathQualityPolicy.isEndpointCandidate(
+                estimate.topology,
+                mode = TapeDetectionMode.PATH,
+            ),
         )
     }
 
@@ -854,15 +903,18 @@ class BlackTapeDetector internal constructor(
         val leftWidth = min(sidePadding, bounds.x)
         val rightStart = bounds.x + bounds.width
         val rightWidth = min(sidePadding, floorMask.cols() - rightStart)
+        val leftVisible = leftWidth >= MIN_SURROUND_PADDING
+        val rightVisible = rightWidth >= MIN_SURROUND_PADDING
         val leftFraction =
-            if (leftWidth == 0) 0.0
+            if (!leftVisible) 0.0
             else maskFraction(floorMask, Rect(bounds.x - leftWidth, bounds.y, leftWidth, bounds.height))
         val rightFraction =
-            if (rightWidth == 0) 0.0
+            if (!rightVisible) 0.0
             else maskFraction(floorMask, Rect(rightStart, bounds.y, rightWidth, bounds.height))
         val minimumVisibleSideFraction = when {
-            leftWidth == 0 -> rightFraction
-            rightWidth == 0 -> leftFraction
+            !leftVisible && !rightVisible -> 0.0
+            !leftVisible -> rightFraction
+            !rightVisible -> leftFraction
             else -> min(leftFraction, rightFraction)
         }
         return FloorContext(
@@ -909,11 +961,11 @@ class BlackTapeDetector internal constructor(
         return intersection / smallerArea >= MIN_PREVIOUS_OVERLAP
     }
 
-    private fun matchesPreviousAnchor(candidate: Candidate): Boolean {
-        val previousX = previousAnchorXFraction ?: return true
-        val previousY = previousAnchorYFraction ?: return true
-        val deltaX = candidate.anchorXFraction - previousX
-        val deltaY = candidate.anchorYFraction - previousY
+    private fun matchesPreviousRouteStart(candidate: Candidate): Boolean {
+        val previousX = previousRouteStartXFraction ?: return true
+        val previousY = previousRouteStartYFraction ?: return true
+        val deltaX = candidate.routeStartXFraction - previousX
+        val deltaY = candidate.routeStartYFraction - previousY
         return deltaX * deltaX + deltaY * deltaY <= MAX_ANCHOR_STEP_FRACTION_SQUARED
     }
 
@@ -998,8 +1050,8 @@ class BlackTapeDetector internal constructor(
         if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) {
             previousBounds = null
             previousPathMedianWidthFraction = null
-            previousAnchorXFraction = null
-            previousAnchorYFraction = null
+            previousRouteStartXFraction = null
+            previousRouteStartYFraction = null
         }
     }
 
@@ -1032,6 +1084,8 @@ class BlackTapeDetector internal constructor(
         val nearFieldOffsetFraction: Double,
         val anchorXFraction: Double,
         val anchorYFraction: Double,
+        val routeStartXFraction: Double,
+        val routeStartYFraction: Double,
         val lookahead: TapeLookahead?,
         val quality: PathQuality,
         val rejection: TapeCandidateRejection?,
@@ -1089,6 +1143,11 @@ class BlackTapeDetector internal constructor(
         const val IDEAL_PATH_FRACTION = 0.80
         const val PREVIOUS_OVERLAP_BONUS = 1.35
         const val MIN_TAPE_CHANNEL_BALANCE = 0.32
+        // The 2026-08-20 flight measured the same physical tape at 0.327 then
+        // 0.313 on consecutive frames under a warm floor reflection. Continuity
+        // may absorb that small cast; acquisition retains the stricter gate so a
+        // coloured floor feature cannot create a new route.
+        const val MIN_TRACKED_TAPE_CHANNEL_BALANCE = 0.30
         const val MIN_PREVIOUS_OVERLAP = 0.20
         const val PREVIOUS_SELECTION_MISS_LIMIT = 8
         const val DIRECTION_SCORE_TOLERANCE = 0.08

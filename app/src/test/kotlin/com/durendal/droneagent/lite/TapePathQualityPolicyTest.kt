@@ -23,7 +23,7 @@ class TapePathQualityPolicyTest {
 
     @Test
     fun `a junction can be aligned to but never pursued`() {
-        val verdict = evaluate(points = 120, branchCount = 1)
+        val verdict = evaluate(points = 120, branchCount = 1, pathCoverage = 0.76)
 
         assertEquals(PathQuality.NEAR_FIELD_ONLY, verdict.quality)
         assertNull("a branch must not hand over a target", verdict.lookahead)
@@ -31,9 +31,18 @@ class TapePathQualityPolicyTest {
     }
 
     @Test
+    fun `a high coverage medial spur does not stop one physical path`() {
+        val verdict = evaluate(points = 120, branchCount = 1, pathCoverage = 0.98)
+
+        assertEquals(PathQuality.FULL_PATH, verdict.quality)
+        assertTrue(verdict.lookahead != null)
+        assertNull(verdict.rejection)
+    }
+
+    @Test
     fun `a chain with no usable look-ahead is near field only`() {
-        // Long enough for the near field to be credible (>= 0.10 of the short
-        // side) but too short for the look-ahead to travel a usable distance.
+        // Long enough for the near field to be credible, but too short for the
+        // look-ahead to travel a usable distance.
         val verdict = evaluate(points = 20, stepPixels = 3.0)
 
         assertEquals(PathQuality.NEAR_FIELD_ONLY, verdict.quality)
@@ -124,6 +133,7 @@ class TapePathQualityPolicyTest {
         branchCount: Int = 0,
         widthConsistency: Double = 1.0,
         anchorBottomOffset: Double = 1.0,
+        pathCoverage: Double = 1.0,
     ): TapePathVerdict {
         val chain = (0 until points).map { index ->
             CenterlinePoint(
@@ -138,6 +148,7 @@ class TapePathQualityPolicyTest {
             measurement = CenterlineMeasurement.measure(estimate, FRAME_WIDTH, FRAME_HEIGHT),
             mode = TapeDetectionMode.STRAIGHT,
             frameHeight = FRAME_HEIGHT,
+            pathCoverage = pathCoverage,
         )
     }
 

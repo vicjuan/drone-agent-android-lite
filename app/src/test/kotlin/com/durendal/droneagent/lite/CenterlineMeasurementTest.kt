@@ -30,6 +30,27 @@ class CenterlineMeasurementTest {
     }
 
     @Test
+    fun `control anchor projects onto the path nearest the aircraft instead of using its endpoint`() {
+        val path = buildList {
+            for (x in 140..320 step 20) {
+                add(CenterlinePoint(x.toDouble(), 359.0, WIDTH_PIXELS))
+            }
+            for (y in 357 downTo 101 step 2) {
+                add(CenterlinePoint(320.0, y.toDouble(), WIDTH_PIXELS))
+            }
+        }
+
+        val measurement = requireNotNull(measure(path))
+
+        assertEquals(TRACKING_TARGET_X_FRACTION, measurement.anchorXFraction, 0.001)
+        assertEquals(TRACKING_TARGET_Y_FRACTION, measurement.anchorYFraction, 0.001)
+        assertEquals(0.0, measurement.nearFieldAngleFromVerticalDegrees, 1.0)
+        val lookahead = requireNotNull(measurement.lookahead)
+        assertEquals(TRACKING_TARGET_X_FRACTION, lookahead.xFraction, 0.001)
+        assertTrue(lookahead.yFraction < measurement.anchorYFraction)
+    }
+
+    @Test
     fun `a horizontal chain is measured the same way as a vertical one`() {
         val vertical = requireNotNull(measure(verticalChain(pointCount = 120)))
         val horizontal = requireNotNull(measure(horizontalChain(pointCount = 120)))
@@ -145,7 +166,7 @@ class CenterlineMeasurementTest {
     private fun horizontalChain(pointCount: Int, stepPixels: Double = 2.0) =
         (0 until pointCount).map { index ->
             CenterlinePoint(
-                x = index * stepPixels,
+                x = 200.0 + index * stepPixels,
                 y = FRAME_HEIGHT / 2.0,
                 widthPixels = WIDTH_PIXELS,
             )

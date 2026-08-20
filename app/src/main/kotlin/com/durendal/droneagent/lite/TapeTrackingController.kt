@@ -410,7 +410,7 @@ internal class TapeTrackingController {
             yawRateDegreesPerSecond = yawRate,
             forwardSpeedMetersPerSecond = targetForwardSpeed,
             rightSpeedMetersPerSecond = rightSpeed,
-            purePursuitYawRateDegreesPerSecond = purePursuitYawRate,
+            purePursuitYawRateDegreesPerSecond = purePursuitYawRate ?: 0.0,
         )
     }
 
@@ -711,7 +711,10 @@ internal class TapeTrackingController {
         val angle = controlledAngleDegrees ?: return
         when (phase) {
             TapeTrackingPhase.TRACKING -> {
-                if (abs(angle) >= CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES) {
+                if (
+                    abs(angle) >= CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES &&
+                    !hasUsablePurePursuitTarget()
+                ) {
                     phase = TapeTrackingPhase.ALIGNING_CURVE
                     consecutiveCurveAlignmentDetections = 0
                     lateralCorrectionActive = false
@@ -937,7 +940,7 @@ internal class TapeTrackingController {
         lastCommandAtNanos = 0L
     }
 
-    private fun desiredYawRate(purePursuitYawRate: Double): Double {
+    private fun desiredYawRate(purePursuitYawRate: Double?): Double {
         val angle = controlledAngleDegrees ?: return 0.0
         val deadZone =
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_DEAD_ZONE_DEGREES
@@ -954,7 +957,7 @@ internal class TapeTrackingController {
                 // In-place alignment only, and bounded: a near-field-only path is
                 // enough to point at, never enough to chase.
                 minOf(modeMaximumYawRate, NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND)
-            } else if (lateralCorrectionActive) {
+            } else if (lateralCorrectionActive && mode != TapeTrackingMode.CIRCULAR) {
                 minOf(modeMaximumYawRate, ANCHOR_ACQUISITION_MAX_YAW_RATE_DEGREES_PER_SECOND)
             } else {
                 modeMaximumYawRate
@@ -963,18 +966,43 @@ internal class TapeTrackingController {
             if (mode == TapeTrackingMode.CIRCULAR) CIRCULAR_YAW_PROPORTIONAL_GAIN
             else YAW_PROPORTIONAL_GAIN
         val angleFeedback = if (abs(angle) <= deadZone) 0.0 else angle * gain
-        return (purePursuitYawRate + angleFeedback)
+        return (purePursuitYawRate ?: angleFeedback)
             .coerceIn(-maximumYawRate, maximumYawRate)
     }
     private fun desiredCurveAlignmentYawRate(): Double {
         val angle = controlledAngleDegrees ?: return 0.0
+        val maximumYawRate =
+            if (pathQuality == PathQuality.NEAR_FIELD_ONLY) {
+                NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND
+            } else {
+                CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
+            }
         return (angle * CIRCULAR_YAW_PROPORTIONAL_GAIN).coerceIn(
-            -CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
-            CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,
+            -maximumYawRate,
+            maximumYawRate,
         )
     }
 
 
+    private fun hasUsablePurePursuitTarget(): Boolean {
+        if (pathQuality != PathQuality.FULL_PATH) return false
+        val lookaheadX = controlledLookaheadXFraction ?: return false
+        val lookaheadY = controlledLookaheadYFraction ?: return false
+        val aspectRatio = lookaheadFrameAspectRatio ?: return false
+        val height = heightAboveGroundMeters?.takeIf {
+            it >= PURE_PURSUIT_MIN_HEIGHT_METERS
+        } ?: return false
+        val normalizedLateralDistance =
+            (lookaheadX - TRACKING_TARGET_X_FRACTION) * aspectRatio
+        val normalizedForwardDistance = TRACKING_TARGET_Y_FRACTION - lookaheadY
+        if (normalizedForwardDistance <= 0.0) return false
+        val verticalHalfFovTangent =
+            CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
+        val groundFrameHeightMeters = 2.0 * height * verticalHalfFovTangent
+        return groundFrameHeightMeters *
+            hypot(normalizedLateralDistance, normalizedForwardDistance) >=
+            PURE_PURSUIT_MIN_LOOKAHEAD_METERS
+    }
     /**
      * Ground-plane Pure Pursuit from the detected target point. The white overlay cross is the
      * image-space aircraft reference; image-up is forward and image-right is positive yaw.
@@ -987,25 +1015,23 @@ internal class TapeTrackingController {
      * the absent target itself rather than a quality check that could drift out
      * of step with it.
      */
-    private fun desiredPurePursuitYawRate(forwardSpeedMetersPerSecond: Double): Double {
-        if (forwardSpeedMetersPerSecond <= 0.0) return 0.0
-        val lookaheadX = controlledLookaheadXFraction ?: return 0.0
-        val lookaheadY = controlledLookaheadYFraction ?: return 0.0
-        val aspectRatio = lookaheadFrameAspectRatio ?: return 0.0
-        val height = heightAboveGroundMeters?.takeIf {
-            it >= PURE_PURSUIT_MIN_HEIGHT_METERS
-        } ?: return 0.0
+    private fun desiredPurePursuitYawRate(
+        forwardSpeedMetersPerSecond: Double,
+    ): Double? {
+        if (forwardSpeedMetersPerSecond <= 0.0 || !hasUsablePurePursuitTarget()) return null
+        val lookaheadX = checkNotNull(controlledLookaheadXFraction)
+        val lookaheadY = checkNotNull(controlledLookaheadYFraction)
+        val aspectRatio = checkNotNull(lookaheadFrameAspectRatio)
+        val height = checkNotNull(heightAboveGroundMeters)
         val verticalHalfFovTangent =
             CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
         val groundFrameHeightMeters = 2.0 * height * verticalHalfFovTangent
         val lateralMeters =
-            (lookaheadX - PURE_PURSUIT_TARGET_X_FRACTION) *
+            (lookaheadX - TRACKING_TARGET_X_FRACTION) *
                 aspectRatio * groundFrameHeightMeters
         val forwardMeters =
-            (PURE_PURSUIT_TARGET_Y_FRACTION - lookaheadY) * groundFrameHeightMeters
-        if (forwardMeters <= 0.0) return 0.0
+            (TRACKING_TARGET_Y_FRACTION - lookaheadY) * groundFrameHeightMeters
         val lookaheadDistanceMeters = hypot(lateralMeters, forwardMeters)
-        if (lookaheadDistanceMeters < PURE_PURSUIT_MIN_LOOKAHEAD_METERS) return 0.0
         val curvaturePerMeter =
             2.0 * lateralMeters / (lookaheadDistanceMeters * lookaheadDistanceMeters)
         return Math.toDegrees(forwardSpeedMetersPerSecond * curvaturePerMeter)
@@ -1073,8 +1099,9 @@ internal class TapeTrackingController {
             val angle = controlledAngleDegrees ?: return 0.0
             val offset = controlledHorizontalOffsetFraction ?: return 0.0
             if (
-                abs(angle) > CIRCULAR_MAX_MOVING_ANGLE_DEGREES ||
-                abs(offset) > CIRCULAR_MAX_MOVING_OFFSET_FRACTION
+                abs(offset) > CIRCULAR_MAX_MOVING_OFFSET_FRACTION ||
+                (!hasUsablePurePursuitTarget() &&
+                    abs(angle) > CIRCULAR_MAX_MOVING_ANGLE_DEGREES)
             ) {
                 return 0.0
             }
@@ -1297,9 +1324,8 @@ internal class TapeTrackingController {
         const val CIRCULAR_POST_TURN_MAX_OFFSET_FRACTION = 0.20
         const val CIRCULAR_POST_TURN_CONFIRMATION_COUNT = 3
         const val CIRCULAR_MAX_MOVING_ANGLE_DEGREES = 45.0
-        const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = 0.25
-        const val PURE_PURSUIT_TARGET_X_FRACTION = 0.5
-        const val PURE_PURSUIT_TARGET_Y_FRACTION = 0.94
+        // Do not accept a path into tracking and then forbid that same path from advancing.
+        const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = REACQUISITION_ENTRY_OFFSET_FRACTION
         const val PURE_PURSUIT_MIN_HEIGHT_METERS = 0.30
         const val PURE_PURSUIT_MIN_LOOKAHEAD_METERS = 0.10
         const val CAMERA_VIDEO_DIAGONAL_FOV_DEGREES = 75.0

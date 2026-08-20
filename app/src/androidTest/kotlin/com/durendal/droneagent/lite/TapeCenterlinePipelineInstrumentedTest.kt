@@ -8,21 +8,20 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToLong
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * The production pipeline, centerline and all, over every scenario it has to
- * survive — including the two real camera frames this repository already holds.
+ * The production pipeline, centerline and all, over the synthetic geometry it
+ * has to survive and the two operator screenshots this repository holds.
  *
- * Those two are photographs of the actual working surface, not drawings, so they
- * are the only inputs here that can disagree with an assumption. The generated
- * ones cover shapes no recorded frame exists for yet; where a claim rests on
- * them it rests on geometry we chose, which is weaker evidence and is called out
- * as such rather than counted as flight validation.
+ * The screenshots have the app's dark controls and status panels burned into
+ * their pixels; production detection receives raw camera frames before overlay
+ * rendering. They therefore defend false-positive rejection only and are not
+ * camera-validation evidence. Generated frames cover positive path shapes until
+ * raw camera captures are recorded.
  */
 @RunWith(AndroidJUnit4::class)
 class TapeCenterlinePipelineInstrumentedTest {
@@ -68,29 +67,16 @@ class TapeCenterlinePipelineInstrumentedTest {
         )
     }
 
-    /** The recorded working surface: a real photograph, not a drawing. */
+    /** A UI screenshot must not promote its dark controls or bottom bar to tape. */
     @Test
-    fun theRecordedCardboardSceneIsFollowedAsAFullPath() {
+    fun theRecordedCardboardScreenshotIsRejectedAsDetectorInput() {
         val detector = detector()
         val detection = detector.use { active ->
             active.setDetectionMode(TapeDetectionMode.PATH)
             submit(active, rgbaAsset("final-cardboard-tape.jpg"))
         }
 
-        assertNotNull(
-            "the recorded scene must still be detected: " + detector.diagnosticsSummary(),
-            detection,
-        )
-        requireNotNull(detection)
-        assertEquals(PathQuality.FULL_PATH, detection.quality)
-        val centerline = requireNotNull(detection.centerline)
-        assertTrue("a real scene should trace many points", centerline.pointCount >= 20)
-        assertEquals(0, centerline.branchCount)
-        Log.i(
-            TAG,
-            "cardboard points=${centerline.pointCount} quality=${detection.quality} " +
-                "anchor=${detection.anchorXFraction} endpoint=${detection.endpointCandidate}",
-        )
+        assertNull("a rendered UI screenshot is not a raw camera frame", detection)
     }
 
     /** The recorded false positive: a wall/floor edge that must stay rejected. */

@@ -2,6 +2,10 @@ package com.durendal.droneagent.lite
 
 import kotlin.math.atan2
 
+/** Aircraft reference point shared by measurement, control, and the preview overlay. */
+internal const val TRACKING_TARGET_X_FRACTION = 0.5
+internal const val TRACKING_TARGET_Y_FRACTION = 0.94
+
 /**
  * How much of the tape path this frame's image evidence actually supports.
  *

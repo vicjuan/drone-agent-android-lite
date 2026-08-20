@@ -58,12 +58,10 @@ internal object TapePathQualityPolicy {
         // The near field is what an in-place alignment steers by, so if it is not
         // credible there is nothing safe to do with this candidate at all.
         //
-        // Credibility is about the shape, not about where the chain sits in the
-        // frame: requiring the anchor to reach the bottom rejected the recorded
-        // cardboard scene outright, because how far down the tape appears is a
-        // fact about the camera angle rather than about the tape. Whether the
-        // chain reaches the near edge is a mission question, and the mission
-        // layer already asks it through the endpoint rules.
+        // Credibility is about shape, not where the chain sits in the frame:
+        // camera pitch and flight height move a valid near-field segment without
+        // changing its geometry. Whether the chain reaches the near edge is a
+        // mission question handled by the endpoint rules.
         val nearFieldCredible =
             measurement.arcLengthFraction >= MIN_NEAR_FIELD_ARC_FRACTION &&
                 estimate.components.widthConsistency >= MIN_NEAR_FIELD_WIDTH_CONSISTENCY
@@ -75,10 +73,17 @@ internal object TapePathQualityPolicy {
             )
         }
 
-        // A junction means the extractor chose an arm. Following a guess is the
-        // one failure mode a path follower cannot recover from by slowing down,
-        // so a branch may never carry the authority to move forward.
-        if (estimate.topology.branchCount > 0 || pathCoverage < MIN_PATH_COVERAGE) {
+        // Skeletonization can leave a long medial spur on one physical ribbon.
+        // A branch is actionable ambiguity only when the selected route also
+        // leaves a material share of the candidate unexplained. This keeps a
+        // high-coverage single path moving while a real T junction still stops.
+        val minimumCoverage =
+            if (estimate.topology.branchCount > 0) {
+                MIN_BRANCHED_PATH_COVERAGE
+            } else {
+                MIN_PATH_COVERAGE
+            }
+        if (pathCoverage < minimumCoverage) {
             return TapePathVerdict(
                 PathQuality.NEAR_FIELD_ONLY,
                 null,
@@ -134,7 +139,8 @@ internal object TapePathQualityPolicy {
      * would also reject S-shaped tape, which is tape.
      */
     fun isCredibleArc(measurement: CenterlinePathMeasurement): Boolean =
-        measurement.totalPathTurnDegrees >= MIN_ARC_TOTAL_TURN_DEGREES
+        measurement.totalPathTurnDegrees + ARC_TURN_TOLERANCE_DEGREES >=
+            MIN_ARC_TOTAL_TURN_DEGREES
 
     /** A closed loop is a legal circular path and is never an endpoint. */
     fun isClosedLoopPath(topology: CenterlineTopology): Boolean = topology.closedLoop
@@ -142,8 +148,8 @@ internal object TapePathQualityPolicy {
     fun isFrameBorderTruncation(topology: CenterlineTopology): Boolean =
         topology.distalTerminus == CenterlineTerminus.AT_FRAME_BORDER
 
-    /** Below this the chain is a fragment, not a direction. */
-    const val MIN_NEAR_FIELD_ARC_FRACTION = 0.10
+    /** Below this the chain is too short to provide even a bounded yaw direction. */
+    const val MIN_NEAR_FIELD_ARC_FRACTION = 0.07
 
     const val MIN_NEAR_FIELD_WIDTH_CONSISTENCY = 0.30
 
@@ -161,10 +167,23 @@ internal object TapePathQualityPolicy {
     const val MIN_PATH_COVERAGE = 0.70
 
     /**
-     * The value the removed estimator used, and the one the recorded cardboard
-     * scene was validated against: that scene turns exactly 8 degrees, so a
-     * stricter figure rejects the only real curved-tape frame this repository
-     * holds. Chosen from that measurement, not carried over for symmetry.
+     * A reported skeleton branch may be a medial-axis spur, but only when the
+     * selected route still explains nearly all candidate pixels. The synthetic
+     * T junction measures 0.76; 0.85 keeps it stopped while admitting the
+     * high-coverage single ribbon reproduced by the flight failure.
+     */
+    const val MIN_BRANCHED_PATH_COVERAGE = 0.85
+
+    /**
+     * Historical acquisition boundary retained until raw camera captures provide
+     * a measured turn distribution. Integer thinning tolerance is applied above.
      */
     const val MIN_ARC_TOTAL_TURN_DEGREES = 8.0
+
+    /**
+     * Skeleton turn is sampled from integer pixels. Keep a sub-degree tolerance
+     * around the corpus-calibrated boundary so the same visible arc does not
+     * alternate across the gate after harmless thinning or resize rounding.
+     */
+    private const val ARC_TURN_TOLERANCE_DEGREES = 0.5
 }

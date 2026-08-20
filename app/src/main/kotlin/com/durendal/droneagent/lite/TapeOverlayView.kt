@@ -127,7 +127,7 @@ class TapeOverlayView(context: Context) : View(context) {
         val anchorX = previewLeft + (result.anchorXFraction * previewWidth).toFloat()
         val anchorY = previewTop + (result.anchorYFraction * previewHeight).toFloat()
         val targetX = previewLeft + previewWidth / 2f
-        val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION
+        val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION.toFloat()
         // A near-field-only path has no trustworthy look-ahead. Drawing a rail to
         // a made-up point would show the operator guidance the controller is not
         // allowed to use, so the rail simply disappears with the evidence.
@@ -237,7 +237,6 @@ class TapeOverlayView(context: Context) : View(context) {
     private companion object {
         val DETECTED_COLOR = Color.rgb(0, 230, 118)
         val CENTERLINE_COLOR = Color.rgb(255, 82, 200)
-        const val TRACKING_TARGET_Y_FRACTION = 0.94f
         const val SEARCH_LABEL = "OpenCV • 搜尋黑膠帶"
     }
 }
