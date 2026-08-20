@@ -125,8 +125,8 @@ internal class TapeTrackingController {
     private var circularReacquisitionCandidate: TapeTrackingObservation? = null
     private var circularReacquisitionCandidateAtNanos = 0L
     private var consecutiveCircularReacquisitionDetections = 0
-    private var consecutiveCircularEndpointReadyDetections = 0
-    private var circularEndpointQualified = false
+    private var consecutiveReliableCircularPathDetections = 0
+    private var reliableCircularPathEstablished = false
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var lastCommandAtNanos = 0L
@@ -438,8 +438,8 @@ internal class TapeTrackingController {
         }
         if (observation == null) {
             circularDetectionGap = true
-            if (!circularEndpointQualified) {
-                consecutiveCircularEndpointReadyDetections = 0
+            if (!reliableCircularPathEstablished) {
+                consecutiveReliableCircularPathDetections = 0
             }
             if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
                 expireCircularReacquisitionCandidateIfStale(nowNanos)
@@ -448,7 +448,7 @@ internal class TapeTrackingController {
             }
             when (phase) {
                 TapeTrackingPhase.TRACKING -> {
-                    if (circularEndpointQualified) {
+                    if (reliableCircularPathEstablished) {
                         consecutiveEndpointMisses += 1
                         if (
                             consecutiveEndpointMisses >=
@@ -487,7 +487,7 @@ internal class TapeTrackingController {
         if (circularDetectionGap && previousObservation != null) {
             if (!isPlausibleCircularContinuation(observation, previousObservation)) {
                 if (
-                    circularEndpointQualified &&
+                    reliableCircularPathEstablished &&
                     !isCredibleCircularReacquisitionPath(observation)
                 ) {
                     beginCircularEndpointVerification(nowNanos)
@@ -573,11 +573,10 @@ internal class TapeTrackingController {
         endpointReferenceBounds = trackedObservation.bounds
         consecutiveEndpointMisses = 0
         acceptCircularObservation(trackedObservation, nowNanos)
-        // Seeing the same in-frame terminus again is not proof that the route continues.
-        // Keep the endpoint probe authoritative until the tape disappears or a path
-        // explicitly reaching beyond the frame returns.
+        // Endpoint inference is based on reliable-route absence. Any matching full path
+        // proves the route is present again, even when its far end also looks terminal.
         if (
-            !trackedObservation.endpointCandidate &&
+            trackedObservation.quality == PathQuality.FULL_PATH &&
             trackedObservation.longSideFraction >=
             CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION &&
             trackedObservation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
@@ -595,8 +594,8 @@ internal class TapeTrackingController {
         endpointReferenceBounds = lastAcceptedCircularObservation?.bounds
         endpointVerificationStartedAtNanos = nowNanos
         consecutiveEndpointMisses = 0
-        consecutiveCircularEndpointReadyDetections = 0
-        circularEndpointQualified = false
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
         clearControlMeasurements()
         resetAppliedCommands()
     }
@@ -659,8 +658,8 @@ internal class TapeTrackingController {
     private fun beginCircularReacquisition() {
         phase = TapeTrackingPhase.REACQUIRING_PATH
         consecutiveCurveAlignmentDetections = 0
-        consecutiveCircularEndpointReadyDetections = 0
-        circularEndpointQualified = false
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
         consecutiveEndpointMisses = 0
         resetCircularReacquisitionCandidate()
         clearControlMeasurements()
@@ -688,30 +687,25 @@ internal class TapeTrackingController {
         circularDetectionGap = false
         consecutiveEndpointMisses = 0
         if (!endpointTurnEnabled) {
-            consecutiveCircularEndpointReadyDetections = 0
-            circularEndpointQualified = false
+            consecutiveReliableCircularPathDetections = 0
+            reliableCircularPathEstablished = false
             return
         }
-        val endpointReady =
-            observation.endpointCandidate &&
+        val reliablePath =
+            observation.quality == PathQuality.FULL_PATH &&
                 !observation.closedLoop &&
-                observation.longSideFraction >= CIRCULAR_ENDPOINT_READY_MIN_FRACTION &&
-                observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION &&
-                abs(observation.angleFromVerticalDegrees) <=
-                CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES &&
-                abs(observation.nearFieldOffsetFraction) <=
-                CIRCULAR_ENDPOINT_READY_MAX_OFFSET_FRACTION
-        if (endpointReady) {
-            consecutiveCircularEndpointReadyDetections += 1
+                observation.longSideFraction >= CIRCULAR_RELIABLE_PATH_MIN_FRACTION &&
+                observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
+        if (reliablePath) {
+            consecutiveReliableCircularPathDetections += 1
             if (
-                consecutiveCircularEndpointReadyDetections >=
-                CIRCULAR_ENDPOINT_READY_CONFIRMATION_COUNT
+                consecutiveReliableCircularPathDetections >=
+                CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT
             ) {
-                circularEndpointQualified = true
+                reliableCircularPathEstablished = true
             }
-        } else {
-            consecutiveCircularEndpointReadyDetections = 0
-            circularEndpointQualified = false
+        } else if (!reliableCircularPathEstablished) {
+            consecutiveReliableCircularPathDetections = 0
         }
     }
 
@@ -936,8 +930,8 @@ internal class TapeTrackingController {
         lastAcceptedCircularObservation = null
         circularDetectionGap = false
         resetCircularReacquisitionCandidate()
-        consecutiveCircularEndpointReadyDetections = 0
-        circularEndpointQualified = false
+        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathEstablished = false
         clearControlMeasurements()
         resetAppliedCommands()
     }
@@ -1316,17 +1310,13 @@ internal class TapeTrackingController {
         // Detector flicker on wrinkled tape may insert null or short-fragment frames.
         const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
-        // Endpoint qualification requires a long, centered route with an in-frame terminus.
-        // The 2026-08-20 flight produced two such consecutive frames before the endpoint
-        // passed under the aircraft and detector flicker began. A single frame remains
-        // insufficient, while requiring a third prevents a real endpoint from reaching
-        // the existing disappearance probe.
-        const val CIRCULAR_ENDPOINT_READY_MIN_FRACTION = 0.60
-        // A real curved endpoint approached at 71.6°. The in-frame terminus, near-edge
-        // root and centered near field distinguish an endpoint without rejecting valid arcs.
-        const val CIRCULAR_ENDPOINT_READY_MAX_ANGLE_DEGREES = 75.0
-        const val CIRCULAR_ENDPOINT_READY_MAX_OFFSET_FRACTION = 0.20
-        const val CIRCULAR_ENDPOINT_READY_CONFIRMATION_COUNT = 2
+        // In out-and-back mode the operational endpoint signal is not a visible tape tip:
+        // the latest flights end where tape passes under the mat, so no trustworthy
+        // in-frame terminus exists. Establish a route from several full, near-aircraft
+        // observations, then let sustained disappearance enter the existing low-speed
+        // probe. A brief gap cannot arm this state, and a returning full path cancels it.
+        const val CIRCULAR_RELIABLE_PATH_MIN_FRACTION = 0.60
+        const val CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT = 3
         const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
         const val CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION = 0.60
         const val CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.02

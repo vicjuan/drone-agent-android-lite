@@ -937,10 +937,13 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `two qualified endpoint frames before detector loss trigger probe and turnaround`() {
+    fun `established full path disappearance triggers probe without a visible terminus`() {
         val singleFrameController =
             circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
-        singleFrameController.observe(observation(4.0, 0.8, 0.02), seconds(2))
+        singleFrameController.observe(
+            observation(4.0, 0.8, 0.02, endpointCandidate = false),
+            seconds(2),
+        )
         singleFrameController.observe(null, seconds(2) + 250_000_000L)
         assertEquals(
             TapeTrackingPhase.TRACKING,
@@ -948,8 +951,12 @@ class TapeTrackingControllerTest {
         )
 
         val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
-        controller.observe(observation(4.0, 0.8, 0.02), seconds(3))
-        controller.observe(observation(4.0, 0.8, 0.02), seconds(3) + 250_000_000L)
+        repeat(3) { index ->
+            controller.observe(
+                observation(4.0, 0.8, 0.02, endpointCandidate = false),
+                seconds(3) + index * 250_000_000L,
+            )
+        }
         repeat(3) { index ->
             controller.observe(null, seconds(4) + index * 250_000_000L)
         }
@@ -1154,7 +1161,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `endpoint terminus reappearing during probe still turns after final disappearance`() {
+    fun `full path reappearing during probe cancels turn and must reestablish trust`() {
         val controller = circularTrackingController(TapeTrackingMode.CURVED_OUT_AND_BACK)
         repeat(3) { index ->
             controller.observe(
@@ -1187,18 +1194,17 @@ class TapeTrackingControllerTest {
             ),
             seconds(4),
         )
-        assertEquals(
-            TapeTrackingPhase.VERIFYING_ENDPOINT,
-            controller.tick(seconds(4)).phase,
-        )
+        val resumed = controller.tick(seconds(4))
+        assertFalse(resumed.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
 
         repeat(3) { index ->
             controller.observe(null, seconds(5) + index * 250_000_000L)
         }
-        val turning = controller.tick(seconds(5) + 500_000_000L)
+        val stillTracking = controller.tick(seconds(5) + 500_000_000L)
 
-        assertTrue(turning.endpointReached)
-        assertEquals(TapeTrackingPhase.TURNING, turning.phase)
+        assertFalse(stillTracking.endpointReached)
+        assertEquals(TapeTrackingPhase.TRACKING, stillTracking.phase)
     }
 
     @Test
