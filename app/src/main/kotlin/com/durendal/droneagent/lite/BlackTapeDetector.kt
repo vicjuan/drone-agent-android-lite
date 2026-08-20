@@ -48,6 +48,7 @@ class BlackTapeDetector internal constructor(
     @Volatile private var lastOtsuThreshold = 0.0
     @Volatile private var lastEffectiveThreshold = 0.0
     @Volatile private var lastClassSeparation = 0.0
+    @Volatile private var lastShadowPixelCount = 0
     @Volatile private var lastContourCount = 0
     private val rejectionCounts = IntArray(TapeCandidateRejection.entries.size)
     private var luminanceBytes = ByteArray(0)
@@ -160,8 +161,8 @@ class BlackTapeDetector internal constructor(
     fun diagnosticsSummary(): String =
         (
             "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
-                "otsu=%.1f effective=%.1f separation=%.1f contours=%d floorSeeds=%d floor=%.2f " +
-                "coverage=%.2f branches=%d region=%s candidate=[%s] arcReject=[%s] " +
+                "otsu=%.1f effective=%.1f separation=%.1f shadowPixels=%d contours=%d " +
+                "floorSeeds=%d floor=%.2f coverage=%.2f branches=%d region=%s candidate=[%s] arcReject=[%s] " +
                 "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
                 "edge:%d chroma:%d floor:%d boardColor:%d noCenterline:%d noNearField:%d " +
                 "branch:%d shortLookahead:%d"
@@ -174,6 +175,7 @@ class BlackTapeDetector internal constructor(
             lastOtsuThreshold,
             lastEffectiveThreshold,
             lastClassSeparation,
+            lastShadowPixelCount,
             lastContourCount,
             lastFloorSeedCount,
             lastFloorFraction,
@@ -298,6 +300,7 @@ class BlackTapeDetector internal constructor(
             rejectionCounts.fill(0)
             lastContourCount = 0
             lastFloorSeedCount = 0
+            lastShadowPixelCount = 0
             lastFloorFraction = 0.0
             source.put(0, 0, rgbaBytes)
             val scale = min(1.0, MAX_ANALYSIS_DIMENSION / max(width, height).toDouble())
@@ -329,7 +332,6 @@ class BlackTapeDetector internal constructor(
                     Imgproc.THRESH_BINARY_INV,
                 )
             }
-            recordCapturePlane("blackMask", blackMask)
             val separation = classSeparation(blurred, effectiveThreshold)
             lastClassSeparation = separation
             if (separation < MIN_CLASS_SEPARATION_LUMINANCE) {
@@ -338,9 +340,6 @@ class BlackTapeDetector internal constructor(
             }
 
             Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
-            lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
-            lastFloorFraction =
-                Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
             val analysisPixelCount = analysis.cols() * analysis.rows()
             if (labBytes.size != analysisPixelCount * LAB_CHANNELS) {
                 labBytes = ByteArray(analysisPixelCount * LAB_CHANNELS)
@@ -350,6 +349,11 @@ class BlackTapeDetector internal constructor(
             }
             lab.get(0, 0, labBytes)
             blackMask.get(0, 0, blackMaskBytes)
+            lastShadowPixelCount = removeBoardColoredShadowPixels(blackMask)
+            recordCapturePlane("blackMask", blackMask)
+            lastFloorSeedCount = buildFloorMask(lab, blackMask, floorMask, floorMaskWithBorder)
+            lastFloorFraction =
+                Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
             recordCapturePlane("floorMask", floorMask)
             Imgproc.morphologyEx(
                 blackMask,
@@ -545,6 +549,48 @@ class BlackTapeDetector internal constructor(
             interior.release()
         }
         return acceptedSeeds
+    }
+
+    /**
+     * Removes dark pixels whose chroma still matches the previously observed
+     * board. A cast shadow changes L* far more than a* and b*, while black tape does
+     * not retain the brown board's chroma. Removing the shadow before morphology
+     * prevents its edge from joining the tape into one false branch.
+     */
+    private fun removeBoardColoredShadowPixels(blackMask: Mat): Int {
+        val referenceA = boardReferenceA ?: return 0
+        val referenceB = boardReferenceB ?: return 0
+        val referenceChromaA = referenceA - LAB_NEUTRAL_CHROMA
+        val referenceChromaB = referenceB - LAB_NEUTRAL_CHROMA
+        val referenceChromaSquared =
+            referenceChromaA * referenceChromaA + referenceChromaB * referenceChromaB
+        if (referenceChromaSquared < MIN_BOARD_REFERENCE_CHROMA_SQUARED) return 0
+        val maximumShadowChromaSquared =
+            (hypot(referenceChromaA, referenceChromaB) + MAX_SHADOW_CHROMA_GAIN).let { it * it }
+        var removed = 0
+        for (pixel in blackMaskBytes.indices) {
+            if (blackMaskBytes[pixel] == 0.toByte()) continue
+            val labPixel = pixel * LAB_CHANNELS
+            val chromaA =
+                (labBytes[labPixel + LAB_A_CHANNEL].toInt() and 0xFF) - LAB_NEUTRAL_CHROMA
+            val chromaB =
+                (labBytes[labPixel + LAB_B_CHANNEL].toInt() and 0xFF) - LAB_NEUTRAL_CHROMA
+            val pixelChromaSquared = chromaA * chromaA + chromaB * chromaB
+            val dot = chromaA * referenceChromaA + chromaB * referenceChromaB
+            val retainsBoardHue =
+                pixelChromaSquared >= MIN_SHADOW_PIXEL_CHROMA_SQUARED &&
+                    pixelChromaSquared <= maximumShadowChromaSquared &&
+                    dot > 0.0 &&
+                    dot * dot >=
+                    MIN_BOARD_SHADOW_HUE_COSINE_SQUARED *
+                    pixelChromaSquared * referenceChromaSquared
+            if (retainsBoardHue) {
+                blackMaskBytes[pixel] = 0
+                removed++
+            }
+        }
+        if (removed > 0) blackMask.put(0, 0, blackMaskBytes)
+        return removed
     }
 
     /**
@@ -1285,6 +1331,11 @@ class BlackTapeDetector internal constructor(
         const val RGBA_CHANNELS = 4L
         const val LAB_CHANNELS = 3
         const val LAB_A_CHANNEL = 1
+        const val LAB_NEUTRAL_CHROMA = 128
+        const val MIN_BOARD_REFERENCE_CHROMA_SQUARED = 144.0
+        const val MIN_SHADOW_PIXEL_CHROMA_SQUARED = 36.0
+        const val MIN_BOARD_SHADOW_HUE_COSINE_SQUARED = 0.8836
+        const val MAX_SHADOW_CHROMA_GAIN = 8.0
         const val LAB_B_CHANNEL = 2
         const val MAX_BOARD_COLOR_SAMPLES = 64
         const val BOARD_COLOR_TANGENT_SPAN = 2

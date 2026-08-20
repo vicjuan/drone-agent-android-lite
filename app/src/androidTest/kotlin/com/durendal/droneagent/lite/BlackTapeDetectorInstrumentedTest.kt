@@ -724,6 +724,77 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(null, detection)
     }
+    @Test
+    fun curvedCastShadowEdgeIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val shadowEdge = (340.0 + 120.0 * forwardFraction * forwardFraction).toInt()
+            fillRectRgb(
+                frame,
+                width,
+                left = shadowEdge,
+                top = y,
+                right = width,
+                bottom = y + 1,
+                red = 100,
+                green = 70,
+                blue = 32,
+            )
+        }
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(diagnostics.single(), null, detection)
+    }
+    @Test
+    fun trackedTapeDoesNotFollowCastShadowEdge() {
+        val width = 640
+        val height = 360
+        val cleanFrame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        fillCurvedRibbon(cleanFrame, width, height, direction = 1.0, value = 20)
+        val shadowFrame = rgbaFrame(width, height, red = 186, green = 128, blue = 58)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val shadowEdge = (220.0 + 240.0 * forwardFraction).toInt()
+            fillRectRgb(
+                shadowFrame,
+                width,
+                left = shadowEdge,
+                top = y,
+                right = width,
+                bottom = y + 1,
+                red = 100,
+                green = 70,
+                blue = 32,
+            )
+        }
+        fillCurvedRibbon(shadowFrame, width, height, direction = 1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(cleanFrame, shadowFrame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+        val clean = checkNotNull(detections[0]) { diagnostics[0] }
+        val shadowed = checkNotNull(detections[1]) { diagnostics[1] }
+        assertEquals(clean.anchorXFraction, shadowed.anchorXFraction, 0.04)
+        assertEquals(clean.lookaheadX, shadowed.lookaheadX, 0.04)
+    }
+
+
     private fun stripedSplitFloorWithCurvedTape(
         width: Int,
         height: Int,
