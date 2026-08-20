@@ -741,6 +741,9 @@ class MainActivity : Activity() {
                                 TapeDetectionMode.STRAIGHT
                             },
                         )
+                        // The idle preview may have accepted scenery before takeoff.
+                        // A flight session must learn its board from the current route.
+                        tapeDetector?.resetTracking()
                         val now = System.nanoTime()
                         // Meeting-room runs use a physically closed loop. Keep endpoint
                         // detection active for diagnostics, but do not arm a 180° turn.

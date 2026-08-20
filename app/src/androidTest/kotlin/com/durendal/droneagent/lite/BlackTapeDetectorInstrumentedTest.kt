@@ -452,6 +452,76 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun trackedTapeSurvivesRecordedGlare() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(
+                    rgbaAsset("flight-glare-before-loss.png", width, height),
+                    rgbaAsset("flight-glare-loss.png", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+
+        assertTrue(diagnostics.first(), detections.first() != null)
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun flightBoardBoundaryIsNotReacquiredAsTape() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val blankBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        val frames = buildList {
+            add(rgbaAsset("flight-path-before-chroma-loss.jpg", width, height))
+            repeat(8) { add(blankBoard) }
+            add(rgbaAsset("flight-non-tape-boundary.jpg", width, height))
+        }
+
+        val detections =
+            detectSequence(
+                frames,
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+
+        assertTrue("recorded tape must establish the board colour", detections.first() != null)
+        assertEquals(diagnostics.last(), null, detections.last())
+        assertTrue(diagnostics.last(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.last()))
+    }
+
+    @Test
+    fun newTrackingSessionForgetsIdleBoardColour() {
+        val width = 640
+        val height = 360
+        val idleScenery = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
+        fillCurvedRibbon(idleScenery, width, height, direction = 1.0, value = 20)
+        val flightBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(flightBoard, width, height, direction = 1.0, value = 20)
+        val diagnostics = mutableListOf<String>()
+
+        val detections =
+            detectSequence(
+                listOf(idleScenery, flightBoard),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 1) detector.resetTracking()
+                },
+            )
+
+        assertTrue(diagnostics.first(), detections.first() != null)
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
     fun trackedWarmFloorShadowStillFailsChromaGate() {
         val width = 640
         val height = 360
@@ -516,6 +586,41 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertEquals(null, detection)
         assertTrue(diagnostics.single().contains("chroma:1"))
+    }
+
+    @Test
+    fun curvedBoundaryBetweenDifferentBoardColoursIsNotTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRectRgb(
+                frame,
+                width,
+                left = 0,
+                top = y,
+                right = (center - TAPE_HALF_WIDTH).toInt(),
+                bottom = y + 1,
+                red = 70,
+                green = 145,
+                blue = 65,
+            )
+        }
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(diagnostics.single(), null, detection)
+        assertTrue(diagnostics.single(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.single()))
     }
 
     @Test
@@ -781,5 +886,6 @@ class BlackTapeDetectorInstrumentedTest {
     private companion object {
         const val CURVE_DISPLACEMENT = 140.0
         const val TAPE_HALF_WIDTH = 15.0
+        val BOARD_COLOR_REJECTION = Regex("""boardColor:[1-9]\d*""")
     }
 }
