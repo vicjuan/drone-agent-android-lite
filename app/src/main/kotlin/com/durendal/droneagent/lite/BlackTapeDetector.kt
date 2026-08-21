@@ -1334,7 +1334,7 @@ class BlackTapeDetector internal constructor(
                     width = width,
                     height = height,
                     channels = RGBA_CHANNELS.toInt(),
-                    pixels = rgbaBytes,
+                    pixels = rgbaBytes.copyOf(),
                 ),
                 masks = planes,
             ),
