@@ -1466,7 +1466,7 @@ internal class TapeTrackingController {
         const val CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND = 0.03
         const val CIRCULAR_POST_TURN_RECOVERY_NANOS = 6_000_000_000L
         // Immediately after a half-turn the camera may see only the near fragment;
-        // roughly 750 ms of centered, mutually consistent frames compensate for
+        // roughly 500 ms of centered, mutually consistent frames compensate for
         // this deliberately lower length.
         const val CIRCULAR_POST_TURN_MIN_PATH_FRACTION = 0.20
         const val CIRCULAR_POST_TURN_MAX_ANGLE_DEGREES = 45.0

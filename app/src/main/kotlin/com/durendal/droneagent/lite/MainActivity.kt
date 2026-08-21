@@ -1626,28 +1626,29 @@ class MainActivity : Activity() {
             return "水平避障不可用：360° 感測器未看見任何門牆"
         }
         val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
-        if (ageMs > MAX_OBSTACLE_SAMPLE_AGE_MS) {
+        if (ageMs > MAX_MANUAL_OBSTACLE_SAMPLE_AGE_MS) {
             return "水平避障不可用：障礙距離資料已中斷 ${ageMs}ms"
         }
         val nearest = nearestHorizontalObstacleMm
         if (nearest == null && horizontalGroundEchoSuppressed) return null
         if (nearest == null) return "水平避障不可用：沒有水平障礙距離"
-        if (nearest <= HORIZONTAL_CLEARANCE_MM) {
-            return "水平控制停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
+        if (nearest <= MANUAL_HORIZONTAL_CLEARANCE_MM) {
+            return "水平控制停止：障礙距離 ${nearest}mm（門檻 ${MANUAL_HORIZONTAL_CLEARANCE_MM}mm）"
         }
         return null
     }
 
     /**
-     * Tape tracking disables DJI avoidance, so a fresh range is required and the
-     * app's own clearance is the final horizontal stop.
+     * Tape tracking disables DJI avoidance, so a fresh callback is required and
+     * the app's own clearance is the final horizontal stop. DJI's 60 m sentinel
+     * is a fresh callback reporting no detected obstacle, not missing telemetry.
      */
     private fun tapeTrackingStopReason(nowNanos: Long = System.nanoTime()): String? {
         if (!avoidance.closedConfirmed) {
             return avoidance.warning ?: "黑膠帶追蹤停止：無法確認飛機避障已關閉"
         }
-        if (!isFreshObstacleSample(obstacleSampleValid, obstacleSampleAtNanos, nowNanos)) {
-            if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) {
+        if (!isFreshObstacleSample(obstacleSampleReceived, obstacleSampleAtNanos, nowNanos)) {
+            if (!obstacleSampleReceived || obstacleSampleAtNanos == 0L) {
                 return "黑膠帶追蹤停止：障礙距離資料不可用"
             }
             val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
@@ -1655,7 +1656,7 @@ class MainActivity : Activity() {
         }
         val nearest = nearestHorizontalObstacleMm ?: return null
         return if (breachesAutonomousHorizontalClearance(nearest)) {
-            "黑膠帶追蹤停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
+            "黑膠帶追蹤停止：障礙距離 ${nearest}mm（門檻 ${AUTONOMOUS_HORIZONTAL_CLEARANCE_MM}mm）"
         } else {
             null
         }
@@ -1673,9 +1674,9 @@ class MainActivity : Activity() {
         val nearest = nearestHorizontalObstacleMm ?: return null
         if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) return null
         val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
-        if (ageMs > MAX_OBSTACLE_SAMPLE_AGE_MS) return null
-        return if (nearest <= HORIZONTAL_CLEARANCE_MM) {
-            "水平控制停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
+        if (ageMs > MAX_MANUAL_OBSTACLE_SAMPLE_AGE_MS) return null
+        return if (nearest <= MANUAL_HORIZONTAL_CLEARANCE_MM) {
+            "水平控制停止：障礙距離 ${nearest}mm（門檻 ${MANUAL_HORIZONTAL_CLEARANCE_MM}mm）"
         } else {
             null
         }

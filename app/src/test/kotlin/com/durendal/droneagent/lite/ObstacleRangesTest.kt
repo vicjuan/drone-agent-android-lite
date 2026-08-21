@@ -23,19 +23,33 @@ class ObstacleRangesTest {
         val sampleAtNanos = 1_000_000_000L
         assertTrue(
             isFreshObstacleSample(
-                sampleValid = true,
+                sampleReceived = true,
                 sampleAtNanos = sampleAtNanos,
                 nowNanos =
-                    sampleAtNanos + MAX_OBSTACLE_SAMPLE_AGE_MS * 1_000_000L,
+                    sampleAtNanos +
+                        MAX_AUTONOMOUS_OBSTACLE_SAMPLE_AGE_MS * 1_000_000L,
             ),
         )
         assertFalse(
             isFreshObstacleSample(
-                sampleValid = true,
+                sampleReceived = true,
                 sampleAtNanos = sampleAtNanos,
                 nowNanos =
                     sampleAtNanos +
-                        (MAX_OBSTACLE_SAMPLE_AGE_MS + 1L) * 1_000_000L,
+                        (MAX_AUTONOMOUS_OBSTACLE_SAMPLE_AGE_MS + 1L) * 1_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun freshAllSentinelCallbackIsAvailableTelemetry() {
+        val sampleAtNanos = 1_000_000_000L
+
+        assertTrue(
+            isFreshObstacleSample(
+                sampleReceived = true,
+                sampleAtNanos = sampleAtNanos,
+                nowNanos = sampleAtNanos,
             ),
         )
     }
@@ -44,12 +58,12 @@ class ObstacleRangesTest {
     fun autonomousTrackingStopsAtTheClearanceBoundary() {
         assertFalse(
             breachesAutonomousHorizontalClearance(
-                HORIZONTAL_CLEARANCE_MM + 1,
+                AUTONOMOUS_HORIZONTAL_CLEARANCE_MM + 1,
             ),
         )
         assertTrue(
             breachesAutonomousHorizontalClearance(
-                HORIZONTAL_CLEARANCE_MM,
+                AUTONOMOUS_HORIZONTAL_CLEARANCE_MM,
             ),
         )
     }
