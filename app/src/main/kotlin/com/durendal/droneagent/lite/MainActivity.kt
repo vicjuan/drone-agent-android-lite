@@ -1655,20 +1655,13 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Tape tracking disables DJI avoidance, so a fresh callback is required and
-     * the app's own clearance is the final horizontal stop. DJI's 60 m sentinel
-     * is a fresh callback reporting no detected obstacle, not missing telemetry.
+     * Tape tracking disables DJI avoidance and applies the app's larger
+     * autonomous clearance whenever DJI reports an actionable obstacle.
+     * Callback freshness remains diagnostic until its real cadence is measured.
      */
-    private fun tapeTrackingStopReason(nowNanos: Long = System.nanoTime()): String? {
+    private fun tapeTrackingStopReason(): String? {
         if (!avoidance.closedConfirmed) {
             return avoidance.warning ?: "黑膠帶追蹤停止：無法確認飛機避障已關閉"
-        }
-        if (!isFreshObstacleSample(obstacleSampleReceived, obstacleSampleAtNanos, nowNanos)) {
-            if (!obstacleSampleReceived || obstacleSampleAtNanos == 0L) {
-                return "黑膠帶追蹤停止：障礙距離資料不可用"
-            }
-            val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
-            return "黑膠帶追蹤停止：障礙距離資料已中斷 ${ageMs}ms"
         }
         val nearest = nearestHorizontalObstacleMm ?: return null
         return if (breachesAutonomousHorizontalClearance(nearest)) {
