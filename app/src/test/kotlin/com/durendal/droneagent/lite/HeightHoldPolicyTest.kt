@@ -48,4 +48,13 @@ class HeightHoldPolicyTest {
         assertTrue(HeightHoldPolicy.isWithinTarget(1.0, 1.1))
         assertFalse(HeightHoldPolicy.isWithinTarget(1.0, 0.8))
     }
+
+    @Test
+    fun `missing negative and non finite aircraft heights are unusable`() {
+        assertFalse(HeightHoldPolicy.isUsableCurrentHeight(null))
+        assertFalse(HeightHoldPolicy.isUsableCurrentHeight(-1.0))
+        assertFalse(HeightHoldPolicy.isUsableCurrentHeight(Double.NaN))
+        assertFalse(HeightHoldPolicy.isUsableCurrentHeight(Double.POSITIVE_INFINITY))
+        assertTrue(HeightHoldPolicy.isUsableCurrentHeight(0.0))
+    }
 }

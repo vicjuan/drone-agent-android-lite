@@ -1460,7 +1460,7 @@ class MainActivity : Activity() {
             this,
             true,
         ) { _, attitude ->
-            publishAircraftAttitude(attitude)
+            runOnUiThread { publishAircraftAttitude(attitude) }
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyIsLandingConfirmationNeeded),
@@ -1639,18 +1639,22 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Tape tracking requires avoidance=CLOSE, then retains only the app's 150 mm
-     * emergency stop. The higher floor-contaminated ranges no longer stop motion.
+     * Tape tracking disables DJI avoidance, so a fresh range is required and the
+     * app's own clearance is the final horizontal stop.
      */
     private fun tapeTrackingStopReason(nowNanos: Long = System.nanoTime()): String? {
         if (!avoidance.closedConfirmed) {
             return avoidance.warning ?: "黑膠帶追蹤停止：無法確認飛機避障已關閉"
         }
+        if (!isFreshObstacleSample(obstacleSampleValid, obstacleSampleAtNanos, nowNanos)) {
+            if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) {
+                return "黑膠帶追蹤停止：障礙距離資料不可用"
+            }
+            val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
+            return "黑膠帶追蹤停止：障礙距離資料已中斷 ${ageMs}ms"
+        }
         val nearest = nearestHorizontalObstacleMm ?: return null
-        if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) return null
-        val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
-        if (ageMs > MAX_OBSTACLE_SAMPLE_AGE_MS) return null
-        return if (nearest <= HORIZONTAL_CLEARANCE_MM) {
+        return if (breachesAutonomousHorizontalClearance(nearest)) {
             "黑膠帶追蹤停止：障礙距離 ${nearest}mm（門檻 ${HORIZONTAL_CLEARANCE_MM}mm）"
         } else {
             null
@@ -1738,11 +1742,12 @@ class MainActivity : Activity() {
 
 
     private fun publishHeight(meters: Double?, source: HeightSource = HeightSource.ALTITUDE) {
-        if (meters == null) {
+        if (!HeightHoldPolicy.isUsableCurrentHeight(meters)) {
             if (source == heightSource) {
                 altitudeMeters = null
                 altitudeAtNanos = 0L
                 heightSource = HeightSource.NONE
+                if (holdingHeight) driveHeightHold()
             }
             return
         }
@@ -2727,12 +2732,6 @@ class MainActivity : Activity() {
         const val BATTERY_WARN_PERCENT = 25
         const val BATTERY_CRITICAL_PERCENT = BatteryLandingGate.FORCE_LANDING_PERCENT
 
-        /** Emergency stop for a fresh, filtered horizontal obstacle range. */
-        const val HORIZONTAL_CLEARANCE_MM = 150
-
-
-        /** Stale ranging data cannot authorize motion. */
-        const val MAX_OBSTACLE_SAMPLE_AGE_MS = 500L
         const val HORIZONTAL_WATCHDOG_MS = 100L
 
 
@@ -2746,8 +2745,8 @@ class MainActivity : Activity() {
         /** Detector state is logged at one hertz; the overlay still updates at frame cadence. */
         const val TAPE_LOG_PERIOD_NANOS = 1_000_000_000L
 
-        /** Three misses prevent a single noisy frame from flashing the box off. */
-        const val TAPE_MISSES_TO_CLEAR = 3
+        /** Preserve the original ~750 ms overlay debounce at the 10 Hz detector rate. */
+        const val TAPE_MISSES_TO_CLEAR = 8
         const val TAPE_TRACKING_TICK_MS = 100L
         const val TAPE_CAPTURE_DIRECTORY = "tape-captures"
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0

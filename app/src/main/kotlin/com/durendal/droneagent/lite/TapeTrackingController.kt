@@ -114,9 +114,10 @@ internal class TapeTrackingController {
     private var postTurnRecoveryUntilNanos = 0L
     private var endpointVerificationStartedAtNanos = 0L
     private var consecutiveEndpointMisses = 0
+    private var endpointMissSinceNanos = 0L
     private var endpointReferenceBounds: NormalizedRect? = null
     private var lateralCorrectionActive = false
-    private var consecutiveCurveAlignmentDetections = 0
+    private var curveAlignmentSinceNanos = 0L
     private var lastAcceptedCircularObservation: TapeTrackingObservation? = null
     private var circularDetectionGap = false
     // One candidate sequence is shared by three mutually exclusive contexts:
@@ -124,8 +125,8 @@ internal class TapeTrackingController {
     // reset it; full reacquisition alone may retain it across a brief detector flicker.
     private var circularReacquisitionCandidate: TapeTrackingObservation? = null
     private var circularReacquisitionCandidateAtNanos = 0L
-    private var consecutiveCircularReacquisitionDetections = 0
-    private var consecutiveReliableCircularPathDetections = 0
+    private var circularCandidateSequenceSinceNanos = 0L
+    private var reliableCircularPathSinceNanos = 0L
     private var reliableCircularPathEstablished = false
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
@@ -264,6 +265,7 @@ internal class TapeTrackingController {
                 }
                 endpointReferenceBounds = observation.bounds
                 consecutiveEndpointMisses = 0
+                endpointMissSinceNanos = 0L
                 updateControlMeasurements(observation, nowNanos)
                 lastDetectionAtNanos = nowNanos
                 if (
@@ -473,7 +475,7 @@ internal class TapeTrackingController {
             circularDetectionGap = true
             disableCircularLateralCorrection()
             if (!reliableCircularPathEstablished) {
-                consecutiveReliableCircularPathDetections = 0
+                reliableCircularPathSinceNanos = 0L
             }
             if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
                 expireCircularReacquisitionCandidateIfStale(nowNanos)
@@ -483,10 +485,12 @@ internal class TapeTrackingController {
             when (phase) {
                 TapeTrackingPhase.TRACKING -> {
                     if (reliableCircularPathEstablished) {
-                        consecutiveEndpointMisses += 1
+                        if (endpointMissSinceNanos == 0L) {
+                            endpointMissSinceNanos = nowNanos
+                        }
                         if (
-                            consecutiveEndpointMisses >=
-                            CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT
+                            nowNanos - endpointMissSinceNanos >=
+                            CIRCULAR_ENDPOINT_ENTRY_DURATION_NANOS
                         ) {
                             beginCircularEndpointVerification(nowNanos)
                         }
@@ -494,7 +498,7 @@ internal class TapeTrackingController {
                 }
 
                 TapeTrackingPhase.ALIGNING_CURVE -> {
-                    consecutiveCurveAlignmentDetections = 0
+                    curveAlignmentSinceNanos = 0L
                     clearControlMeasurements()
                 }
 
@@ -537,7 +541,7 @@ internal class TapeTrackingController {
         }
 
         acceptCircularObservation(observation, nowNanos)
-        updateCircularTrackingPhase()
+        updateCircularTrackingPhase(nowNanos)
     }
 
     private fun observeCircularPostTurnRecovery(
@@ -558,20 +562,9 @@ internal class TapeTrackingController {
         }
 
         val trackedObservation = checkNotNull(observation)
-        val previousCandidate = circularReacquisitionCandidate
-        if (
-            previousCandidate != null &&
-            isConsistentCircularReacquisition(trackedObservation, previousCandidate)
-        ) {
-            consecutiveCircularReacquisitionDetections += 1
-        } else {
-            consecutiveCircularReacquisitionDetections = 1
-        }
-        circularReacquisitionCandidate = trackedObservation
-        if (
-            consecutiveCircularReacquisitionDetections <
-            CIRCULAR_POST_TURN_CONFIRMATION_COUNT
-        ) {
+        val consistentDurationNanos =
+            recordConsistentCircularCandidate(trackedObservation, nowNanos)
+        if (consistentDurationNanos < CIRCULAR_POST_TURN_CONFIRMATION_NANOS) {
             clearControlMeasurements()
             return
         }
@@ -581,7 +574,7 @@ internal class TapeTrackingController {
         resetCircularReacquisitionCandidate()
         acceptCircularObservation(trackedObservation, nowNanos)
         resetAppliedCommands()
-        updateCircularTrackingPhase()
+        updateCircularTrackingPhase(nowNanos)
     }
 
     private fun observeCircularEndpointVerification(
@@ -605,7 +598,7 @@ internal class TapeTrackingController {
 
         val trackedObservation = checkNotNull(observation)
         endpointReferenceBounds = trackedObservation.bounds
-        consecutiveEndpointMisses = 0
+        endpointMissSinceNanos = 0L
         acceptCircularObservation(trackedObservation, nowNanos)
         // Endpoint inference is based on reliable-route absence. Any matching full path
         // proves the route is present again, even when its far end also looks terminal.
@@ -619,7 +612,7 @@ internal class TapeTrackingController {
             endpointVerificationStartedAtNanos = 0L
             endpointReferenceBounds = null
             resetAppliedCommands()
-            updateCircularTrackingPhase()
+            updateCircularTrackingPhase(nowNanos)
         }
     }
 
@@ -628,7 +621,8 @@ internal class TapeTrackingController {
         endpointReferenceBounds = lastAcceptedCircularObservation?.bounds
         endpointVerificationStartedAtNanos = nowNanos
         consecutiveEndpointMisses = 0
-        consecutiveReliableCircularPathDetections = 0
+        endpointMissSinceNanos = 0L
+        reliableCircularPathSinceNanos = 0L
         reliableCircularPathEstablished = false
         clearControlMeasurements()
         resetAppliedCommands()
@@ -638,31 +632,20 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
-        val previousCandidate = circularReacquisitionCandidate
-        if (
-            previousCandidate != null &&
-            isConsistentCircularReacquisition(observation, previousCandidate)
-        ) {
-            consecutiveCircularReacquisitionDetections += 1
-        } else {
-            consecutiveCircularReacquisitionDetections = 1
-        }
-        circularReacquisitionCandidate = observation
+        val consistentDurationNanos =
+            recordConsistentCircularCandidate(observation, nowNanos)
         val commandStillFresh =
             nowNanos - lastDetectionAtNanos <= DETECTION_COMMAND_STALE_NANOS
         if (!commandStillFresh) {
             clearControlMeasurements()
             resetAppliedCommands()
         }
-        if (
-            consecutiveCircularReacquisitionDetections <
-            CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT
-        ) {
+        if (consistentDurationNanos < CIRCULAR_GAP_CONTINUATION_CONFIRMATION_NANOS) {
             return
         }
         resetCircularReacquisitionCandidate()
         acceptCircularObservation(observation, nowNanos)
-        updateCircularTrackingPhase()
+        updateCircularTrackingPhase(nowNanos)
     }
 
     private fun observeCircularReacquisitionCandidate(
@@ -674,31 +657,20 @@ internal class TapeTrackingController {
             return
         }
 
-        val previousCandidate = circularReacquisitionCandidate
-        if (
-            previousCandidate != null &&
-            isConsistentCircularReacquisition(observation, previousCandidate)
-        ) {
-            consecutiveCircularReacquisitionDetections += 1
-        } else {
-            consecutiveCircularReacquisitionDetections = 1
-        }
-        circularReacquisitionCandidate = observation
-        circularReacquisitionCandidateAtNanos = nowNanos
-        if (
-            consecutiveCircularReacquisitionDetections >=
-            REACQUISITION_CONFIRMATION_COUNT
-        ) {
+        val consistentDurationNanos =
+            recordConsistentCircularCandidate(observation, nowNanos)
+        if (consistentDurationNanos >= REACQUISITION_CONFIRMATION_NANOS) {
             completeCircularReacquisition(observation, nowNanos)
         }
     }
 
     private fun beginCircularReacquisition() {
         phase = TapeTrackingPhase.REACQUIRING_PATH
-        consecutiveCurveAlignmentDetections = 0
-        consecutiveReliableCircularPathDetections = 0
+        curveAlignmentSinceNanos = 0L
+        reliableCircularPathSinceNanos = 0L
         reliableCircularPathEstablished = false
         consecutiveEndpointMisses = 0
+        endpointMissSinceNanos = 0L
         resetCircularReacquisitionCandidate()
         clearControlMeasurements()
         resetAppliedCommands()
@@ -712,7 +684,7 @@ internal class TapeTrackingController {
         resetCircularReacquisitionCandidate()
         acceptCircularObservation(observation, nowNanos)
         resetAppliedCommands()
-        updateCircularTrackingPhase()
+        updateCircularTrackingPhase(nowNanos)
     }
 
     private fun acceptCircularObservation(
@@ -724,8 +696,9 @@ internal class TapeTrackingController {
         lastAcceptedCircularObservation = observation
         circularDetectionGap = false
         consecutiveEndpointMisses = 0
+        endpointMissSinceNanos = 0L
         if (!endpointTurnEnabled) {
-            consecutiveReliableCircularPathDetections = 0
+            reliableCircularPathSinceNanos = 0L
             reliableCircularPathEstablished = false
             return
         }
@@ -735,19 +708,21 @@ internal class TapeTrackingController {
                 observation.longSideFraction >= CIRCULAR_RELIABLE_PATH_MIN_FRACTION &&
                 observation.bounds.bottom >= ENDPOINT_NEAR_EDGE_MIN_FRACTION
         if (reliablePath) {
-            consecutiveReliableCircularPathDetections += 1
+            if (reliableCircularPathSinceNanos == 0L) {
+                reliableCircularPathSinceNanos = nowNanos
+            }
             if (
-                consecutiveReliableCircularPathDetections >=
-                CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT
+                nowNanos - reliableCircularPathSinceNanos >=
+                CIRCULAR_RELIABLE_PATH_CONFIRMATION_NANOS
             ) {
                 reliableCircularPathEstablished = true
             }
         } else if (!reliableCircularPathEstablished) {
-            consecutiveReliableCircularPathDetections = 0
+            reliableCircularPathSinceNanos = 0L
         }
     }
 
-    private fun updateCircularTrackingPhase() {
+    private fun updateCircularTrackingPhase(nowNanos: Long) {
         val angle = controlledAngleDegrees ?: return
         when (phase) {
             TapeTrackingPhase.TRACKING -> {
@@ -756,7 +731,7 @@ internal class TapeTrackingController {
                     !hasUsablePurePursuitTarget()
                 ) {
                     phase = TapeTrackingPhase.ALIGNING_CURVE
-                    consecutiveCurveAlignmentDetections = 0
+                    curveAlignmentSinceNanos = 0L
                     disableCircularLateralCorrection()
                     resetAppliedCommands()
                 }
@@ -764,18 +739,20 @@ internal class TapeTrackingController {
 
             TapeTrackingPhase.ALIGNING_CURVE -> {
                 if (abs(angle) <= CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES) {
-                    consecutiveCurveAlignmentDetections += 1
+                    if (curveAlignmentSinceNanos == 0L) {
+                        curveAlignmentSinceNanos = nowNanos
+                    }
                     if (
-                        consecutiveCurveAlignmentDetections >=
-                        CURVE_ALIGNMENT_CONFIRMATION_COUNT
+                        nowNanos - curveAlignmentSinceNanos >=
+                        CURVE_ALIGNMENT_CONFIRMATION_NANOS
                     ) {
                         phase = TapeTrackingPhase.TRACKING
-                        consecutiveCurveAlignmentDetections = 0
+                        curveAlignmentSinceNanos = 0L
                         disableCircularLateralCorrection()
                         resetAppliedCommands()
                     }
                 } else {
-                    consecutiveCurveAlignmentDetections = 0
+                    curveAlignmentSinceNanos = 0L
                 }
             }
 
@@ -816,6 +793,22 @@ internal class TapeTrackingController {
                 previousCandidate.angleFromVerticalDegrees,
             ) <= REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES
 
+    private fun recordConsistentCircularCandidate(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ): Long {
+        val previousCandidate = circularReacquisitionCandidate
+        if (
+            previousCandidate == null ||
+            !isConsistentCircularReacquisition(observation, previousCandidate)
+        ) {
+            circularCandidateSequenceSinceNanos = nowNanos
+        }
+        circularReacquisitionCandidate = observation
+        circularReacquisitionCandidateAtNanos = nowNanos
+        return nowNanos - circularCandidateSequenceSinceNanos
+    }
+
     private fun expireCircularReacquisitionCandidateIfStale(nowNanos: Long) {
         if (
             circularReacquisitionCandidateAtNanos != 0L &&
@@ -829,7 +822,7 @@ internal class TapeTrackingController {
     private fun resetCircularReacquisitionCandidate() {
         circularReacquisitionCandidate = null
         circularReacquisitionCandidateAtNanos = 0L
-        consecutiveCircularReacquisitionDetections = 0
+        circularCandidateSequenceSinceNanos = 0L
     }
 
 
@@ -837,7 +830,7 @@ internal class TapeTrackingController {
         if (
             phase != TapeTrackingPhase.TRACKING ||
             endpointCandidateSinceNanos == 0L ||
-            consecutiveEndpointDetections < ENDPOINT_CONFIRMATION_COUNT ||
+            consecutiveEndpointDetections < ENDPOINT_MIN_CONFIRMATION_SAMPLES ||
             nowNanos - endpointCandidateSinceNanos < ENDPOINT_CONFIRMATION_NANOS
         ) {
             return
@@ -853,13 +846,18 @@ internal class TapeTrackingController {
         consecutiveEndpointDetections = 0
         endpointVerificationStartedAtNanos = nowNanos
         consecutiveEndpointMisses = 0
+        endpointMissSinceNanos = 0L
         resetAppliedCommands()
     }
 
     private fun registerEndpointMiss(nowNanos: Long) {
         consecutiveEndpointMisses += 1
+        if (endpointMissSinceNanos == 0L) {
+            endpointMissSinceNanos = nowNanos
+        }
         if (
-            consecutiveEndpointMisses >= ENDPOINT_DISAPPEARANCE_COUNT &&
+            consecutiveEndpointMisses >= ENDPOINT_MIN_DISAPPEARANCE_SAMPLES &&
+            nowNanos - endpointMissSinceNanos >= ENDPOINT_DISAPPEARANCE_CONFIRMATION_NANOS &&
             nowNanos - endpointVerificationStartedAtNanos >= ENDPOINT_PROBE_DURATION_NANOS
         ) {
             phase = TapeTrackingPhase.TURNING
@@ -883,6 +881,7 @@ internal class TapeTrackingController {
         endpointPending = false
         endpointVerificationStartedAtNanos = 0L
         consecutiveEndpointMisses = 0
+        endpointMissSinceNanos = 0L
         endpointReferenceBounds = null
         resetControlState()
     }
@@ -922,7 +921,7 @@ internal class TapeTrackingController {
         val elapsedNanos = nowNanos - lastControlObservationAtNanos
         offsetRatePerSecond =
             if (previousOffset != null && lastControlObservationAtNanos != 0L && elapsedNanos > 0L) {
-                ((nextOffset - previousOffset) / (elapsedNanos / NANOS_PER_SECOND))
+                ((nextOffset - previousOffset) / (elapsedNanos / 1_000_000_000.0))
                     .coerceIn(-MAX_OFFSET_RATE_PER_SECOND, MAX_OFFSET_RATE_PER_SECOND)
             } else {
                 0.0
@@ -964,11 +963,11 @@ internal class TapeTrackingController {
     }
 
     private fun resetControlState() {
-        consecutiveCurveAlignmentDetections = 0
+        curveAlignmentSinceNanos = 0L
         lastAcceptedCircularObservation = null
         circularDetectionGap = false
         resetCircularReacquisitionCandidate()
-        consecutiveReliableCircularPathDetections = 0
+        reliableCircularPathSinceNanos = 0L
         reliableCircularPathEstablished = false
         clearControlMeasurements()
         resetAppliedCommands()
@@ -1233,7 +1232,7 @@ internal class TapeTrackingController {
                 CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND
             }
         }
-        if (phase != TapeTrackingPhase.TRACKING || consecutiveEndpointDetections > 0) return 0.0
+        if (phase != TapeTrackingPhase.TRACKING || endpointCandidateSinceNanos != 0L) return 0.0
         val angle = controlledAngleDegrees ?: return 0.0
         val offset = controlledHorizontalOffsetFraction ?: return 0.0
         if (
@@ -1276,10 +1275,16 @@ internal class TapeTrackingController {
         nowNanos: Long,
     ): Pair<Double, Double> {
         val elapsedSeconds = outputIntervalSeconds(nowNanos)
+        val maximumYawAcceleration =
+            if (mode.followsCurvedPath) {
+                CIRCULAR_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED
+            } else {
+                MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED
+            }
         appliedYawRateDegreesPerSecond = moveToward(
             appliedYawRateDegreesPerSecond,
             targetYawRate,
-            MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED * elapsedSeconds,
+            maximumYawAcceleration * elapsedSeconds,
         )
         appliedRightSpeedMetersPerSecond = moveToward(
             appliedRightSpeedMetersPerSecond,
@@ -1291,12 +1296,12 @@ internal class TapeTrackingController {
     }
 
     private fun outputIntervalSeconds(nowNanos: Long): Double =
-        if (lastCommandAtNanos == 0L) {
-            INITIAL_COMMAND_INTERVAL_SECONDS
-        } else {
-            ((nowNanos - lastCommandAtNanos) / NANOS_PER_SECOND)
-                .coerceIn(0.0, MAX_COMMAND_INTERVAL_SECONDS)
-        }
+        boundedControlIntervalSeconds(
+            nowNanos = nowNanos,
+            previousNanos = lastCommandAtNanos,
+            initialSeconds = INITIAL_COMMAND_INTERVAL_SECONDS,
+            maximumSeconds = MAX_COMMAND_INTERVAL_SECONDS,
+        )
 
     private fun decision(
         phase: TapeTrackingPhase,
@@ -1386,24 +1391,28 @@ internal class TapeTrackingController {
         const val STABLE_ANGLE_DEGREES = 5.0
         const val STABILIZED_FILTER_ALPHA = 0.4
         const val MAX_OFFSET_RATE_PER_SECOND = 1.0
-        const val MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED = 30.0
+        const val MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED = 15.0
+        const val CIRCULAR_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED = 30.0
         const val MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.10
         const val MAX_LATERAL_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.20
         const val ENDPOINT_REFERENCE_MIN_FRACTION = 0.60
         const val ENDPOINT_LENGTH_RATIO = 0.75
         const val ENDPOINT_REARM_LENGTH_RATIO = 0.65
         const val ENDPOINT_EXIT_LENGTH_RATIO = 0.85
-        const val ENDPOINT_CONFIRMATION_COUNT = 3
+        // Duration is the primary debounce at 10 Hz; three samples prevent sparse
+        // callbacks from satisfying it with only one or two observations.
+        const val ENDPOINT_MIN_CONFIRMATION_SAMPLES = 3
+        const val ENDPOINT_MIN_DISAPPEARANCE_SAMPLES = 3
         const val ENDPOINT_CONFIRMATION_NANOS = 750_000_000L
-        const val ENDPOINT_DISAPPEARANCE_COUNT = 3
+        const val ENDPOINT_DISAPPEARANCE_CONFIRMATION_NANOS = 500_000_000L
         const val ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.10
         const val ENDPOINT_PROBE_DURATION_NANOS = 1_500_000_000L
         const val RECENTER_DURATION_NANOS = 2_000_000_000L
         const val POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND = 0.15
         const val POST_TURN_RECOVERY_NANOS = 2_000_000_000L
-        // The detector runs at about 3.8 Hz in flight. Keep four missed sample windows plus
-        // callback jitter before hovering; at 0.12 m/s the added 250 ms is at most 3 cm.
-        const val DETECTION_COMMAND_STALE_NANOS = 1_250_000_000L
+        // At 10 Hz, four missed detector windows hover before stale geometry can
+        // advance the aircraft farther than roughly 10 cm at the 0.24 m/s maximum.
+        const val DETECTION_COMMAND_STALE_NANOS = 400_000_000L
         const val ENDPOINT_NEAR_EDGE_MIN_FRACTION = 0.90
         const val ENDPOINT_TRACK_MIN_OVERLAP = 0.20
         const val ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND = 2.0
@@ -1413,10 +1422,9 @@ internal class TapeTrackingController {
         const val NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND = 3.0
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
-        const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 30.0
-        // A 30-second lap needs about 12 degrees/s of sustained heading change. Keep
-        // substantial reserve because image-space curvature temporarily asks for more.
-        const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 2.0
+        const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND =
+            VirtualStickSession.MAX_YAW_DEGREES_PER_SECOND
+        const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 1.0
         const val CIRCULAR_YAW_SPEED_BUDGET_DEGREES_PER_SECOND =
             CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND -
                 CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
@@ -1430,7 +1438,7 @@ internal class TapeTrackingController {
         const val CIRCULAR_STABLE_ANGLE_DEGREES = 8.0
         const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
         const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0
-        const val CURVE_ALIGNMENT_CONFIRMATION_COUNT = 3
+        const val CURVE_ALIGNMENT_CONFIRMATION_NANOS = 500_000_000L
         const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
         const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
@@ -1440,29 +1448,30 @@ internal class TapeTrackingController {
         const val CIRCULAR_REACQUISITION_MIN_PATH_FRACTION = 0.60
         const val REACQUISITION_CANDIDATE_OFFSET_TOLERANCE_FRACTION = 0.08
         const val REACQUISITION_CANDIDATE_ANGLE_TOLERANCE_DEGREES = 20.0
-        const val REACQUISITION_CONFIRMATION_COUNT = 2
+        const val REACQUISITION_CONFIRMATION_NANOS = 200_000_000L
         // Detector flicker on wrinkled tape may insert null or short-fragment frames.
         const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
-        const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_COUNT = 2
+        const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_NANOS = 250_000_000L
         // In out-and-back mode the operational endpoint signal is not a visible tape tip:
         // the latest flights end where tape passes under the mat, so no trustworthy
         // in-frame terminus exists. Establish a route from several full, near-aircraft
         // observations, then let sustained disappearance enter the existing low-speed
         // probe. A brief gap cannot arm this state, and a returning full path cancels it.
         const val CIRCULAR_RELIABLE_PATH_MIN_FRACTION = 0.60
-        const val CIRCULAR_RELIABLE_PATH_CONFIRMATION_COUNT = 3
-        const val CIRCULAR_ENDPOINT_ENTRY_MISS_COUNT = 2
+        const val CIRCULAR_RELIABLE_PATH_CONFIRMATION_NANOS = 500_000_000L
+        const val CIRCULAR_ENDPOINT_ENTRY_DURATION_NANOS = 250_000_000L
         const val CIRCULAR_ENDPOINT_RECOVERY_MIN_FRACTION = 0.60
         const val CIRCULAR_ENDPOINT_PROBE_SPEED_METERS_PER_SECOND = 0.02
         const val ENDPOINT_VERIFICATION_TIMEOUT_NANOS = 6_000_000_000L
         const val CIRCULAR_POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND = 0.03
         const val CIRCULAR_POST_TURN_RECOVERY_NANOS = 6_000_000_000L
-        // Immediately after a half-turn the camera may see only the near fragment; three
-        // centered, mutually consistent frames compensate for this deliberately lower length.
+        // Immediately after a half-turn the camera may see only the near fragment;
+        // roughly 750 ms of centered, mutually consistent frames compensate for
+        // this deliberately lower length.
         const val CIRCULAR_POST_TURN_MIN_PATH_FRACTION = 0.20
         const val CIRCULAR_POST_TURN_MAX_ANGLE_DEGREES = 45.0
         const val CIRCULAR_POST_TURN_MAX_OFFSET_FRACTION = 0.20
-        const val CIRCULAR_POST_TURN_CONFIRMATION_COUNT = 3
+        const val CIRCULAR_POST_TURN_CONFIRMATION_NANOS = 500_000_000L
         const val CIRCULAR_MAX_MOVING_ANGLE_DEGREES = 45.0
         // Do not accept a path into tracking and then forbid that same path from advancing.
         const val CIRCULAR_MAX_MOVING_OFFSET_FRACTION = REACQUISITION_ENTRY_OFFSET_FRACTION
@@ -1472,7 +1481,6 @@ internal class TapeTrackingController {
         const val CAMERA_VIDEO_DIAGONAL_FOV_DEGREES = 75.0
         val CAMERA_DIAGONAL_HALF_FOV_TANGENT =
             tan(Math.toRadians(CAMERA_VIDEO_DIAGONAL_FOV_DEGREES) / 2.0)
-        private const val NANOS_PER_SECOND = 1_000_000_000.0
         private const val INITIAL_COMMAND_INTERVAL_SECONDS = 0.1
         private const val MAX_COMMAND_INTERVAL_SECONDS = 0.25
     }

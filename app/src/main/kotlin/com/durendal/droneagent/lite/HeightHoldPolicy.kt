@@ -6,6 +6,8 @@ import kotlin.math.abs
 internal object HeightHoldPolicy {
     const val TARGET_TOLERANCE_METERS = 0.1
     private const val PROPORTIONAL_GAIN = 0.6
+    fun isUsableCurrentHeight(meters: Double?): Boolean =
+        meters != null && meters.isFinite() && meters >= 0.0
 
     fun isWithinTarget(targetHeightMeters: Double, currentHeightMeters: Double): Boolean {
         requireValidHeights(targetHeightMeters, currentHeightMeters)

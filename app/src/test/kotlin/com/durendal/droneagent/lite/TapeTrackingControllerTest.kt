@@ -430,7 +430,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `sharp curve alignment requires three stable detections before moving`() {
+    fun `sharp curve alignment requires a stable interval before moving`() {
         val controller = circularTrackingController()
         controller.observe(observation(55.0, 0.8), seconds(2))
         assertEquals(TapeTrackingPhase.ALIGNING_CURVE, controller.tick(seconds(2)).phase)
@@ -760,15 +760,15 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `brief plausible gap confirmation preserves smooth forward acceleration`() {
+    fun `plausible gap confirmation restarts motion after the stale deadline`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
         val initial = controller.tick(seconds(2))
 
-        val missingAt = seconds(2) + 250_000_000L
+        val missingAt = seconds(2) + 100_000_000L
         controller.observe(null, missingAt)
-        val held = controller.tick(missingAt)
-        val firstCandidateAt = seconds(2) + 950_000_000L
+        val held = controller.tick(seconds(2) + 300_000_000L)
+        val firstCandidateAt = seconds(2) + 350_000_000L
         controller.observe(observation(20.0, 0.82, 0.05), firstCandidateAt)
         val awaitingConfirmation = controller.tick(firstCandidateAt)
 
@@ -778,10 +778,12 @@ class TapeTrackingControllerTest {
                 held.forwardSpeedMetersPerSecond,
         )
 
-        val confirmedAt = seconds(3) + 200_000_000L
+        val confirmedAt = seconds(2) + 600_000_000L
+        controller.observe(observation(19.0, 0.81, 0.04), confirmedAt)
         val confirmed = controller.tick(confirmedAt)
+        assertTrue(confirmed.forwardSpeedMetersPerSecond > 0.0)
         assertTrue(
-            confirmed.forwardSpeedMetersPerSecond >
+            confirmed.forwardSpeedMetersPerSecond <=
                 awaitingConfirmation.forwardSpeedMetersPerSecond,
         )
     }
@@ -911,7 +913,7 @@ class TapeTrackingControllerTest {
                 TapeTrackingController.CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND,
         )
         assertEquals(
-            28.0,
+            TapeTrackingController.CIRCULAR_YAW_SPEED_BUDGET_DEGREES_PER_SECOND,
             kotlin.math.abs(decision.purePursuitYawRateDegreesPerSecond),
             1e-9,
         )
@@ -977,9 +979,9 @@ class TapeTrackingControllerTest {
         controller.observe(observation(12.0, 0.8, 0.05), seconds(2))
         controller.tick(seconds(2))
 
-        controller.observe(null, seconds(2) + 250_000_000L)
-        val briefMiss = controller.tick(seconds(2) + 500_000_000L)
-        val stale = controller.tick(seconds(3) + 500_000_000L)
+        controller.observe(null, seconds(2) + 100_000_000L)
+        val briefMiss = controller.tick(seconds(2) + 300_000_000L)
+        val stale = controller.tick(seconds(2) + 500_000_000L)
 
         assertFalse(briefMiss.endpointReached)
         assertEquals(TapeTrackingPhase.TRACKING, briefMiss.phase)

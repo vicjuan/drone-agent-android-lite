@@ -1,5 +1,18 @@
 package com.durendal.droneagent.lite
 
+internal fun boundedControlIntervalSeconds(
+    nowNanos: Long,
+    previousNanos: Long,
+    initialSeconds: Double,
+    maximumSeconds: Double,
+): Double =
+    if (previousNanos == 0L) {
+        initialSeconds
+    } else {
+        ((nowNanos - previousNanos) / 1_000_000_000.0)
+            .coerceIn(0.0, maximumSeconds)
+    }
+
 /** Tracks clockwise yaw progress across the -180/180-degree heading boundary. */
 internal class HeadingTurn(
     initialHeadingDegrees: Double,
@@ -87,12 +100,12 @@ internal class QuarterArcController(
 
     fun command(nowNanos: Long): QuarterArcCommand {
         val elapsedSeconds =
-            if (lastCommandAtNanos == 0L) {
-                INITIAL_COMMAND_INTERVAL_SECONDS
-            } else {
-                ((nowNanos - lastCommandAtNanos) / NANOS_PER_SECOND)
-                    .coerceIn(0.0, MAX_COMMAND_INTERVAL_SECONDS)
-            }
+            boundedControlIntervalSeconds(
+                nowNanos = nowNanos,
+                previousNanos = lastCommandAtNanos,
+                initialSeconds = INITIAL_COMMAND_INTERVAL_SECONDS,
+                maximumSeconds = MAX_COMMAND_INTERVAL_SECONDS,
+            )
         lastCommandAtNanos = nowNanos
         appliedForwardSpeedMetersPerSecond =
             (appliedForwardSpeedMetersPerSecond +
@@ -112,6 +125,5 @@ internal class QuarterArcController(
         const val FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.02
         private const val INITIAL_COMMAND_INTERVAL_SECONDS = 0.05
         private const val MAX_COMMAND_INTERVAL_SECONDS = 0.10
-        private const val NANOS_PER_SECOND = 1_000_000_000.0
     }
 }

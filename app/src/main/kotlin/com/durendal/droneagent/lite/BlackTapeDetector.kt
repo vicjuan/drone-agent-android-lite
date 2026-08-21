@@ -16,6 +16,14 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.hypot
 
+internal fun acceptsCorrugatedBoard(
+    absoluteChromaMatch: Boolean,
+    overlapsPreviousRoute: Boolean,
+    matchesAcceptedBoardReference: Boolean,
+): Boolean =
+    absoluteChromaMatch ||
+        (overlapsPreviousRoute && matchesAcceptedBoardReference)
+
 /**
  * Finds a dark, tape-shaped region on brown corrugated board. Otsu adapts to
  * exposure, but its threshold is capped so a bright wall cannot make the whole
@@ -83,6 +91,9 @@ class BlackTapeDetector internal constructor(
     // the single detector thread, so a plain field is the whole synchronisation.
     private var capturePlanes: MutableList<TapeCapturePlane>? = null
     private var capturePlaneBytes = ByteArray(0)
+    // processing owns this buffer until its worker task finishes, so accepted frames
+    // reuse one full-resolution allocation without racing the decoder callback.
+    private var rgbaFrameBytes = ByteArray(0)
     private val centerlineExtractor = CenterlineExtractor()
     private var frameSequence = 0L
 
@@ -122,11 +133,21 @@ class BlackTapeDetector internal constructor(
         lastAcceptedAtNanos.set(now)
         firstAcceptedAtNanos.compareAndSet(0L, now)
         acceptedFrameCount.incrementAndGet()
-        val copy = frameData.copyOfRange(offset, offset + requiredBytes.toInt())
+        val requiredByteCount = requiredBytes.toInt()
+        if (rgbaFrameBytes.size != requiredByteCount) {
+            rgbaFrameBytes = ByteArray(requiredByteCount)
+        }
+        val frameBytes = rgbaFrameBytes
+        frameData.copyInto(
+            destination = frameBytes,
+            destinationOffset = 0,
+            startIndex = offset,
+            endIndex = offset + requiredByteCount,
+        )
         try {
             worker.execute {
                 try {
-                    val result = detect(copy, width, height, now)
+                    val result = detect(frameBytes, width, height, now)
                     completedFrameCount.incrementAndGet()
                     if (!closed.get()) onResult(result)
                 } catch (error: Throwable) {
@@ -804,8 +825,15 @@ class BlackTapeDetector internal constructor(
         if (boardColor != null) {
             val boardChromaA = boardColor.meanA - LAB_NEUTRAL_CHROMA
             val boardChromaB = boardColor.meanB - LAB_NEUTRAL_CHROMA
+            // Acquisition requires the absolute cardboard chroma. Once an overlapping
+            // route matches that accepted reference, continuity supplies hysteresis
+            // across exposure and white-balance drift.
             val isCorrugatedBoard =
-                isCorrugatedBoardChroma(boardChromaA, boardChromaB)
+                acceptsCorrugatedBoard(
+                    absoluteChromaMatch = isCorrugatedBoardChroma(boardChromaA, boardChromaB),
+                    overlapsPreviousRoute = overlapsPrevious,
+                    matchesAcceptedBoardReference = boardColorMatchesReference,
+                )
             lastCandidateMetrics +=
                 " board=%.2f/%d ref=%s substrate=%s".format(
                     boardColor.compatiblePairFraction,
