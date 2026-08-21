@@ -1408,7 +1408,8 @@ class BlackTapeDetector internal constructor(
         const val MAX_BOARD_REFERENCE_CHROMA_DISTANCE = 20.0
         const val BOARD_REFERENCE_FILTER_ALPHA = 0.15
         const val MAX_ANALYSIS_DIMENSION = 640.0
-        const val FRAME_INTERVAL_NANOS = 250_000_000L
+        // At 0.24 m/s, 10 Hz limits open-loop travel between observations to about 2.4 cm.
+        const val FRAME_INTERVAL_NANOS = 100_000_000L
         private const val NANOS_PER_SECOND = 1_000_000_000.0
         const val SURROUND_SCALE = 0.35
         const val SIDE_CONTEXT_SCALE = 0.35
