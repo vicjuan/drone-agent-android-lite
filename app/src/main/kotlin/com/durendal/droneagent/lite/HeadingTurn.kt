@@ -1,26 +1,117 @@
 package com.durendal.droneagent.lite
 
 /** Tracks clockwise yaw progress across the -180/180-degree heading boundary. */
-internal class HeadingTurn(initialHeadingDegrees: Double) {
+internal class HeadingTurn(
+    initialHeadingDegrees: Double,
+    val targetDegrees: Double = DEFAULT_TARGET_DEGREES,
+) {
     private var directedDisplacementDegrees = 0.0
     private var previousHeadingDegrees = initialHeadingDegrees
+
+    init {
+        require(initialHeadingDegrees.isFinite()) { "initial heading must be finite" }
+        require(targetDegrees.isFinite() && targetDegrees > 0.0) {
+            "target turn must be finite and positive"
+        }
+    }
 
     val progressDegrees: Double
         get() = directedDisplacementDegrees.coerceAtLeast(0.0)
 
     fun update(headingDegrees: Double): Double {
+        require(headingDegrees.isFinite()) { "heading must be finite" }
         val signedDelta = shortestAngularDelta(previousHeadingDegrees, headingDegrees)
         previousHeadingDegrees = headingDegrees
         directedDisplacementDegrees += signedDelta
-        return (TARGET_DEGREES - progressDegrees).coerceAtLeast(0.0)
+        return (targetDegrees - progressDegrees).coerceAtLeast(0.0)
     }
 
     companion object {
-        const val TARGET_DEGREES = 180.0
+        const val DEFAULT_TARGET_DEGREES = 180.0
+
         internal fun shortestAngularDelta(fromDegrees: Double, toDegrees: Double): Double {
             var delta = (toDegrees - fromDegrees + 180.0) % 360.0
             if (delta < 0.0) delta += 360.0
             return delta - 180.0
         }
+    }
+}
+
+internal data class QuarterArcCommand(
+    val forwardSpeedMetersPerSecond: Double,
+    val yawRateDegreesPerSecond: Double,
+)
+
+/**
+ * Commands a clockwise constant-radius quarter arc without using camera data.
+ * Heading closes only the 90° endpoint; position remains deliberately open-loop.
+ */
+internal class QuarterArcController(
+    initialHeadingDegrees: Double,
+    private val radiusMeters: Double = RADIUS_METERS,
+    private val maximumForwardSpeedMetersPerSecond: Double = MAXIMUM_FORWARD_SPEED_METERS_PER_SECOND,
+    private val forwardAccelerationMetersPerSecondSquared: Double =
+        FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED,
+) {
+    private val headingTurn = HeadingTurn(initialHeadingDegrees, TARGET_DEGREES)
+    private var appliedForwardSpeedMetersPerSecond = 0.0
+    private var lastCommandAtNanos = 0L
+
+    init {
+        require(radiusMeters.isFinite() && radiusMeters > 0.0) {
+            "arc radius must be finite and positive"
+        }
+        require(
+            maximumForwardSpeedMetersPerSecond.isFinite() &&
+                maximumForwardSpeedMetersPerSecond > 0.0,
+        ) {
+            "maximum forward speed must be finite and positive"
+        }
+        require(
+            forwardAccelerationMetersPerSecondSquared.isFinite() &&
+                forwardAccelerationMetersPerSecondSquared > 0.0,
+        ) {
+            "forward acceleration must be finite and positive"
+        }
+    }
+
+    val progressDegrees: Double
+        get() = headingTurn.progressDegrees
+
+    val remainingDegrees: Double
+        get() = (TARGET_DEGREES - progressDegrees).coerceAtLeast(0.0)
+
+    fun updateHeading(headingDegrees: Double) {
+        headingTurn.update(headingDegrees)
+    }
+
+    fun command(nowNanos: Long): QuarterArcCommand {
+        val elapsedSeconds =
+            if (lastCommandAtNanos == 0L) {
+                INITIAL_COMMAND_INTERVAL_SECONDS
+            } else {
+                ((nowNanos - lastCommandAtNanos) / NANOS_PER_SECOND)
+                    .coerceIn(0.0, MAX_COMMAND_INTERVAL_SECONDS)
+            }
+        lastCommandAtNanos = nowNanos
+        appliedForwardSpeedMetersPerSecond =
+            (appliedForwardSpeedMetersPerSecond +
+                forwardAccelerationMetersPerSecondSquared * elapsedSeconds)
+                .coerceAtMost(maximumForwardSpeedMetersPerSecond)
+        return QuarterArcCommand(
+            forwardSpeedMetersPerSecond = appliedForwardSpeedMetersPerSecond,
+            yawRateDegreesPerSecond =
+                Math.toDegrees(appliedForwardSpeedMetersPerSecond / radiusMeters),
+        )
+    }
+
+    companion object {
+        const val TARGET_DEGREES = 90.0
+        const val RADIUS_METERS = 0.75
+        const val MAXIMUM_FORWARD_SPEED_METERS_PER_SECOND = 0.12
+        const val FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.02
+        private const val INITIAL_COMMAND_INTERVAL_SECONDS = 0.05
+        private const val MAX_COMMAND_INTERVAL_SECONDS = 0.10
+        private const val NANOS_PER_SECOND = 1_000_000_000.0
     }
 }

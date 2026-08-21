@@ -10,6 +10,7 @@ import android.view.SurfaceView
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Live camera view of the aircraft's main camera.
@@ -38,6 +39,13 @@ class CameraPreview(
     @Volatile private var frameStreamStale = true
     private var surfaceHeight = 0
     private var frameListenerAttached = false
+    private val callbackCount = AtomicLong(0L)
+    private val rgbaCallbackCount = AtomicLong(0L)
+    private val formatMismatchCount = AtomicLong(0L)
+    private val firstCallbackAtNanos = AtomicLong(0L)
+    @Volatile private var lastCallbackAtNanos = 0L
+    @Volatile private var lastFrameWidth = 0
+    @Volatile private var lastFrameHeight = 0
     private val frameListener = ICameraStreamManager.CameraFrameListener {
             frameData,
             offset,
@@ -46,10 +54,19 @@ class CameraPreview(
             height,
             format,
         ->
+        val nowNanos = System.nanoTime()
+        callbackCount.incrementAndGet()
+        firstCallbackAtNanos.compareAndSet(0L, nowNanos)
+        lastCallbackAtNanos = nowNanos
         if (format == ICameraStreamManager.FrameFormat.RGBA_8888) {
-            lastFrameAtNanos = System.nanoTime()
+            lastFrameAtNanos = nowNanos
+            lastFrameWidth = width
+            lastFrameHeight = height
             frameStreamStale = false
+            rgbaCallbackCount.incrementAndGet()
             onRgbaFrame(frameData, offset, length, width, height)
+        } else {
+            formatMismatchCount.incrementAndGet()
         }
     }
 
@@ -89,6 +106,28 @@ class CameraPreview(
         if (surface != null) attach()
         mainHandler.removeCallbacks(frameWatchdog)
         mainHandler.postDelayed(frameWatchdog, FRAME_WATCHDOG_PERIOD_MS)
+    }
+
+    fun diagnosticsSummary(): String {
+        val callbacks = callbackCount.get()
+        val firstAtNanos = firstCallbackAtNanos.get()
+        val lastCallback = lastCallbackAtNanos
+        val lastFrame = lastFrameAtNanos
+        val elapsedNanos = lastCallback - firstAtNanos
+        val callbackHz =
+            if (callbacks >= 2L && elapsedNanos > 0L) {
+                (callbacks - 1L) * NANOS_PER_SECOND / elapsedNanos
+            } else {
+                0.0
+            }
+        val ageMillis =
+            if (lastFrame == 0L) -1L
+            else (System.nanoTime() - lastFrame).coerceAtLeast(0L) / NANOS_PER_MILLISECOND
+        return (
+            "cameraCallbacks=$callbacks rgba=${rgbaCallbackCount.get()} " +
+                "callbackHz=%.2f callbackAgeMs=$ageMillis size=${lastFrameWidth}x$lastFrameHeight " +
+                "formatMismatch=${formatMismatchCount.get()}"
+            ).format(callbackHz)
     }
 
     fun release() {
@@ -171,5 +210,7 @@ class CameraPreview(
         const val TAG = "LiteCameraPreview"
         const val FRAME_WATCHDOG_PERIOD_MS = 1_000L
         const val FRAME_STALE_NANOS = 2_000_000_000L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
+        const val NANOS_PER_SECOND = 1_000_000_000.0
     }
 }

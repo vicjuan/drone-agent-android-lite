@@ -213,7 +213,7 @@ class TapeCenterlinePipelineInstrumentedTest {
             Scenario("glare-break", TapeDetectionMode.PATH, PathQuality.FULL_PATH) {
                 listOf(curvedFrame(), glareBrokenCurvedFrame())
             },
-            Scenario("dark-floor", TapeDetectionMode.STRAIGHT, PathQuality.FULL_PATH) {
+            Scenario("dark-floor", TapeDetectionMode.STRAIGHT, null) {
                 listOf(straightFrameOnDarkFloor())
             },
             Scenario("board-edge", TapeDetectionMode.STRAIGHT, PathQuality.FULL_PATH) {

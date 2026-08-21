@@ -37,6 +37,14 @@ class BlackTapeDetector internal constructor(
     private val processing = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
     private val lastAcceptedAtNanos = AtomicLong(0L)
+    private val receivedFrameCount = AtomicLong(0L)
+    private val invalidFrameCount = AtomicLong(0L)
+    private val throttledFrameCount = AtomicLong(0L)
+    private val busyDroppedFrameCount = AtomicLong(0L)
+    private val acceptedFrameCount = AtomicLong(0L)
+    private val completedFrameCount = AtomicLong(0L)
+    private val failedFrameCount = AtomicLong(0L)
+    private val firstAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
     private var previousPathMedianWidthFraction: Double? = null
     private var previousRouteStartXFraction: Double? = null
@@ -91,20 +99,38 @@ class BlackTapeDetector internal constructor(
         height: Int,
     ) {
         if (closed.get()) return
-        if (width <= 0 || height <= 0 || offset < 0 || length <= 0) return
+        receivedFrameCount.incrementAndGet()
+        if (width <= 0 || height <= 0 || offset < 0 || length <= 0) {
+            invalidFrameCount.incrementAndGet()
+            return
+        }
         val requiredBytes = width.toLong() * height * RGBA_CHANNELS
-        if (requiredBytes > length || offset.toLong() + requiredBytes > frameData.size) return
+        if (requiredBytes > length || offset.toLong() + requiredBytes > frameData.size) {
+            invalidFrameCount.incrementAndGet()
+            return
+        }
         val now = System.nanoTime()
         val previous = lastAcceptedAtNanos.get()
-        if (now - previous < FRAME_INTERVAL_NANOS || !processing.compareAndSet(false, true)) return
+        if (now - previous < FRAME_INTERVAL_NANOS) {
+            throttledFrameCount.incrementAndGet()
+            return
+        }
+        if (!processing.compareAndSet(false, true)) {
+            busyDroppedFrameCount.incrementAndGet()
+            return
+        }
         lastAcceptedAtNanos.set(now)
+        firstAcceptedAtNanos.compareAndSet(0L, now)
+        acceptedFrameCount.incrementAndGet()
         val copy = frameData.copyOfRange(offset, offset + requiredBytes.toInt())
         try {
             worker.execute {
                 try {
                     val result = detect(copy, width, height, now)
+                    completedFrameCount.incrementAndGet()
                     if (!closed.get()) onResult(result)
                 } catch (error: Throwable) {
+                    failedFrameCount.incrementAndGet()
                     if (!closed.get()) onError(error)
                 } finally {
                     processing.set(false)
@@ -112,6 +138,7 @@ class BlackTapeDetector internal constructor(
             }
         } catch (error: RuntimeException) {
             processing.set(false)
+            failedFrameCount.incrementAndGet()
             if (!closed.get()) onError(error)
         }
     }
@@ -158,16 +185,37 @@ class BlackTapeDetector internal constructor(
         }
     }
 
-    fun diagnosticsSummary(): String =
-        (
-            "mode=%s pathAxis=%s pathSamples=%d pathCurve=%.1f pathSmooth=%.2f " +
-                "otsu=%.1f effective=%.1f separation=%.1f shadowPixels=%d contours=%d " +
-                "floorSeeds=%d floor=%.2f coverage=%.2f branches=%d region=%s candidate=[%s] arcReject=[%s] " +
+    fun diagnosticsSummary(): String {
+        val accepted = acceptedFrameCount.get()
+        val firstAccepted = firstAcceptedAtNanos.get()
+        val lastAccepted = lastAcceptedAtNanos.get()
+        val acceptedElapsedNanos = lastAccepted - firstAccepted
+        val acceptedHz =
+            if (accepted >= 2L && acceptedElapsedNanos > 0L) {
+                (accepted - 1L) * NANOS_PER_SECOND / acceptedElapsedNanos
+            } else {
+                0.0
+            }
+        return (
+            "frames=received:%d accepted:%d acceptedHz=%.2f throttle:%d busy:%d invalid:%d " +
+                "completed:%d failed:%d mode=%s frameMs=%.1f pathAxis=%s pathSamples=%d " +
+                "pathCurve=%.1f pathSmooth=%.2f otsu=%.1f effective=%.1f separation=%.1f " +
+                "shadowPixels=%d contours=%d floorSeeds=%d floor=%.2f coverage=%.2f branches=%d " +
+                "region=%s candidate=[%s] arcReject=[%s] " +
                 "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
                 "edge:%d chroma:%d floor:%d boardColor:%d noCenterline:%d noNearField:%d " +
                 "branch:%d shortLookahead:%d"
             ).format(
+            receivedFrameCount.get(),
+            accepted,
+            acceptedHz,
+            throttledFrameCount.get(),
+            busyDroppedFrameCount.get(),
+            invalidFrameCount.get(),
+            completedFrameCount.get(),
+            failedFrameCount.get(),
             lastDetectionMode,
+            lastFrameMillis,
             lastPathAxis,
             lastPathSampleCount,
             lastPathCurvatureDegrees,
@@ -198,6 +246,7 @@ class BlackTapeDetector internal constructor(
             rejectionCounts[TapeCandidateRejection.AMBIGUOUS_BRANCH.ordinal],
             rejectionCounts[TapeCandidateRejection.INSUFFICIENT_LOOKAHEAD.ordinal],
         )
+    }
 
     override fun close() {
         if (closed.compareAndSet(false, true)) worker.shutdownNow()
@@ -593,6 +642,10 @@ class BlackTapeDetector internal constructor(
         return removed
     }
 
+    private fun isCorrugatedBoardChroma(chromaA: Double, chromaB: Double): Boolean =
+        chromaA >= MIN_CORRUGATED_BOARD_CHROMA_A &&
+            chromaB >= MIN_CORRUGATED_BOARD_CHROMA_B
+
     /**
      * Scores one contour using the direction-independent centerline as its only
      * geometry source.
@@ -749,16 +802,22 @@ class BlackTapeDetector internal constructor(
                     it <= MAX_BOARD_REFERENCE_CHROMA_DISTANCE
                 } == true
         if (boardColor != null) {
+            val boardChromaA = boardColor.meanA - LAB_NEUTRAL_CHROMA
+            val boardChromaB = boardColor.meanB - LAB_NEUTRAL_CHROMA
+            val isCorrugatedBoard =
+                isCorrugatedBoardChroma(boardChromaA, boardChromaB)
             lastCandidateMetrics +=
-                " board=%.2f/%d ref=%s".format(
+                " board=%.2f/%d ref=%s substrate=%s".format(
                     boardColor.compatiblePairFraction,
                     boardColor.pairCount,
                     boardColor.referenceDistance?.let { "%.1f".format(it) } ?: "none",
+                    if (isCorrugatedBoard) "cardboard" else "other",
                 )
             if (
                 boardColorHasEnoughSamples &&
                 (
-                    boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION ||
+                    !isCorrugatedBoard ||
+                        boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION ||
                         boardColor.referenceDistance?.let {
                             it > MAX_BOARD_REFERENCE_CHROMA_DISTANCE
                         } == true
@@ -1336,6 +1395,8 @@ class BlackTapeDetector internal constructor(
         const val MIN_SHADOW_PIXEL_CHROMA_SQUARED = 36.0
         const val MIN_BOARD_SHADOW_HUE_COSINE_SQUARED = 0.8836
         const val MAX_SHADOW_CHROMA_GAIN = 8.0
+        const val MIN_CORRUGATED_BOARD_CHROMA_A = 4.0
+        const val MIN_CORRUGATED_BOARD_CHROMA_B = 12.0
         const val LAB_B_CHANNEL = 2
         const val MAX_BOARD_COLOR_SAMPLES = 64
         const val BOARD_COLOR_TANGENT_SPAN = 2
@@ -1348,6 +1409,7 @@ class BlackTapeDetector internal constructor(
         const val BOARD_REFERENCE_FILTER_ALPHA = 0.15
         const val MAX_ANALYSIS_DIMENSION = 640.0
         const val FRAME_INTERVAL_NANOS = 250_000_000L
+        private const val NANOS_PER_SECOND = 1_000_000_000.0
         const val SURROUND_SCALE = 0.35
         const val SIDE_CONTEXT_SCALE = 0.35
         const val MAX_SIDE_PADDING_DIVISOR = 8

@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private lateinit var captureButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
+    private lateinit var quarterArcButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
     private lateinit var gimbalPad: StickPadView
@@ -148,6 +149,12 @@ class MainActivity : Activity() {
     private var turnCommandStartedAtNanos = 0L
     private var turnAuthoritySeen = false
 
+    /** Camera-independent 0.75 m radius clockwise quarter-arc experiment. */
+    private var quarterArcController: QuarterArcController? = null
+    private var quarterArcStartedAtNanos = 0L
+    private var quarterArcAuthoritySeen = false
+    private var quarterArcLastRenderedAtNanos = 0L
+
     /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
     private var gimbalActive = false
     private var selectedCameraPitchDegrees: Double? = null
@@ -213,6 +220,14 @@ class MainActivity : Activity() {
                 tapeTrackingAuthoritySeen = true
             } else if (tapeTrackingAuthoritySeen) {
                 stopTapeTracking("實體遙控器已接管，黑膠帶追蹤已停止", release = false)
+            }
+        }
+        if (quarterArcController != null) {
+            if (status.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER) {
+                quarterArcAuthoritySeen = true
+                driveQuarterArc()
+            } else if (quarterArcAuthoritySeen) {
+                finishQuarterArc("實體遙控器已接管，無視覺 1/4 圈已停止", release = false)
             }
         }
         render("控制權=${status.authority}")
@@ -371,6 +386,8 @@ class MainActivity : Activity() {
         if (detected != tapeDetected || now - tapeLoggedAtNanos >= TAPE_LOG_PERIOD_NANOS) {
             tapeDetected = detected
             tapeLoggedAtNanos = now
+            val frameDiagnostics =
+                "${preview.diagnosticsSummary()} ${tapeDetector?.diagnosticsSummary().orEmpty()}"
             flightLog.write(
                 detection?.let {
                     "black tape detected confidence=%.2f angle=%+.1f anchor=(%.3f,%.3f) lookahead=(%.3f,%.3f) boxOffset=%+.3f length=%.3f bounds=%s %s".format(
@@ -383,9 +400,9 @@ class MainActivity : Activity() {
                         it.bounds.centerX - 0.5,
                         it.longSideFraction,
                         it.bounds,
-                        tapeDetector?.diagnosticsSummary().orEmpty(),
+                        frameDiagnostics,
                     )
-                } ?: "black tape not detected ${tapeDetector?.diagnosticsSummary().orEmpty()}",
+                } ?: "black tape not detected $frameDiagnostics",
             )
         }
     }
@@ -426,7 +443,10 @@ class MainActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
-        holdButton = PillButton("定高 50 公分", StickPadView.CYAN) { startHeightHold() }
+        holdButton = PillButton(
+            "定高 %.0f 公分".format(TARGET_HEIGHT_METERS * 100.0),
+            StickPadView.CYAN,
+        ) { startHeightHold() }
         cameraDownButton = PillButton("鏡頭 -90°", StickPadView.CYAN) {
             moveCameraToPitch(CAMERA_DOWN_PITCH_DEGREES)
         }
@@ -449,16 +469,27 @@ class MainActivity : Activity() {
     }
 
     private fun buildExperimentActionRow(): ViewGroup = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
+        orientation = LinearLayout.VERTICAL
         gravity = Gravity.START
         circularTapeTrackingButton =
             PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
         curvedOutAndBackTrackingButton =
             PillButton("弧形往返追蹤", StickPadView.GREEN) { toggleCurvedOutAndBackTracking() }
+        quarterArcButton =
+            PillButton("無視覺右轉 1/4 圈", StickPadView.AMBER) { toggleQuarterArc() }
         captureButton = PillButton("錄製影格證據", StickPadView.AMBER) { toggleFrameCapture() }
-        addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
-        addView(curvedOutAndBackTrackingButton, actionParams(marginEnd = dp(10)))
-        addView(captureButton, actionParams())
+        addView(
+            LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
+                addView(curvedOutAndBackTrackingButton, actionParams(marginEnd = dp(10)))
+                addView(captureButton, actionParams())
+            },
+        )
+        addView(
+            quarterArcButton,
+            actionParams(marginStart = dp(190), marginTop = dp(16)),
+        )
     }
 
     /**
@@ -509,15 +540,19 @@ class MainActivity : Activity() {
         "tracking.phase" to renderedTapeTrackingPhase.name,
     )
 
-    private fun actionParams(marginStart: Int = 0, marginEnd: Int = 0) =
-        LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply {
-            gravity = Gravity.TOP
-            this.marginStart = marginStart
-            this.marginEnd = marginEnd
-        }
+    private fun actionParams(
+        marginStart: Int = 0,
+        marginEnd: Int = 0,
+        marginTop: Int = 0,
+    ) = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+    ).apply {
+        gravity = Gravity.TOP
+        this.marginStart = marginStart
+        this.marginEnd = marginEnd
+        topMargin = marginTop
+    }
 
     private fun buildStatusPanel(): ViewGroup {
         headlineView = label(11f, StickPadView.CYAN, bold = true)
@@ -1022,6 +1057,9 @@ class MainActivity : Activity() {
         if (isDeflected && tapeTracking.enabled) {
             stopTapeTracking("畫面搖桿已接管，黑膠帶追蹤已停止", release = false)
         }
+        if (isDeflected && quarterArcController != null) {
+            finishQuarterArc("畫面搖桿已接管，無視覺 1/4 圈已停止", release = false)
+        }
         val horizontalStopReason =
             if (side == StickSide.RIGHT && isDeflected) {
                 horizontalActuationStopReason()
@@ -1075,7 +1113,7 @@ class MainActivity : Activity() {
     private val idleReleaseRunnable = Runnable {
         if (
             leftStickActive || rightStickActive || holdingHeight || headingTurn != null ||
-            tapeTracking.enabled || !stickOwned
+            quarterArcController != null || tapeTracking.enabled || !stickOwned
         ) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
@@ -1124,11 +1162,14 @@ class MainActivity : Activity() {
         takeoffButton.available = ready && !flying
         landButton.available = ready && flying
         val turning = headingTurn != null
+        val quarterArcActive = quarterArcController != null
         holdButton.available =
-            ready && flying && !holdingHeight && !turning && !tapeTracking.enabled
+            ready && flying && !holdingHeight && !turning && !quarterArcActive &&
+                !tapeTracking.enabled
         captureButton.available = captureRecorder != null
         cameraDownButton.available = ready && !cameraPitchCommandPending
-        val tapeTrackingCanStart = ready && flying && !turning && !holdingHeight
+        val tapeTrackingCanStart =
+            ready && flying && !turning && !quarterArcActive && !holdingHeight
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
@@ -1139,6 +1180,9 @@ class MainActivity : Activity() {
             (tapeTracking.enabled &&
                 activeTapeTrackingMode == TapeTrackingMode.CURVED_OUT_AND_BACK) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
+        quarterArcButton.available =
+            quarterArcActive ||
+                (ready && flying && !turning && !holdingHeight && !tapeTracking.enabled)
         leftPad.isEnabled = ready && flying
         rightPad.isEnabled = ready && flying
         gimbalPad.isEnabled = ready
@@ -1502,7 +1546,7 @@ class MainActivity : Activity() {
 
     /**
      * DJI uses 60,000 mm to mean "not detected", so an all-sentinel sample still
-     * fails closed. At roughly 0.5 m altitude the Mini 4 Pro reports the floor in
+     * fails closed. At sub-metre altitude the Mini 4 Pro reports the floor in
      * almost every horizontal azimuth. A dense low-altitude ring with enough
      * floor-height evidence is therefore removed. Sparse ranges and objects
      * substantially closer than the floor remain stop conditions.
@@ -1639,6 +1683,11 @@ class MainActivity : Activity() {
         horizontalActuationStopReason()?.let { reason ->
             if (rightStickActive) stopHorizontalActuation(reason)
         }
+        if (quarterArcController != null) {
+            quarterArcStopReason(System.nanoTime())?.let { reason ->
+                finishQuarterArc("無視覺 1/4 圈安全停止：$reason")
+            }
+        }
         if (changed || trigger == "BRAKE read-back") {
             render(failure ?: "BRAKE 已確認，水平避障資料可用")
         }
@@ -1649,7 +1698,10 @@ class MainActivity : Activity() {
         virtualStick.setForwardOnly(0.0)
         holdStatus = reason
         flightLog.write("horizontal actuation stopped: $reason")
-        if (stickOwned && !leftStickActive && !holdingHeight) {
+        if (
+            stickOwned && !leftStickActive && !holdingHeight && headingTurn == null &&
+            quarterArcController == null && !tapeTracking.enabled
+        ) {
             mainHandler.removeCallbacks(idleReleaseRunnable)
             mainHandler.post(idleReleaseRunnable)
         }
@@ -1671,6 +1723,8 @@ class MainActivity : Activity() {
         aircraftHeadingAtNanos = System.nanoTime()
         headingTurn?.update(heading)
         driveHeadingTurn()
+        quarterArcController?.updateHeading(heading)
+        driveQuarterArc()
     }
 
 
@@ -1699,8 +1753,207 @@ class MainActivity : Activity() {
      * through a toggle have already proven their own activity is idle.
      */
     private fun anotherFlightControlActive(): Boolean =
-        headingTurn != null || holdingHeight || tapeTracking.enabled ||
+        headingTurn != null || quarterArcController != null || holdingHeight || tapeTracking.enabled ||
             tapeTrackingStartPending || leftStickActive || rightStickActive
+
+    private fun toggleQuarterArc() {
+        if (quarterArcController != null) {
+            finishQuarterArc("操作者停止無視覺 1/4 圈")
+            return
+        }
+        quarterArcStartFailure()?.let { reason ->
+            flightLog.write("quarter arc refused: $reason")
+            render(reason)
+            return
+        }
+        render("正在取得控制權，準備無視覺右轉 1/4 圈…")
+        acquireControlLink(
+            onFailure = { reason -> render("無視覺 1/4 圈未啟動：$reason") },
+        ) {
+            quarterArcStartFailure()?.let { reason ->
+                flightLog.write("quarter arc aborted after acquire: $reason")
+                releaseControlLink { error ->
+                    render(
+                        if (error == null) {
+                            "無視覺 1/4 圈未啟動：$reason"
+                        } else {
+                            "無視覺 1/4 圈未啟動：$reason（釋放控制權失敗：$error）"
+                        },
+                    )
+                }
+                return@acquireControlLink
+            }
+            val initialHeading = checkNotNull(aircraftHeadingDegrees)
+            quarterArcController = QuarterArcController(initialHeading)
+            quarterArcStartedAtNanos = System.nanoTime()
+            quarterArcAuthoritySeen =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            quarterArcLastRenderedAtNanos = 0L
+            runOnUiThread { quarterArcButton.text = "停止無視覺 1/4 圈" }
+            virtualStick.setHorizontalVelocity(0.0, 0.0)
+            virtualStick.setYawRate(0.0)
+            flightLog.write(
+                "quarter arc armed heading=%.1f radius=%.2f target=%.0f maxForward=%.2f acceleration=%.2f"
+                    .format(
+                        initialHeading,
+                        QuarterArcController.RADIUS_METERS,
+                        QuarterArcController.TARGET_DEGREES,
+                        QuarterArcController.MAXIMUM_FORWARD_SPEED_METERS_PER_SECOND,
+                        QuarterArcController.FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED,
+                    ),
+            )
+            mainHandler.post(quarterArcTickRunnable)
+        }
+    }
+
+    private fun quarterArcStartFailure(nowNanos: Long = System.nanoTime()): String? {
+        if (anotherFlightControlActive()) return "請先停止其他飛行控制"
+        if (!registered || !aircraftConnected || !flying) return "飛機未在空中，無法執行 1/4 圈"
+        if (!avoidance.brakeConfirmed) {
+            return avoidance.warning ?: "BRAKE 尚未確認，無視覺 1/4 圈不啟動"
+        }
+        horizontalActuationStopReason(nowNanos)?.let { return it }
+        val height = usableHeightMeters() ?: return "沒有高度資料，無視覺 1/4 圈不啟動"
+        if (height !in QUARTER_ARC_START_MIN_HEIGHT_METERS..QUARTER_ARC_START_MAX_HEIGHT_METERS) {
+            return "請先定高 70 公分（目前 %.2f m）".format(height)
+        }
+        val heading = aircraftHeadingDegrees
+        if (
+            heading == null ||
+            aircraftHeadingAtNanos == 0L ||
+            nowNanos - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+        ) {
+            return "沒有即時機頭方向，無視覺 1/4 圈不啟動"
+        }
+        return null
+    }
+
+    private fun quarterArcStopReason(nowNanos: Long): String? {
+        if (!avoidance.brakeConfirmed) {
+            return avoidance.warning ?: "BRAKE 狀態失效"
+        }
+        horizontalActuationStopReason(nowNanos)?.let { return it }
+        val height = usableHeightMeters() ?: return "高度資料中斷"
+        if (height !in QUARTER_ARC_FLIGHT_MIN_HEIGHT_METERS..QUARTER_ARC_FLIGHT_MAX_HEIGHT_METERS) {
+            return "高度超出安全範圍（目前 %.2f m）".format(height)
+        }
+        return null
+    }
+
+    private val quarterArcTickRunnable = object : Runnable {
+        override fun run() {
+            if (quarterArcController == null) return
+            driveQuarterArc()
+            if (quarterArcController != null) {
+                mainHandler.postDelayed(this, QUARTER_ARC_TICK_MS)
+            }
+        }
+    }
+
+    private fun driveQuarterArc() {
+        val controller = quarterArcController ?: return
+        if (!stickOwned) {
+            finishQuarterArc("無視覺 1/4 圈失去控制權，已停止", release = false)
+            return
+        }
+        val now = System.nanoTime()
+        val ownsAuthority = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+        if (ownsAuthority) {
+            quarterArcAuthoritySeen = true
+        } else if (quarterArcAuthoritySeen) {
+            finishQuarterArc("實體遙控器已接管，無視覺 1/4 圈已停止", release = false)
+            return
+        } else {
+            virtualStick.setHorizontalVelocity(0.0, 0.0)
+            virtualStick.setYawRate(0.0)
+            if (now - quarterArcStartedAtNanos > AUTHORITY_HANDOVER_TIMEOUT_NANOS) {
+                finishQuarterArc("未取得控制權，無視覺 1/4 圈已取消")
+            } else {
+                holdStatus = "等待控制權移交後開始無視覺右轉 1/4 圈…"
+                render(holdStatus)
+            }
+            return
+        }
+        quarterArcStopReason(now)?.let { reason ->
+            finishQuarterArc("無視覺 1/4 圈安全停止：$reason")
+            return
+        }
+        if (
+            aircraftHeadingAtNanos == 0L ||
+            now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+        ) {
+            finishQuarterArc("機頭方向資料停止更新，無視覺 1/4 圈已停止")
+            return
+        }
+        if (now - quarterArcStartedAtNanos > QUARTER_ARC_TIMEOUT_NANOS) {
+            finishQuarterArc(
+                "無視覺 1/4 圈逾時，已轉 %.0f°".format(controller.progressDegrees),
+            )
+            return
+        }
+        if (
+            controller.remainingDegrees <= QUARTER_ARC_TOLERANCE_DEGREES
+        ) {
+            finishQuarterArc(
+                "無視覺 1/4 圈完成（%.0f°）".format(controller.progressDegrees),
+                succeeded = true,
+            )
+            return
+        }
+        val command = controller.command(now)
+        virtualStick.setHorizontalVelocity(command.forwardSpeedMetersPerSecond, 0.0)
+        virtualStick.setYawRate(command.yawRateDegreesPerSecond)
+        if (now - quarterArcLastRenderedAtNanos >= QUARTER_ARC_RENDER_PERIOD_NANOS) {
+            quarterArcLastRenderedAtNanos = now
+            holdStatus =
+                "無視覺右轉 1/4 圈：%.0f° / 90°，前進 %.2f m/s，yaw %.1f°/s"
+                    .format(
+                        controller.progressDegrees,
+                        command.forwardSpeedMetersPerSecond,
+                        command.yawRateDegreesPerSecond,
+                    )
+            flightLog.write(
+                "quarter arc progress=%.1f remaining=%.1f forward=%.3f yaw=%.2f height=%.2f"
+                    .format(
+                        controller.progressDegrees,
+                        controller.remainingDegrees,
+                        command.forwardSpeedMetersPerSecond,
+                        command.yawRateDegreesPerSecond,
+                        usableHeightMeters(),
+                    ),
+            )
+            render(holdStatus)
+        }
+    }
+
+    private fun finishQuarterArc(
+        message: String,
+        succeeded: Boolean = false,
+        release: Boolean = true,
+    ) {
+        val controller = quarterArcController ?: return
+        val elapsedSeconds =
+            (System.nanoTime() - quarterArcStartedAtNanos).coerceAtLeast(0L) / 1_000_000_000.0
+        quarterArcController = null
+        quarterArcAuthoritySeen = false
+        mainHandler.removeCallbacks(quarterArcTickRunnable)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
+        virtualStick.setYawRate(0.0)
+        runOnUiThread { quarterArcButton.text = "無視覺右轉 1/4 圈" }
+        holdStatus = message
+        flightLog.write(
+            "quarter arc stopped success=$succeeded elapsed=%.2f progress=%.1f reason=$message"
+                .format(elapsedSeconds, controller.progressDegrees),
+        )
+        if (!release || !stickOwned) {
+            render(message)
+            return
+        }
+        releaseControlLink { error ->
+            holdStatus = if (error == null) message else "$message（釋放控制權失敗：$error）"
+            render(holdStatus)
+        }
+    }
 
     private fun armHeadingTurn(currentHeading: Double) {
         headingTurn = HeadingTurn(currentHeading)
@@ -1758,7 +2011,7 @@ class MainActivity : Activity() {
             )
             return
         }
-        val remaining = (HeadingTurn.TARGET_DEGREES - turn.progressDegrees).coerceAtLeast(0.0)
+        val remaining = (turn.targetDegrees - turn.progressDegrees).coerceAtLeast(0.0)
         if (remaining <= TURN_TOLERANCE_DEGREES) {
             finishHeadingTurn(
                 "$TURN_LABEL 180° 完成（%.0f°）".format(turn.progressDegrees),
@@ -1859,6 +2112,9 @@ class MainActivity : Activity() {
         }
         holdingHeight = false
         if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
+        if (quarterArcController != null) {
+            finishQuarterArc("降落操作取消無視覺 1/4 圈", release = false)
+        }
         if (tapeTracking.enabled) {
             stopTapeTracking("降落操作取消黑膠帶追蹤", release = false)
         }
@@ -2000,6 +2256,9 @@ class MainActivity : Activity() {
         if (headingTurn != null) {
             finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
         }
+        if (quarterArcController != null) {
+            finishQuarterArc("飛行狀態結束，無視覺 1/4 圈已停止", release = false)
+        }
         if (tapeTracking.enabled) {
             stopTapeTracking("飛行狀態結束，黑膠帶追蹤已停止", release = false)
         }
@@ -2016,6 +2275,9 @@ class MainActivity : Activity() {
         }
         if (tapeTracking.enabled) {
             stopTapeTracking("控制權釋放，黑膠帶追蹤已停止", release = false)
+        }
+        if (quarterArcController != null) {
+            finishQuarterArc("控制權釋放，無視覺 1/4 圈已停止", release = false)
         }
         val generation = beginTransition("release") {
             onDone("釋放控制權無回應")
@@ -2194,6 +2456,10 @@ class MainActivity : Activity() {
             render("180° 旋轉進行中，無法同時定高")
             return
         }
+        if (quarterArcController != null) {
+            render("無視覺 1/4 圈進行中，無法同時定高")
+            return
+        }
         if (tapeTracking.enabled) {
             render("黑膠帶追蹤進行中，無法同時定高")
             return
@@ -2329,7 +2595,8 @@ class MainActivity : Activity() {
                 flightLog.write("descent complete h=%.2f; releasing".format(height))
                 finishHeightHold("已到 %.2f m，控制權交回遙控器".format(height))
             } else {
-                holdStatus = "定高 0.5 m：確認中（目前 %.2f m）".format(height)
+                holdStatus = "定高 %.1f m：確認中（目前 %.2f m）"
+                    .format(TARGET_HEIGHT_METERS, height)
                 render(holdStatus)
             }
             return
@@ -2351,7 +2618,8 @@ class MainActivity : Activity() {
             .coerceIn(-VirtualStickSession.MAX_VERTICAL_MPS, VirtualStickSession.MAX_VERTICAL_MPS)
         virtualStick.setClimbRate(climbRate)
         flightLog.write("descent h=%.2f e=%+.2f cmd=%+.2f age=${heightAgeMillis()}".format(height, error, climbRate))
-        holdStatus = "下降至 0.5 m：目前 %.2f m，垂直 %+.2f m/s".format(height, climbRate)
+        holdStatus = "下降至 %.1f m：目前 %.2f m，垂直 %+.2f m/s"
+            .format(TARGET_HEIGHT_METERS, height, climbRate)
         render(holdStatus)
     }
 
@@ -2364,20 +2632,19 @@ class MainActivity : Activity() {
         const val MAX_CONFIRM_ATTEMPTS = 8
         const val CONFIRM_RETRY_MS = 700L
 
-        /** Hover height for the bench trial, in metres above the takeoff point. */
-        const val TARGET_HEIGHT_METERS = 0.5
+        /** Hover height for the low-altitude tape-following experiment. */
+        const val TARGET_HEIGHT_METERS = 0.7
 
         /**
          * Arrival band. KeyAltitude is quantised to 0.1 m, so a tighter band than
-         * one quantisation step could only be satisfied by an exact 0.50 reading.
+         * one quantisation step could only be satisfied by an exact target reading.
          */
         const val HEIGHT_TOLERANCE_METERS = 0.1
 
         /**
-         * Proportional gain in (m/s) per metre of error. 0.6 with the session's
-         * 0.3 m/s clamp means full descent rate above 0.5 m of error and a gentle
-         * approach inside it — deliberately slow, because overshoot at 0.5 m is
-         * ground contact.
+         * Proportional gain in (m/s) per metre of error. The session's 0.3 m/s
+         * clamp bounds the approach rate, and the proportional tail limits
+         * overshoot near the low-altitude target.
          */
         const val HEIGHT_GAIN = 0.6
 
@@ -2406,6 +2673,16 @@ class MainActivity : Activity() {
         const val TURN_TICK_MS = 50L
         const val TURN_TIMEOUT_NANOS = 15_000_000_000L
         const val MAX_MOVING_HEADING_AGE_NANOS = 1_000_000_000L
+
+        /** Fixed-radius quarter-arc experiment gates and closed-heading endpoint. */
+        const val QUARTER_ARC_START_MIN_HEIGHT_METERS = 0.55
+        const val QUARTER_ARC_START_MAX_HEIGHT_METERS = 0.85
+        const val QUARTER_ARC_FLIGHT_MIN_HEIGHT_METERS = 0.45
+        const val QUARTER_ARC_FLIGHT_MAX_HEIGHT_METERS = 0.95
+        const val QUARTER_ARC_TOLERANCE_DEGREES = 2.0
+        const val QUARTER_ARC_TICK_MS = 50L
+        const val QUARTER_ARC_TIMEOUT_NANOS = 20_000_000_000L
+        const val QUARTER_ARC_RENDER_PERIOD_NANOS = 250_000_000L
 
 
         /** Grace period before centred sticks hand the aircraft back to the RC. */
