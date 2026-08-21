@@ -110,6 +110,9 @@ class MainActivity : Activity() {
 
     private var obstacleLoggedAtNanos = 0L
     private var obstacleTelemetryRenderedAtNanos = 0L
+    private var obstaclePreviousCallbackAtNanos = 0L
+    private var obstacleCallbacksSinceLog = 0
+    private var obstacleMaximumCallbackGapMsSinceLog = 0L
 
     /** Aircraft avoidance mode; BRAKE normally, temporarily CLOSE during tape tracking. */
     private val avoidanceCheck = AvoidanceCheck()
@@ -1553,11 +1556,12 @@ class MainActivity : Activity() {
     }
 
     /**
-     * DJI uses 60,000 mm to mean "not detected", so an all-sentinel sample still
-     * fails closed. At sub-metre altitude the Mini 4 Pro reports the floor in
-     * almost every horizontal azimuth. A dense low-altitude ring with enough
-     * floor-height evidence is therefore removed. Sparse ranges and objects
-     * substantially closer than the floor remain stop conditions.
+     * DJI uses 60,000 mm to mean "not detected", so an all-sentinel sample is a
+     * valid callback with no actionable obstacle. At sub-metre altitude the
+     * Mini 4 Pro reports the floor in almost every horizontal azimuth. A dense
+     * low-altitude ring with enough floor-height evidence is therefore removed.
+     * Sparse ranges and objects substantially closer than the floor remain stop
+     * conditions.
      */
     private fun observeObstacles() {
         if (obstacleDataListener != null) return
@@ -1569,6 +1573,13 @@ class MainActivity : Activity() {
             val interval = data.horizontalAngleInterval
             val upwardMm = data.upwardObstacleDistance
             val now = System.nanoTime()
+            if (obstaclePreviousCallbackAtNanos != 0L) {
+                val callbackGapMs = (now - obstaclePreviousCallbackAtNanos) / 1_000_000L
+                obstacleMaximumCallbackGapMsSinceLog =
+                    maxOf(obstacleMaximumCallbackGapMsSinceLog, callbackGapMs)
+            }
+            obstaclePreviousCallbackAtNanos = now
+            obstacleCallbacksSinceLog += 1
             runOnUiThread {
                 obstacleSampleReceived = interval > 0 && hasHorizontalSamples
                 obstacleSampleValid =
@@ -1592,9 +1603,14 @@ class MainActivity : Activity() {
                 }
             }
             if (now - obstacleLoggedAtNanos >= OBSTACLE_LOG_PERIOD_NANOS) {
+                val callbackCount = obstacleCallbacksSinceLog
+                val maximumCallbackGapMs = obstacleMaximumCallbackGapMsSinceLog
+                obstacleCallbacksSinceLog = 0
+                obstacleMaximumCallbackGapMsSinceLog = 0L
                 obstacleLoggedAtNanos = now
                 flightLog.write(
-                    "obstacle actionableMinMm=${summary.nearestActionableMm ?: "none"} " +
+                    "obstacle callbacks=$callbackCount maxGapMs=$maximumCallbackGapMs " +
+                        "actionableMinMm=${summary.nearestActionableMm ?: "none"} " +
                         "detected=${summary.detectedCount}/${horizontal.size} " +
                         "groundEchoes=${summary.groundEchoCount} suppressed=${summary.groundEchoDominant} " +
                         "intervalDeg=$interval rawMinMm=${summary.rawMinimumMm ?: "none"} " +
