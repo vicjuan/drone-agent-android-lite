@@ -1414,12 +1414,16 @@ internal class TapeTrackingController {
         const val CIRCULAR_YAW_DEAD_ZONE_DEGREES = 1.5
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 15.0
-        const val CIRCULAR_YAW_SPEED_BUDGET_DEGREES_PER_SECOND = 13.0
-        const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.12
-        // The three-lap flight used this profile without the aggressive yaw saturation seen
-        // in the 55-second attempt. Brief plausible detector gaps now preserve its smooth
-        // acceleration instead of forcing a stop-and-relaunch.
-        const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.11
+        // Use the measured flight's remaining yaw authority for speed, but retain
+        // explicit control reserve instead of driving the actuator at its clamp.
+        const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 0.5
+        const val CIRCULAR_YAW_SPEED_BUDGET_DEGREES_PER_SECOND =
+            CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND -
+                CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
+        // Replaying the 129-second two-lap flight at these limits raises the
+        // curvature-aware target speed by about 9.6%, without bypassing yaw limiting.
+        const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.13
+        const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.12
         const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.05
         const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.07
         const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.02

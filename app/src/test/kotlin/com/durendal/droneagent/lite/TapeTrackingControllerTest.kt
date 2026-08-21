@@ -911,7 +911,7 @@ class TapeTrackingControllerTest {
                 TapeTrackingController.CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND,
         )
         assertEquals(
-            13.0,
+            14.5,
             kotlin.math.abs(decision.purePursuitYawRateDegreesPerSecond),
             1e-9,
         )
@@ -947,7 +947,7 @@ class TapeTrackingControllerTest {
             settled = controller.tick(now)
         }
         assertEquals(
-            0.12,
+            0.13,
             settled.forwardSpeedMetersPerSecond,
             1e-9,
         )
@@ -965,7 +965,7 @@ class TapeTrackingControllerTest {
         }
 
         assertEquals(
-            0.11,
+            0.12,
             checkNotNull(decision).forwardSpeedMetersPerSecond,
             1e-9,
         )
