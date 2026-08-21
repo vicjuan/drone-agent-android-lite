@@ -119,6 +119,44 @@ class TapeCaptureReplayInstrumentedTest {
         assertSameDetection(live, replayed!!)
     }
 
+    @Test
+    fun bufferedCaptureKeepsItsOwnFrameBytes() {
+        val width = 640
+        val height = 360
+        val firstFrame = frameWithVerticalTape(width, height)
+        val secondFrame = frameWithCurvedTape(width, height)
+        val recorder = TapeCaptureRecorder(
+            root = root,
+            log = {},
+            leadingFrameCount = 2,
+            trailingFrameCount = 0,
+            store = TapeCaptureStore(root),
+            writer = Executor { it.run() },
+        )
+        val results = LinkedBlockingQueue<Optional>()
+        val detector = BlackTapeDetector(
+            onResult = { results.put(Optional(it)) },
+            onError = { results.put(Optional(null)) },
+            captureRecorder = recorder,
+        )
+
+        detector.use {
+            recorder.arm()
+            it.submitRgba(firstFrame, 0, firstFrame.size, width, height)
+            assertNotNull("first frame was not processed", results.poll(20, TimeUnit.SECONDS))
+            Thread.sleep(120)
+            it.submitRgba(secondFrame, 0, secondFrame.size, width, height)
+            assertNotNull("second frame was not processed", results.poll(20, TimeUnit.SECONDS))
+            recorder.trigger("test")
+            recorder.disarm()
+        }
+
+        val captures = TapeCaptureStore(root).captures().map(TapeCaptureCodec::read)
+        assertEquals(2, captures.size)
+        assertArrayEquals(firstFrame, captures[0].frame.pixels)
+        assertArrayEquals(secondFrame, captures[1].frame.pixels)
+    }
+
     private fun assertSameDetection(expected: TapeDetection, actual: TapeDetection) {
         assertEquals(expected.confidence, actual.confidence, 0.0)
         assertEquals(expected.angleFromVerticalDegrees, actual.angleFromVerticalDegrees, 0.0)

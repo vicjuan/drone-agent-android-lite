@@ -145,17 +145,43 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun previewModeDetectsCurvedTapeOnGreenFloor() {
+    fun tapeShapedMarkOnGreenFloorIsNotCardboardTape() {
         val width = 640
         val height = 360
         val frame = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
         fillCurvedRibbon(frame, width, height, direction = -1.0, value = 20)
 
-        val detection = checkNotNull(detectSequence(listOf(frame), width, height).single())
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
 
-        assertTrue(detection.angleFromVerticalDegrees in -8.0..8.0)
-        assertTrue(detection.lookaheadX < detection.anchorXFraction)
-        assertEquals(0.0, detection.nearFieldOffsetFraction, 0.02)
+        assertEquals(null, detection)
+        assertTrue(diagnostics.single(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.single()))
+    }
+
+    @Test
+    fun tapeShapedMarkOnDarkFloorIsNotCardboardTape() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 62, green = 62, blue = 62)
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 12)
+
+        val diagnostics = mutableListOf<String>()
+        val detection =
+            detectSequence(
+                listOf(frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertEquals(null, detection)
+        assertTrue(diagnostics.single(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.single()))
     }
 
     @Test
@@ -497,7 +523,6 @@ class BlackTapeDetectorInstrumentedTest {
             assertEquals(diagnostics[index], PathQuality.FULL_PATH, detection?.quality)
         }
     }
-
     @Test
     fun latestFlightProvidesTwoQualifiedEndpointFramesBeforeDetectorFlicker() {
         val width = 1920
@@ -555,7 +580,7 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
-    fun newTrackingSessionForgetsIdleBoardColour() {
+    fun newTrackingSessionAcquiresCardboardAfterRejectingIdleFloor() {
         val width = 640
         val height = 360
         val idleScenery = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
@@ -575,7 +600,7 @@ class BlackTapeDetectorInstrumentedTest {
                 },
             )
 
-        assertTrue(diagnostics.first(), detections.first() != null)
+        assertEquals(diagnostics.first(), null, detections.first())
         assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
     }
 
@@ -874,6 +899,34 @@ class BlackTapeDetectorInstrumentedTest {
                 frame[offset + 2] = pixel.toByte()
                 frame[offset + 3] = 255.toByte()
             }
+        }
+    }
+
+    @Test
+    fun frameDiagnosticsSeparateInvalidAcceptedAndThrottledSubmissions() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        val outcomes = LinkedBlockingQueue<DetectionOutcome>()
+        val detector = BlackTapeDetector(
+            onResult = { outcomes.offer(DetectionOutcome(it, null)) },
+            onError = { outcomes.offer(DetectionOutcome(null, it)) },
+        )
+        try {
+            detector.submitRgba(ByteArray(1), 0, 1, width, height)
+            detector.submitRgba(frame, 0, frame.size, width, height)
+            detector.submitRgba(frame, 0, frame.size, width, height)
+            val outcome =
+                outcomes.poll(3, TimeUnit.SECONDS)
+                    ?: throw AssertionError("detector did not finish")
+            outcome.failure?.let { throw AssertionError("detector failed", it) }
+
+            val diagnostics = detector.diagnosticsSummary()
+            assertTrue(diagnostics, diagnostics.contains("frames=received:3 accepted:1"))
+            assertTrue(diagnostics, diagnostics.contains("throttle:1 busy:0 invalid:1"))
+            assertTrue(diagnostics, diagnostics.contains("completed:1 failed:0"))
+        } finally {
+            detector.close()
         }
     }
 
