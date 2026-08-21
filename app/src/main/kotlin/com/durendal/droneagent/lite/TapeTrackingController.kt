@@ -471,6 +471,7 @@ internal class TapeTrackingController {
         }
         if (observation == null) {
             circularDetectionGap = true
+            disableCircularLateralCorrection()
             if (!reliableCircularPathEstablished) {
                 consecutiveReliableCircularPathDetections = 0
             }
@@ -756,7 +757,7 @@ internal class TapeTrackingController {
                 ) {
                     phase = TapeTrackingPhase.ALIGNING_CURVE
                     consecutiveCurveAlignmentDetections = 0
-                    lateralCorrectionActive = false
+                    disableCircularLateralCorrection()
                     resetAppliedCommands()
                 }
             }
@@ -770,7 +771,7 @@ internal class TapeTrackingController {
                     ) {
                         phase = TapeTrackingPhase.TRACKING
                         consecutiveCurveAlignmentDetections = 0
-                        lateralCorrectionActive = false
+                        disableCircularLateralCorrection()
                         resetAppliedCommands()
                     }
                 } else {
@@ -958,7 +959,7 @@ internal class TapeTrackingController {
         heightAboveGroundMeters = null
         offsetRatePerSecond = 0.0
         lastControlObservationAtNanos = 0L
-        lateralCorrectionActive = false
+        disableCircularLateralCorrection()
         pathQuality = PathQuality.LOST
     }
 
@@ -1125,35 +1126,52 @@ internal class TapeTrackingController {
         return appliedForwardSpeedMetersPerSecond
     }
 
+
+    private fun disableCircularLateralCorrection() {
+        lateralCorrectionActive = false
+        if (mode.followsCurvedPath) {
+            appliedRightSpeedMetersPerSecond = 0.0
+        }
+    }
+
     private fun desiredRightSpeed(): Double {
         // Translation is the command a wrong path turns into a crash, so it is
         // the first thing quality takes away.
         if (pathQuality != PathQuality.FULL_PATH) return 0.0
-        // During curved tracking the forward look-ahead owns interception: yaw
-        // and forward motion rejoin the tape along an arc instead of strafing
-        // toward the near-field anchor. Straight-route centering is unchanged.
-        if (mode.followsCurvedPath && phase == TapeTrackingPhase.TRACKING) {
-            lateralCorrectionActive = false
-            return 0.0
-        }
         val offset = controlledHorizontalOffsetFraction ?: return 0.0
+        if (mode.followsCurvedPath) {
+            if (
+                phase != TapeTrackingPhase.TRACKING ||
+                circularDetectionGap
+            ) {
+                return 0.0
+            }
+            val effectiveOffset = when {
+                offset > CIRCULAR_CENTERING_DEAD_ZONE_FRACTION ->
+                    offset - CIRCULAR_CENTERING_DEAD_ZONE_FRACTION
+                offset < -CIRCULAR_CENTERING_DEAD_ZONE_FRACTION ->
+                    offset + CIRCULAR_CENTERING_DEAD_ZONE_FRACTION
+                else -> 0.0
+            }
+            return (effectiveOffset * CIRCULAR_LATERAL_PROPORTIONAL_GAIN).coerceIn(
+                -CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
+                CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
+            )
+        }
         lateralCorrectionActive = when {
             lateralCorrectionActive && abs(offset) <= CENTERING_STOP_FRACTION -> false
             !lateralCorrectionActive && abs(offset) >= CENTERING_START_FRACTION -> true
             else -> lateralCorrectionActive
         }
         if (!lateralCorrectionActive) return 0.0
-        val maximumCenteringSpeed =
-            if (mode.followsCurvedPath) {
-                CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND
-            } else {
-                MAX_CENTERING_SPEED_METERS_PER_SECOND
-            }
         val correction =
             (
                 offset * LATERAL_PROPORTIONAL_GAIN +
                     offsetRatePerSecond * LATERAL_DERIVATIVE_GAIN
-                ).coerceIn(-maximumCenteringSpeed, maximumCenteringSpeed)
+                ).coerceIn(
+                -MAX_CENTERING_SPEED_METERS_PER_SECOND,
+                MAX_CENTERING_SPEED_METERS_PER_SECOND,
+            )
         return if (phase == TapeTrackingPhase.VERIFYING_ENDPOINT) {
             correction.coerceIn(
                 -ENDPOINT_MAX_CENTERING_SPEED_METERS_PER_SECOND,
@@ -1402,7 +1420,9 @@ internal class TapeTrackingController {
         // in the 55-second attempt. Brief plausible detector gaps now preserve its smooth
         // acceleration instead of forcing a stop-and-relaunch.
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.11
-        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.10
+        const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.05
+        const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.07
+        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.02
         const val CIRCULAR_STABLE_ANGLE_DEGREES = 8.0
         const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
         const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0

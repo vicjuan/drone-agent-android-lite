@@ -615,7 +615,7 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `stable near-edge path uses lookahead arc without lateral translation`() {
+    fun `stable near-edge path combines lookahead arc with bounded lateral correction`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
         controller.observe(null, seconds(3))
@@ -643,8 +643,50 @@ class TapeTrackingControllerTest {
         val decision = checkNotNull(reacquired)
         assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
         assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
+            decision.rightSpeedMetersPerSecond,
+            1e-9,
+        )
         assertTrue(decision.purePursuitYawRateDegreesPerSecond > 0.0)
+    }
+
+    @Test
+    fun `circular lateral speed follows the continuous dead zone formula`() {
+        val controller = circularTrackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 20.0,
+                longSideFraction = 1.10,
+                nearFieldOffsetFraction = -0.20,
+                lookahead = TapeLookahead(xFraction = 0.35, yFraction = 0.64),
+                heightAboveGroundMeters = 0.7,
+            ),
+            seconds(3),
+        )
+        val displaced = controller.tick(seconds(3))
+        assertEquals(-0.0105, displaced.rightSpeedMetersPerSecond, 1e-9)
+
+        val slightlyDisplacedController = circularTrackingController()
+        slightlyDisplacedController.observe(
+            observation(
+                angleDegrees = 8.0,
+                longSideFraction = 1.0,
+                nearFieldOffsetFraction = 0.08,
+            ),
+            seconds(3),
+        )
+        assertEquals(
+            0.0021,
+            slightlyDisplacedController.tick(seconds(3)).rightSpeedMetersPerSecond,
+            1e-9,
+        )
+
+        val missingAt = seconds(3) + 250_000_000L
+        controller.observe(null, missingAt)
+        val missing = controller.tick(missingAt)
+        assertTrue(missing.forwardSpeedMetersPerSecond > 0.0)
+        assertEquals(0.0, missing.rightSpeedMetersPerSecond, 0.0)
     }
 
     @Test
@@ -821,10 +863,10 @@ class TapeTrackingControllerTest {
                 endpointCandidate = false,
                 heightAboveGroundMeters = 0.56,
             ),
-            seconds(2),
+            seconds(3),
         )
 
-        val decision = controller.tick(seconds(2))
+        val decision = controller.tick(seconds(3))
 
         assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
         assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
@@ -837,7 +879,11 @@ class TapeTrackingControllerTest {
             "image-left look-ahead must map to negative DJI yaw: $decision",
             decision.yawRateDegreesPerSecond < 0.0,
         )
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertTrue(decision.rightSpeedMetersPerSecond < 0.0)
+        assertTrue(
+            kotlin.math.abs(decision.rightSpeedMetersPerSecond) <=
+                TapeTrackingController.CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
+        )
     }
 
     @Test
@@ -869,7 +915,7 @@ class TapeTrackingControllerTest {
             kotlin.math.abs(decision.purePursuitYawRateDegreesPerSecond),
             1e-9,
         )
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0035, decision.rightSpeedMetersPerSecond, 1e-9)
         assertTrue(
             kotlin.math.abs(decision.yawRateDegreesPerSecond) <=
                 TapeTrackingController.CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND,

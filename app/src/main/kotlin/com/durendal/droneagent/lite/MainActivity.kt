@@ -72,6 +72,7 @@ class MainActivity : Activity() {
     private lateinit var takeoffButton: PillButton
     private lateinit var landButton: PillButton
     private lateinit var holdButton: PillButton
+    private lateinit var oneMeterHoldButton: PillButton
     private lateinit var registerButton: PillButton
     private lateinit var cameraDownButton: PillButton
     private lateinit var curvedOutAndBackTrackingButton: PillButton
@@ -187,8 +188,9 @@ class MainActivity : Activity() {
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
     private var ultrasonicRaw: Int? = null
 
-    /** True while the one-shot descent to [TARGET_HEIGHT_METERS] is running. */
-    private var holdingHeight = false
+    /** Target for the active one-shot height manoeuvre; null while inactive. */
+    private var heightTargetMeters: Double? = null
+    private val holdingHeight: Boolean get() = heightTargetMeters != null
     private var holdStartedAtNanos = 0L
     private var holdStableSamples = 0
 
@@ -444,9 +446,12 @@ class MainActivity : Activity() {
         takeoffButton = PillButton("起飛並停留", StickPadView.GREEN) { takeoff() }
         landButton = PillButton("降落", StickPadView.AMBER) { land() }
         holdButton = PillButton(
-            "定高 %.0f 公分".format(TARGET_HEIGHT_METERS * 100.0),
+            "定高 %.0f 公分".format(LOW_HEIGHT_TARGET_METERS * 100.0),
             StickPadView.CYAN,
-        ) { startHeightHold() }
+        ) { startHeightHold(LOW_HEIGHT_TARGET_METERS) }
+        oneMeterHoldButton = PillButton("離地 1 公尺", StickPadView.CYAN) {
+            startHeightHold(ONE_METER_TARGET_HEIGHT_METERS)
+        }
         cameraDownButton = PillButton("鏡頭 -90°", StickPadView.CYAN) {
             moveCameraToPitch(CAMERA_DOWN_PITCH_DEGREES)
         }
@@ -459,6 +464,7 @@ class MainActivity : Activity() {
         addView(registerButton, actionParams(marginEnd = dp(10)))
         addView(takeoffButton, actionParams(marginEnd = dp(10)))
         addView(holdButton, actionParams(marginEnd = dp(10)))
+        addView(oneMeterHoldButton, actionParams(marginEnd = dp(10)))
         addView(cameraDownButton, actionParams(marginEnd = dp(10)))
         addView(tapeTrackingButton, actionParams(marginEnd = dp(10)))
         addView(
@@ -1088,7 +1094,7 @@ class MainActivity : Activity() {
         // A hand on the left stick is a vertical intent, and there can only be
         // one: the operator's touch always wins over the height loop.
         if (side == StickSide.LEFT && y != 0.0 && holdingHeight) {
-            flightLog.write("descent cancelled by operator stick input")
+            flightLog.write("height target cancelled by operator stick input")
             finishHeightHold("操作者接管升降，定高已取消", release = false)
         }
         if (side == StickSide.LEFT && (x != 0.0 || y != 0.0) && headingTurn != null) {
@@ -1163,9 +1169,11 @@ class MainActivity : Activity() {
         landButton.available = ready && flying
         val turning = headingTurn != null
         val quarterArcActive = quarterArcController != null
-        holdButton.available =
+        val heightButtonAvailable =
             ready && flying && !holdingHeight && !turning && !quarterArcActive &&
                 !tapeTracking.enabled
+        holdButton.available = heightButtonAvailable
+        oneMeterHoldButton.available = heightButtonAvailable
         captureButton.available = captureRecorder != null
         cameraDownButton.available = ready && !cameraPitchCommandPending
         val tapeTrackingCanStart =
@@ -1202,7 +1210,7 @@ class MainActivity : Activity() {
             append("\nstick=").append(stickStatus.enabled)
             append(" advanced=").append(stickStatus.advancedMode)
             append(" authority=").append(stickStatus.authority)
-            append(" · hold=").append(if (holdingHeight) "50cm" else "off")
+            append(" · hold=").append(heightTargetMeters?.let { "%.1fm".format(it) } ?: "off")
             append(" · heading=").append(aircraftHeadingDegrees?.let { "%.1f°".format(it) } ?: "—")
             append(" · turn=").append(headingTurn?.let { "%.0f/180°".format(it.progressDegrees) } ?: "off")
             append(" · landingConfirmNeeded=").append(confirmationNeeded)
@@ -2110,7 +2118,7 @@ class MainActivity : Activity() {
             render("飛機未連線，無法降落")
             return
         }
-        holdingHeight = false
+        if (holdingHeight) finishHeightHold("降落操作取消定高", release = false)
         if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
         if (quarterArcController != null) {
             finishQuarterArc("降落操作取消無視覺 1/4 圈", release = false)
@@ -2282,7 +2290,9 @@ class MainActivity : Activity() {
         val generation = beginTransition("release") {
             onDone("釋放控制權無回應")
         }
-        holdingHeight = false
+        heightTargetMeters = null
+        mainHandler.removeCallbacks(holdTickRunnable)
+        virtualStick.setClimbRate(0.0)
         holdStatus = ""
         if (headingTurn != null) {
             headingTurn = null
@@ -2439,59 +2449,63 @@ class MainActivity : Activity() {
 
 
     /**
-     * The one operator action that hands control to this app: pressing it takes
-     * the control link (retrying through the auto-takeoff window) and only then
-     * closes the height loop. Nothing else in the app takes control on its own.
+     * Pressing either height button takes the control link and closes a bounded
+     * vertical loop around that button's target. The same path safely supports
+     * ascent and descent; no fixed-duration movement is inferred from altitude.
      */
-    private fun startHeightHold() {
+    private fun startHeightHold(targetHeightMeters: Double) {
         flightLog.write(
-            "press: hold (flying=$flying owned=$stickOwned pending=$stickTransitionPending " +
-                "height=$altitudeMeters src=$heightSource ageMs=${heightAgeMillis()})",
+            "press: height target=$targetHeightMeters (flying=$flying owned=$stickOwned " +
+                "pending=$stickTransitionPending height=$altitudeMeters src=$heightSource " +
+                "ageMs=${heightAgeMillis()})",
         )
         if (!flying) {
-            render("飛機不在空中，無法定高")
+            render("飛機不在空中，無法調整高度")
             return
         }
         if (headingTurn != null) {
-            render("180° 旋轉進行中，無法同時定高")
+            render("180° 旋轉進行中，無法同時調整高度")
             return
         }
         if (quarterArcController != null) {
-            render("無視覺 1/4 圈進行中，無法同時定高")
+            render("無視覺 1/4 圈進行中，無法同時調整高度")
             return
         }
         if (tapeTracking.enabled) {
-            render("黑膠帶追蹤進行中，無法同時定高")
+            render("黑膠帶追蹤進行中，無法同時調整高度")
             return
         }
         if (usableHeightMeters() == null) {
-            flightLog.write("descent refused: no usable height last=$altitudeMeters src=$heightSource connected=$aircraftConnected ageMs=${heightAgeMillis()}")
-            render("沒有高度資料，無法定高")
+            flightLog.write(
+                "height target refused: no usable height last=$altitudeMeters " +
+                    "src=$heightSource connected=$aircraftConnected ageMs=${heightAgeMillis()}",
+            )
+            render("沒有高度資料，無法調整高度")
             return
         }
-        render("取得控制權後開始下降…")
+        render("取得控制權後調整至 %.1f m…".format(targetHeightMeters))
         acquireControlLink {
             if (usableHeightMeters() == null) {
-                finishHeightHold("沒有高度資料，已放棄定高並交回遙控器")
+                finishHeightHold("沒有高度資料，已放棄調整高度並交回遙控器")
                 return@acquireControlLink
             }
-            holdingHeight = true
+            heightTargetMeters = targetHeightMeters
             holdStartedAtNanos = System.nanoTime()
             holdStableSamples = 0
             holdAuthoritySeen = false
-            flightLog.write("descent armed target=$TARGET_HEIGHT_METERS")
+            flightLog.write("height target armed target=$targetHeightMeters")
             mainHandler.post(holdTickRunnable)
         }
     }
 
     /**
      * Ends the manoeuvre and, by default, hands the aircraft back. Holding the
-     * control link after the descent finishes has no purpose: with the sticks
+     * control link after reaching the target has no purpose: with the sticks
      * neutral the aircraft keeps the height on its own, and an idle link is
      * exactly what stopped the RC from taking over on 2026-08-17.
      */
     private fun finishHeightHold(message: String, release: Boolean = true) {
-        holdingHeight = false
+        heightTargetMeters = null
         holdStableSamples = 0
         holdAuthoritySeen = false
         holdStatus = message
@@ -2549,25 +2563,26 @@ class MainActivity : Activity() {
      */
     private fun driveHeightHold() {
         if (!holdingHeight || !stickOwned) return
+        val targetHeightMeters = heightTargetMeters ?: return
         // Two different things look identical in one sample: the aircraft has not
         // finished handing authority over yet, and the RC has taken it away. They
         // are told apart by history — a takeover can only happen after this app
         // has actually held authority. enableVirtualStick returns ~60 ms before the
         // aircraft names MSDK as the owner, and treating that gap as a takeover is
-        // what made the descent stop 7 ms after it armed (2026-08-17).
+        // what made the original height manoeuvre stop 7 ms after it armed (2026-08-17).
         val ownsAuthority = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
         if (ownsAuthority) {
             holdAuthoritySeen = true
         } else if (holdAuthoritySeen) {
-            flightLog.write("descent stopped: authority taken by ${stickStatus.authority}")
-            finishHeightHold("遙控器已接管，定高停止", release = false)
+            flightLog.write("height target stopped: authority taken by ${stickStatus.authority}")
+            finishHeightHold("遙控器已接管，高度調整停止", release = false)
             return
         } else {
             virtualStick.setClimbRate(0.0)
             val waitingMs = (System.nanoTime() - holdStartedAtNanos) / 1_000_000L
             if (waitingMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
-                flightLog.write("descent aborted: authority never arrived (owner=${stickStatus.authority})")
-                finishHeightHold("未取得控制權（owner=${stickStatus.authority}），已放棄定高")
+                flightLog.write("height target aborted: authority never arrived (owner=${stickStatus.authority})")
+                finishHeightHold("未取得控制權（owner=${stickStatus.authority}），已放棄調整高度")
             } else {
                 holdStatus = "等待控制權移交…（owner=${stickStatus.authority}）"
                 render(holdStatus)
@@ -2576,50 +2591,61 @@ class MainActivity : Activity() {
         }
         val height = usableHeightMeters()
         if (height == null) {
-            flightLog.write("descent aborted: height unusable ageMs=${heightAgeMillis()}")
-            finishHeightHold("高度資料中斷，已停止下降並交回遙控器")
+            flightLog.write("height target aborted: height unusable ageMs=${heightAgeMillis()}")
+            finishHeightHold("高度資料中斷，已停止升降並交回遙控器")
             return
         }
         if (System.nanoTime() - holdStartedAtNanos > HOLD_TIMEOUT_NANOS) {
-            flightLog.write("descent aborted: timeout h=%.2f".format(height))
-            finishHeightHold("下降逾時（目前 %.2f m），已交回遙控器".format(height))
+            flightLog.write("height target aborted: timeout h=%.2f".format(height))
+            finishHeightHold("高度調整逾時（目前 %.2f m），已交回遙控器".format(height))
             return
         }
-        val error = TARGET_HEIGHT_METERS - height
-        if (abs(error) <= HEIGHT_TOLERANCE_METERS) {
+        val error = targetHeightMeters - height
+        if (HeightHoldPolicy.isWithinTarget(targetHeightMeters, height)) {
             virtualStick.setClimbRate(0.0)
             holdStableSamples += 1
             // A few consecutive in-band samples, not one, decide arrival: a single
             // sample can be noise on the way past the target.
             if (holdStableSamples >= HOLD_STABLE_SAMPLES) {
-                flightLog.write("descent complete h=%.2f; releasing".format(height))
+                flightLog.write(
+                    "height target complete target=%.1f h=%.2f; releasing"
+                        .format(targetHeightMeters, height),
+                )
                 finishHeightHold("已到 %.2f m，控制權交回遙控器".format(height))
             } else {
                 holdStatus = "定高 %.1f m：確認中（目前 %.2f m）"
-                    .format(TARGET_HEIGHT_METERS, height)
+                    .format(targetHeightMeters, height)
                 render(holdStatus)
             }
             return
         }
         holdStableSamples = 0
-        // Commanding a descent while the height has stopped updating is flying
-        // blind: the aircraft should be moving, so samples should be arriving. The
-        // check waits out a grace window, because a hover legitimately starts with
-        // an old sample and the first frames need time to produce motion.
-        val descendingForMs = (System.nanoTime() - holdStartedAtNanos) / 1_000_000L
-        if (descendingForMs > MAX_MOVING_HEIGHT_AGE_MS && heightAgeMillis() > MAX_MOVING_HEIGHT_AGE_MS) {
+        // Commanding vertical motion while the height has stopped updating is
+        // flying blind: the aircraft should be moving, so samples should arrive.
+        // The check waits out a grace window because a hover legitimately starts
+        // with an old sample and the first frames need time to produce motion.
+        val movingForMs = (System.nanoTime() - holdStartedAtNanos) / 1_000_000L
+        if (movingForMs > MAX_MOVING_HEIGHT_AGE_MS && heightAgeMillis() > MAX_MOVING_HEIGHT_AGE_MS) {
             flightLog.write(
-                "descent aborted: height not updating ageMs=${heightAgeMillis()} h=%.2f".format(height),
+                "height target aborted: height not updating ageMs=${heightAgeMillis()} " +
+                    "h=%.2f".format(height),
             )
-            finishHeightHold("高度停止更新，已停止下降並交回遙控器")
+            finishHeightHold("高度停止更新，已停止升降並交回遙控器")
             return
         }
-        val climbRate = (HEIGHT_GAIN * error)
-            .coerceIn(-VirtualStickSession.MAX_VERTICAL_MPS, VirtualStickSession.MAX_VERTICAL_MPS)
+        val climbRate = HeightHoldPolicy.climbRateMetersPerSecond(
+            targetHeightMeters = targetHeightMeters,
+            currentHeightMeters = height,
+            maximumRateMetersPerSecond = VirtualStickSession.MAX_VERTICAL_MPS,
+        )
         virtualStick.setClimbRate(climbRate)
-        flightLog.write("descent h=%.2f e=%+.2f cmd=%+.2f age=${heightAgeMillis()}".format(height, error, climbRate))
-        holdStatus = "下降至 %.1f m：目前 %.2f m，垂直 %+.2f m/s"
-            .format(TARGET_HEIGHT_METERS, height, climbRate)
+        flightLog.write(
+            "height target=%.1f h=%.2f e=%+.2f cmd=%+.2f age=${heightAgeMillis()}"
+                .format(targetHeightMeters, height, error, climbRate),
+        )
+        val direction = if (climbRate > 0.0) "上升" else "下降"
+        holdStatus = "$direction 至 %.1f m：目前 %.2f m，垂直 %+.2f m/s"
+            .format(targetHeightMeters, height, climbRate)
         render(holdStatus)
     }
 
@@ -2632,26 +2658,16 @@ class MainActivity : Activity() {
         const val MAX_CONFIRM_ATTEMPTS = 8
         const val CONFIRM_RETRY_MS = 700L
 
-        /** Hover height for the low-altitude tape-following experiment. */
-        const val TARGET_HEIGHT_METERS = 0.7
+        /** Existing low-altitude target retained for comparison experiments. */
+        const val LOW_HEIGHT_TARGET_METERS = 0.7
+
+        /** Height of the successful three-lap flight, rounded to its operating target. */
+        const val ONE_METER_TARGET_HEIGHT_METERS = 1.0
 
         /**
-         * Arrival band. KeyAltitude is quantised to 0.1 m, so a tighter band than
-         * one quantisation step could only be satisfied by an exact target reading.
-         */
-        const val HEIGHT_TOLERANCE_METERS = 0.1
-
-        /**
-         * Proportional gain in (m/s) per metre of error. The session's 0.3 m/s
-         * clamp bounds the approach rate, and the proportional tail limits
-         * overshoot near the low-altitude target.
-         */
-        const val HEIGHT_GAIN = 0.6
-
-        /**
-         * While a descent is commanded, the height must keep arriving: the aircraft
-         * is moving, so samples must move too. Silence longer than this means the
-         * loop is blind and must stop instead of guessing.
+         * While vertical motion is commanded, height must keep arriving: the
+         * aircraft is moving, so samples must move too. Silence longer than this
+         * means the loop is blind and must stop instead of guessing.
          */
         const val MAX_MOVING_HEIGHT_AGE_MS = 2_000L
 
@@ -2661,7 +2677,7 @@ class MainActivity : Activity() {
         /** Consecutive in-band samples that count as "arrived" (~0.3 s at 10 Hz). */
         const val HOLD_STABLE_SAMPLES = 3
 
-        /** A descent that has not converged by now is abandoned, not prolonged. */
+        /** A height manoeuvre that has not converged by now is abandoned. */
         const val HOLD_TIMEOUT_NANOS = 20_000_000_000L
 
         /** Gentle closed-loop half-turn, slowed near the target to limit overshoot. */
