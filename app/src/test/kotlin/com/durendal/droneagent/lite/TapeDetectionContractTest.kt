@@ -39,6 +39,7 @@ class TapeDetectionContractTest {
     private fun detection(lookahead: TapeLookahead?) = TapeDetection(
         sourceWidth = 640,
         sourceHeight = 360,
+        capturedAtNanos = 0L,
         bounds = NormalizedRect(left = 0.4, top = 0.1, right = 0.6, bottom = 0.9),
         confidence = 0.8,
         angleFromVerticalDegrees = 0.0,

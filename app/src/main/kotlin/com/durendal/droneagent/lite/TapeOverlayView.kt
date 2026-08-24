@@ -122,25 +122,30 @@ class TapeOverlayView(context: Context) : View(context) {
             previewLeft + (source.right * previewWidth).toFloat(),
             previewTop + (source.bottom * previewHeight).toFloat(),
         )
-        canvas.drawRoundRect(detectionBounds, boxCornerRadius, boxCornerRadius, boxPaint)
+        val hasCenterline = centerlinePath != null
+        if (!hasCenterline) {
+            canvas.drawRoundRect(detectionBounds, boxCornerRadius, boxCornerRadius, boxPaint)
+        }
 
         val anchorX = previewLeft + (result.anchorXFraction * previewWidth).toFloat()
         val anchorY = previewTop + (result.anchorYFraction * previewHeight).toFloat()
         val targetX = previewLeft + previewWidth / 2f
         val targetY = previewTop + previewHeight * TRACKING_TARGET_Y_FRACTION.toFloat()
-        // A near-field-only path has no trustworthy look-ahead. Drawing a rail to
-        // a made-up point would show the operator guidance the controller is not
-        // allowed to use, so the rail simply disappears with the evidence.
-        result.lookahead?.let { lookahead ->
-            canvas.drawLine(
-                anchorX,
-                anchorY,
-                previewLeft + (lookahead.xFraction * previewWidth).toFloat(),
-                previewTop + (lookahead.yFraction * previewHeight).toFloat(),
-                railPaint,
-            )
+        if (!hasCenterline) {
+            // A near-field-only path has no trustworthy look-ahead. Drawing a rail to
+            // a made-up point would show the operator guidance the controller is not
+            // allowed to use, so the rail simply disappears with the evidence.
+            result.lookahead?.let { lookahead ->
+                canvas.drawLine(
+                    anchorX,
+                    anchorY,
+                    previewLeft + (lookahead.xFraction * previewWidth).toFloat(),
+                    previewTop + (lookahead.yFraction * previewHeight).toFloat(),
+                    railPaint,
+                )
+            }
+            canvas.drawCircle(anchorX, anchorY, anchorRadius, anchorPaint)
         }
-        canvas.drawCircle(anchorX, anchorY, anchorRadius, anchorPaint)
         canvas.drawLine(
             targetX - targetRadius,
             targetY,
@@ -158,9 +163,25 @@ class TapeOverlayView(context: Context) : View(context) {
 
         drawCenterlinePath(canvas)
 
-        val labelTop =
-            (detectionBounds.top - labelTextHeight - labelPadding * 2).coerceAtLeast(0f)
-        drawLabel(canvas, detectionLabel, detectionBounds.left, labelTop, labelPaint.measureText(detectionLabel))
+        if (hasCenterline) {
+            drawLabel(
+                canvas,
+                detectionLabel,
+                searchLabelLeft,
+                searchLabelTop,
+                labelPaint.measureText(detectionLabel),
+            )
+        } else {
+            val labelTop =
+                (detectionBounds.top - labelTextHeight - labelPadding * 2).coerceAtLeast(0f)
+            drawLabel(
+                canvas,
+                detectionLabel,
+                detectionBounds.left,
+                labelTop,
+                labelPaint.measureText(detectionLabel),
+            )
+        }
     }
 
     /**

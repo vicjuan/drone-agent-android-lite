@@ -482,18 +482,24 @@ class BlackTapeDetectorInstrumentedTest {
         val width = 1920
         val height = 1080
         val diagnostics = mutableListOf<String>()
+        val established = rgbaAsset("flight-glare-before-loss.png", width, height)
         val detections =
             detectSequence(
                 listOf(
-                    rgbaAsset("flight-glare-before-loss.png", width, height),
+                    established,
+                    established,
+                    established,
                     rgbaAsset("flight-glare-loss.png", width, height),
                 ),
                 width,
                 height,
                 onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
             )
 
-        assertTrue(diagnostics.first(), detections.first() != null)
+        assertTrue(diagnostics[2], detections[2] != null)
         assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
     }
 
@@ -502,10 +508,14 @@ class BlackTapeDetectorInstrumentedTest {
         val width = 1920
         val height = 1080
         val diagnostics = mutableListOf<String>()
+        val established =
+            rgbaAsset("flight-reflection-pause-establish.png", width, height)
         val detections =
             detectSequence(
                 listOf(
-                    rgbaAsset("flight-reflection-pause-establish.png", width, height),
+                    established,
+                    established,
+                    established,
                     rgbaAsset("flight-reflection-pause-before.png", width, height),
                     rgbaAsset("flight-reflection-pause-at.png", width, height),
                 ),
@@ -513,14 +523,12 @@ class BlackTapeDetectorInstrumentedTest {
                 height,
                 onDiagnostics = diagnostics::add,
                 beforeFrame = { index, detector ->
-                    detector.setDetectionMode(
-                        if (index == 0) TapeDetectionMode.STRAIGHT else TapeDetectionMode.PATH,
-                    )
+                    if (index == 0) detector.beginTrackingSession()
                 },
             )
-        assertTrue(diagnostics.first(), detections.first() != null)
-        detections.forEachIndexed { index, detection ->
-            assertEquals(diagnostics[index], PathQuality.FULL_PATH, detection?.quality)
+        assertTrue(diagnostics.joinToString("\n"), detections.take(2).all { it == null })
+        detections.drop(2).forEachIndexed { index, detection ->
+            assertEquals(diagnostics[index + 2], PathQuality.FULL_PATH, detection?.quality)
         }
     }
     @Test
@@ -560,8 +568,9 @@ class BlackTapeDetectorInstrumentedTest {
         val height = 1080
         val diagnostics = mutableListOf<String>()
         val blankBoard = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        val initialPath = rgbaAsset("flight-path-before-chroma-loss.jpg", width, height)
         val frames = buildList {
-            add(rgbaAsset("flight-path-before-chroma-loss.jpg", width, height))
+            repeat(3) { add(initialPath) }
             repeat(8) { add(blankBoard) }
             add(rgbaAsset("flight-non-tape-boundary.jpg", width, height))
         }
@@ -572,9 +581,12 @@ class BlackTapeDetectorInstrumentedTest {
                 width,
                 height,
                 onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
             )
 
-        assertTrue("recorded tape must establish the board colour", detections.first() != null)
+        assertTrue("recorded tape must establish the board colour", detections[2] != null)
         assertEquals(diagnostics.last(), null, detections.last())
         assertTrue(diagnostics.last(), BOARD_COLOR_REJECTION.containsMatchIn(diagnostics.last()))
     }
@@ -591,16 +603,42 @@ class BlackTapeDetectorInstrumentedTest {
 
         val detections =
             detectSequence(
-                listOf(idleScenery, flightBoard),
+                listOf(idleScenery, flightBoard, flightBoard, flightBoard),
                 width,
                 height,
                 onDiagnostics = diagnostics::add,
                 beforeFrame = { index, detector ->
-                    if (index == 1) detector.resetTracking()
+                    if (index == 1) detector.beginTrackingSession()
                 },
             )
 
         assertEquals(diagnostics.first(), null, detections.first())
+        assertTrue(diagnostics.joinToString("\n"), detections.slice(1..2).all { it == null })
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun oneWrongBoardCannotPoisonTrackingSessionAcquisition() {
+        val width = 640
+        val height = 360
+        val wrongBoard = rgbaFrame(width, height, red = 240, green = 150, blue = 20)
+        fillCurvedRibbon(wrongBoard, width, height, direction = 1.0, value = 20)
+        val flightBoard = rgbaFrame(width, height, red = 190, green = 132, blue = 58)
+        fillCurvedRibbon(flightBoard, width, height, direction = 1.0, value = 20)
+        val diagnostics = mutableListOf<String>()
+
+        val detections =
+            detectSequence(
+                listOf(wrongBoard, flightBoard, flightBoard, flightBoard),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections.take(3).all { it == null })
         assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
     }
 
@@ -808,13 +846,16 @@ class BlackTapeDetectorInstrumentedTest {
         val diagnostics = mutableListOf<String>()
         val detections =
             detectSequence(
-                listOf(cleanFrame, shadowFrame),
+                listOf(cleanFrame, cleanFrame, cleanFrame, shadowFrame),
                 width,
                 height,
                 onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
             )
-        val clean = checkNotNull(detections[0]) { diagnostics[0] }
-        val shadowed = checkNotNull(detections[1]) { diagnostics[1] }
+        val clean = checkNotNull(detections[2]) { diagnostics[2] }
+        val shadowed = checkNotNull(detections[3]) { diagnostics[3] }
         assertEquals(clean.anchorXFraction, shadowed.anchorXFraction, 0.04)
         assertEquals(clean.lookaheadX, shadowed.lookaheadX, 0.04)
     }

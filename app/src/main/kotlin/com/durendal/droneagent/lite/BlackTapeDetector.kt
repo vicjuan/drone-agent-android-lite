@@ -12,6 +12,7 @@ import org.opencv.imgproc.Imgproc
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.hypot
@@ -59,6 +60,10 @@ class BlackTapeDetector internal constructor(
     private var previousRouteStartYFraction: Double? = null
     private var boardReferenceA: Double? = null
     private var boardReferenceB: Double? = null
+    private var trackingSessionActive = false
+    private val boardReferenceAcquisitionSamples = ArrayList<BoardReferenceAcquisitionSample>()
+    @Volatile private var suppressResultsUntilSessionReady = false
+    @Volatile private var boardReferenceAcquisitionCount = 0
     @Volatile private var detectionMode = TapeDetectionMode.PATH
     private var consecutiveDetectionMisses = 0
     @Volatile private var lastOtsuThreshold = 0.0
@@ -149,7 +154,9 @@ class BlackTapeDetector internal constructor(
                 try {
                     val result = detect(frameBytes, width, height, now)
                     completedFrameCount.incrementAndGet()
-                    if (!closed.get()) onResult(result)
+                    if (!closed.get()) {
+                        onResult(if (suppressResultsUntilSessionReady) null else result)
+                    }
                 } catch (error: Throwable) {
                     failedFrameCount.incrementAndGet()
                     if (!closed.get()) onError(error)
@@ -189,21 +196,54 @@ class BlackTapeDetector internal constructor(
         resetTracking()
     }
 
+    /**
+     * Starts one flight-scoped detector session. Preview results never establish
+     * board colour; a session must first confirm the same steerable path across
+     * multiple frames before any result reaches the controller.
+     */
+    fun beginTrackingSession() {
+        if (closed.get()) return
+        suppressResultsUntilSessionReady = true
+        executeStateChange {
+            clearTrackingState()
+            trackingSessionActive = true
+            suppressResultsUntilSessionReady = false
+        }
+    }
+
+    /** Ends the flight-scoped session and returns the detector to stateless preview. */
+    fun endTrackingSession() {
+        if (closed.get()) return
+        suppressResultsUntilSessionReady = true
+        executeStateChange {
+            trackingSessionActive = false
+            clearTrackingState()
+            suppressResultsUntilSessionReady = false
+        }
+    }
+
     fun resetTracking() {
         if (closed.get()) return
+        executeStateChange(::clearTrackingState)
+    }
+
+    private fun executeStateChange(change: () -> Unit) {
         try {
-            worker.execute {
-                previousBounds = null
-                previousPathMedianWidthFraction = null
-                previousRouteStartXFraction = null
-                previousRouteStartYFraction = null
-                boardReferenceA = null
-                boardReferenceB = null
-                consecutiveDetectionMisses = 0
-            }
+            worker.execute(change)
         } catch (error: RuntimeException) {
             if (!closed.get()) onError(error)
         }
+    }
+
+    private fun clearTrackingState() {
+        previousBounds = null
+        previousPathMedianWidthFraction = null
+        previousRouteStartXFraction = null
+        previousRouteStartYFraction = null
+        boardReferenceA = null
+        boardReferenceB = null
+        consecutiveDetectionMisses = 0
+        clearBoardReferenceAcquisition()
     }
 
     fun diagnosticsSummary(): String {
@@ -219,7 +259,7 @@ class BlackTapeDetector internal constructor(
             }
         return (
             "frames=received:%d accepted:%d acceptedHz=%.2f throttle:%d busy:%d invalid:%d " +
-                "completed:%d failed:%d mode=%s frameMs=%.1f pathAxis=%s pathSamples=%d " +
+                "completed:%d failed:%d mode=%s acquire=%d/%d frameMs=%.1f pathAxis=%s pathSamples=%d " +
                 "pathCurve=%.1f pathSmooth=%.2f otsu=%.1f effective=%.1f separation=%.1f " +
                 "shadowPixels=%d contours=%d floorSeeds=%d floor=%.2f coverage=%.2f branches=%d " +
                 "region=%s candidate=[%s] arcReject=[%s] " +
@@ -236,6 +276,8 @@ class BlackTapeDetector internal constructor(
             completedFrameCount.get(),
             failedFrameCount.get(),
             lastDetectionMode,
+            boardReferenceAcquisitionCount,
+            BOARD_REFERENCE_ACQUISITION_SAMPLES,
             lastFrameMillis,
             lastPathAxis,
             lastPathSampleCount,
@@ -509,7 +551,9 @@ class BlackTapeDetector internal constructor(
                 return null
             }
             consecutiveDetectionMisses = 0
-            updateBoardReference(winner.boardColor)
+            if (trackingSessionActive && boardReferenceA == null) {
+                if (!acquireBoardReference(winner)) return null
+            }
             val rect = winner.bounds
             lastPathCurvatureDegrees = winner.totalPathTurnDegrees
             lastPathCurvatureSmoothness = winner.turnConsistency
@@ -522,6 +566,7 @@ class BlackTapeDetector internal constructor(
             return TapeDetection(
                 sourceWidth = width,
                 sourceHeight = height,
+                capturedAtNanos = frameNanos,
                 bounds = NormalizedRect(
                     left = rect.x.toDouble() / analysis.cols(),
                     top = rect.y.toDouble() / analysis.rows(),
@@ -1204,23 +1249,57 @@ class BlackTapeDetector internal constructor(
         )
     }
 
-    private fun updateBoardReference(context: BoardColorContext?) {
+    /**
+     * Establishes a board reference only from a stable, steerable path. A single
+     * candidate can be scenery, so it may seed confirmation but can never move
+     * the aircraft or define the session reference by itself.
+     */
+    private fun acquireBoardReference(candidate: Candidate): Boolean {
+        val boardColor = candidate.boardColor
+        val lookahead = candidate.lookahead
         if (
-            context == null ||
-            context.pairCount < MIN_BOARD_COLOR_PAIR_COUNT ||
-            context.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION
+            candidate.quality != PathQuality.FULL_PATH ||
+            lookahead == null ||
+            candidate.branchCount != 0 ||
+            candidate.anchorXFraction !in
+            ACQUISITION_MIN_ANCHOR_X..ACQUISITION_MAX_ANCHOR_X ||
+            candidate.anchorYFraction < ACQUISITION_MIN_ANCHOR_Y ||
+            candidate.longSideFraction < MIN_PATH_FRACTION ||
+            boardColor == null ||
+            boardColor.pairCount < MIN_BOARD_COLOR_PAIR_COUNT ||
+            boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION
         ) {
-            return
+            clearBoardReferenceAcquisition()
+            return false
         }
-        val previousA = boardReferenceA
-        val previousB = boardReferenceB
-        if (previousA == null || previousB == null) {
-            boardReferenceA = context.meanA
-            boardReferenceB = context.meanB
-            return
+
+        val sample = BoardReferenceAcquisitionSample(
+            anchorXFraction = candidate.anchorXFraction,
+            anchorYFraction = candidate.anchorYFraction,
+            angleFromVerticalDegrees = candidate.angleFromVerticalDegrees,
+            lookaheadXFraction = lookahead.xFraction,
+            lookaheadYFraction = lookahead.yFraction,
+            boardA = boardColor.meanA,
+            boardB = boardColor.meanB,
+        )
+        val previous = boardReferenceAcquisitionSamples.lastOrNull()
+        if (previous != null && !previous.isConsistentWith(sample)) {
+            clearBoardReferenceAcquisition()
         }
-        boardReferenceA = previousA + BOARD_REFERENCE_FILTER_ALPHA * (context.meanA - previousA)
-        boardReferenceB = previousB + BOARD_REFERENCE_FILTER_ALPHA * (context.meanB - previousB)
+        boardReferenceAcquisitionSamples += sample
+        boardReferenceAcquisitionCount = boardReferenceAcquisitionSamples.size
+        if (boardReferenceAcquisitionSamples.size < BOARD_REFERENCE_ACQUISITION_SAMPLES) {
+            return false
+        }
+
+        boardReferenceA = boardReferenceAcquisitionSamples.map { it.boardA }.sorted()[1]
+        boardReferenceB = boardReferenceAcquisitionSamples.map { it.boardB }.sorted()[1]
+        return true
+    }
+
+    private fun clearBoardReferenceAcquisition() {
+        boardReferenceAcquisitionSamples.clear()
+        boardReferenceAcquisitionCount = 0
     }
 
 
@@ -1353,6 +1432,11 @@ class BlackTapeDetector internal constructor(
             previousPathMedianWidthFraction = null
             previousRouteStartXFraction = null
             previousRouteStartYFraction = null
+            if (trackingSessionActive) {
+                boardReferenceA = null
+                boardReferenceB = null
+                clearBoardReferenceAcquisition()
+            }
         }
     }
 
@@ -1412,6 +1496,27 @@ class BlackTapeDetector internal constructor(
         val meanB: Double,
         val referenceDistance: Double?,
     )
+    private data class BoardReferenceAcquisitionSample(
+        val anchorXFraction: Double,
+        val anchorYFraction: Double,
+        val angleFromVerticalDegrees: Double,
+        val lookaheadXFraction: Double,
+        val lookaheadYFraction: Double,
+        val boardA: Double,
+        val boardB: Double,
+    ) {
+        fun isConsistentWith(other: BoardReferenceAcquisitionSample): Boolean =
+            abs(anchorXFraction - other.anchorXFraction) <= MAX_ACQUISITION_ANCHOR_STEP &&
+                abs(anchorYFraction - other.anchorYFraction) <= MAX_ACQUISITION_ANCHOR_STEP &&
+                abs(angleFromVerticalDegrees - other.angleFromVerticalDegrees) <=
+                MAX_ACQUISITION_ANGLE_STEP_DEGREES &&
+                abs(lookaheadXFraction - other.lookaheadXFraction) <=
+                MAX_ACQUISITION_LOOKAHEAD_STEP &&
+                abs(lookaheadYFraction - other.lookaheadYFraction) <=
+                MAX_ACQUISITION_LOOKAHEAD_STEP &&
+                hypot(boardA - other.boardA, boardB - other.boardB) <=
+                MAX_ACQUISITION_BOARD_CHROMA_STEP
+    }
 
 
     private companion object {
@@ -1434,10 +1539,19 @@ class BlackTapeDetector internal constructor(
         const val MAX_BOARD_SIDE_CHROMA_DISTANCE = 24.0
         const val MIN_BOARD_COLOR_PAIR_FRACTION = 0.70
         const val MAX_BOARD_REFERENCE_CHROMA_DISTANCE = 20.0
-        const val BOARD_REFERENCE_FILTER_ALPHA = 0.15
+        const val BOARD_REFERENCE_ACQUISITION_SAMPLES = 3
+        const val ACQUISITION_MIN_ANCHOR_X = 0.15
+        const val ACQUISITION_MAX_ANCHOR_X = 0.85
+        const val ACQUISITION_MIN_ANCHOR_Y = 0.55
+        const val MAX_ACQUISITION_ANCHOR_STEP = 0.10
+        const val MAX_ACQUISITION_LOOKAHEAD_STEP = 0.12
+        const val MAX_ACQUISITION_ANGLE_STEP_DEGREES = 20.0
+        const val MAX_ACQUISITION_BOARD_CHROMA_STEP = 12.0
         const val MAX_ANALYSIS_DIMENSION = 640.0
-        // At 0.24 m/s, 10 Hz limits open-loop travel between observations to about 2.4 cm.
-        const val FRAME_INTERVAL_NANOS = 100_000_000L
+        // Pixel 8 Pro flight evidence measured 40-100 ms analysis time. A 50 ms admission
+        // window lets the single worker accept the next callback as soon as it is free,
+        // instead of adding a second 100 ms throttle after every completed frame.
+        const val FRAME_INTERVAL_NANOS = 50_000_000L
         private const val NANOS_PER_SECOND = 1_000_000_000.0
         const val SURROUND_SCALE = 0.35
         const val SIDE_CONTEXT_SCALE = 0.35

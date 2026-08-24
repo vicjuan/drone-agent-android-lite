@@ -7,7 +7,7 @@ internal const val OBSTACLE_NOT_DETECTED_MM = 60_000
 internal const val MANUAL_HORIZONTAL_CLEARANCE_MM = 150
 internal const val MAX_MANUAL_OBSTACLE_SAMPLE_AGE_MS = 500L
 
-/** Emergency stop distance for autonomous motion up to 0.24 m/s. */
+/** Configured emergency-stop distance for autonomous motion. */
 internal const val AUTONOMOUS_HORIZONTAL_CLEARANCE_MM = 500
 
 

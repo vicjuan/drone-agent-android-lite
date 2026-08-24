@@ -175,9 +175,13 @@ class VirtualStickSession(
         commandedClimbMetersPerSecond = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
     }
 
-    /** Yaw-only command for a closed-loop turn; positive is clockwise. */
+    /** Yaw command for autonomous closed-loop motion; positive is clockwise. */
     fun setYawRate(degreesPerSecond: Double) {
-        commandedYawDegreesPerSecond = degreesPerSecond.coerceIn(-MAX_YAW_DEGREES_PER_SECOND, MAX_YAW_DEGREES_PER_SECOND)
+        commandedYawDegreesPerSecond =
+            degreesPerSecond.coerceIn(
+                -AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
+                AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
+            )
     }
 
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
@@ -191,8 +195,16 @@ class VirtualStickSession(
         forwardMetersPerSecond: Double,
         rightMetersPerSecond: Double,
     ) {
-        commandedForwardMetersPerSecond = forwardMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
-        commandedRightMetersPerSecond = rightMetersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        commandedForwardMetersPerSecond =
+            forwardMetersPerSecond.coerceIn(
+                -AUTONOMOUS_MAX_HORIZONTAL_MPS,
+                AUTONOMOUS_MAX_HORIZONTAL_MPS,
+            )
+        commandedRightMetersPerSecond =
+            rightMetersPerSecond.coerceIn(
+                -AUTONOMOUS_MAX_HORIZONTAL_MPS,
+                AUTONOMOUS_MAX_HORIZONTAL_MPS,
+            )
     }
 
 
@@ -286,6 +298,10 @@ class VirtualStickSession(
         const val MAX_HORIZONTAL_MPS = 0.5
         const val MAX_VERTICAL_MPS = 0.3
         const val MAX_YAW_DEGREES_PER_SECOND = 20.0
+
+        /** Separate ceiling for measured autonomous experiments; manual controls stay gentle. */
+        const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 1.0
+        const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 60.0
 
         private const val TAG = "LiteVirtualStick"
     }

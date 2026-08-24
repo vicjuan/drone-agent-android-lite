@@ -21,6 +21,7 @@ import dji.sdk.keyvalue.key.FlightControllerKey
 import dji.sdk.keyvalue.key.KeyTools
 import dji.sdk.keyvalue.value.common.Attitude
 import dji.sdk.keyvalue.value.common.EmptyMsg
+import dji.sdk.keyvalue.value.common.Velocity3D
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
@@ -31,6 +32,8 @@ import dji.v5.manager.aircraft.perception.listener.ObstacleDataListener
 import dji.v5.manager.interfaces.SDKManagerCallback
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.hypot
 
 /**
  * Minimal DJI Mini 4 Pro takeoff / landing / virtual-stick demo.
@@ -79,7 +82,10 @@ class MainActivity : Activity() {
     private lateinit var captureButton: PillButton
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
-    private lateinit var quarterArcButton: PillButton
+    private lateinit var slowCircularTapeTrackingButton: PillButton
+    private lateinit var fixedHeadingLapButton: PillButton
+    private lateinit var slowFixedHeadingLapButton: PillButton
+    private lateinit var yawCapabilityTestButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
     private lateinit var gimbalPad: StickPadView
@@ -148,10 +154,19 @@ class MainActivity : Activity() {
     /** Latest aircraft yaw and one operator-requested directed half-turn. */
     private var aircraftHeadingDegrees: Double? = null
     private var aircraftHeadingAtNanos = 0L
+    private var fixedHeadingReferenceDegrees: Double? = null
+    /** Earth-frame horizontal velocity used to verify and disambiguate fixed-heading travel. */
+    private var aircraftVelocityX = 0.0
+    private var aircraftVelocityY = 0.0
+    private var aircraftVelocityZ = 0.0
+    private var aircraftVelocityAtNanos = 0L
+    private var groundSpeedMetersPerSecond = 0.0
     private var headingTurn: HeadingTurn? = null
     private var turnStartedAtNanos = 0L
     private var turnCommandStartedAtNanos = 0L
     private var turnAuthoritySeen = false
+    private var yawCapabilityTestActive = false
+    private var turnLastRenderedAtNanos = 0L
 
     /** Camera-independent 0.75 m radius clockwise quarter-arc experiment. */
     private var quarterArcController: QuarterArcController? = null
@@ -163,6 +178,7 @@ class MainActivity : Activity() {
     private var gimbalActive = false
     private var selectedCameraPitchDegrees: Double? = null
     private var captureRecorder: TapeCaptureRecorder? = null
+    private var captureAutoArmedByTracking = false
     private var cameraPitchCommandPending = false
     private var cameraPitchCommandGeneration = 0L
     private val cameraPitchCommandTimeoutRunnable = Runnable {
@@ -185,8 +201,11 @@ class MainActivity : Activity() {
     private var tapeEndpointTurn = false
     private var tapeCommandLoggedAtNanos = 0L
     private var activeTapeTrackingMode: TapeTrackingMode? = null
+    private var activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+    private var activeFixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST
 
 
+    private val diagnosticLapTimer = LapTimer()
 
     /** Raw KeyUltrasonicHeight, logged for unit identification; never drives the loop yet. */
     private var ultrasonicRaw: Int? = null
@@ -209,6 +228,19 @@ class MainActivity : Activity() {
     private var holdStatus = ""
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val autoCaptureDisarmRunnable = Runnable {
+        val recorder = captureRecorder
+        if (!captureAutoArmedByTracking || tapeTracking.enabled || recorder == null) {
+            return@Runnable
+        }
+        recorder.disarm()
+        captureAutoArmedByTracking = false
+        if (::captureButton.isInitialized) captureButton.text = "錄製影格證據"
+        flightLog.write(
+            "automatic tape capture stopped saved=${recorder.savedCaptureCount} " +
+                "dropped=${recorder.droppedCaptureCount} failed=${recorder.failedCaptureCount}",
+        )
+    }
     private val virtualStick = VirtualStickSession(
         onStatus = ::handleVirtualStickStatus,
         onFrameSummary = { summary -> flightLog.write(summary) },
@@ -226,6 +258,9 @@ class MainActivity : Activity() {
             } else if (tapeTrackingAuthoritySeen) {
                 stopTapeTracking("實體遙控器已接管，黑膠帶追蹤已停止", release = false)
             }
+        }
+        if (headingTurn != null) {
+            driveHeadingTurn()
         }
         if (quarterArcController != null) {
             if (status.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER) {
@@ -369,9 +404,13 @@ class MainActivity : Activity() {
                         closedLoop = it.closedLoop,
                         frameWidthPixels = it.sourceWidth,
                         frameHeightPixels = it.sourceHeight,
+                        capturedAtNanos = it.capturedAtNanos,
                         heightAboveGroundMeters = usableHeightMeters()?.takeIf { height ->
                             height.isFinite() && height > 0.0
                         },
+                        confidence = it.confidence,
+                        centerline = it.centerline,
+                        actualTravelDirectionDegrees = usableBodyTravelDirectionDegrees(now),
                     )
                 },
                 now,
@@ -420,7 +459,7 @@ class MainActivity : Activity() {
             commandedTapeForwardSpeed = 0.0
             commandedTapeRightSpeed = 0.0
             virtualStick.setYawRate(0.0)
-            virtualStick.setForwardOnly(0.0)
+            virtualStick.setHorizontalVelocity(0.0, 0.0)
         }
         flightLog.write("RGBA frame stream stale; detector reset")
         runOnUiThread {
@@ -481,30 +520,45 @@ class MainActivity : Activity() {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.START
         circularTapeTrackingButton =
-            PillButton("圓形黑膠帶追蹤", StickPadView.CYAN) { toggleCircularTapeTracking() }
+            PillButton("方案 C：切線高速循跡", StickPadView.CYAN) {
+                toggleCircularTapeTracking()
+            }
+        slowCircularTapeTrackingButton =
+            PillButton("低速完整圈・0.20 m/s", StickPadView.AMBER) {
+                toggleSlowCircularTapeTracking()
+            }
+        fixedHeadingLapButton =
+            PillButton("方案 B：定向滑行循跡", StickPadView.GREEN) {
+                toggleFixedHeadingLap()
+            }
+        slowFixedHeadingLapButton =
+            PillButton("低速定向滑行・0.20 m/s", StickPadView.AMBER) {
+                toggleSlowFixedHeadingLap()
+            }
+        yawCapabilityTestButton =
+            PillButton("原地 360°・50°/秒", StickPadView.AMBER) {
+                toggleYawCapabilityTest()
+            }
         curvedOutAndBackTrackingButton =
             PillButton("弧形往返追蹤", StickPadView.GREEN) { toggleCurvedOutAndBackTracking() }
-        quarterArcButton =
-            PillButton("無視覺右轉 1/4 圈", StickPadView.AMBER) { toggleQuarterArc() }
         captureButton = PillButton("錄製影格證據", StickPadView.AMBER) { toggleFrameCapture() }
         addView(
             LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
+                addView(slowCircularTapeTrackingButton, actionParams(marginEnd = dp(10)))
                 addView(circularTapeTrackingButton, actionParams(marginEnd = dp(10)))
+                addView(fixedHeadingLapButton, actionParams(marginEnd = dp(10)))
+                addView(slowFixedHeadingLapButton, actionParams(marginEnd = dp(10)))
+                addView(yawCapabilityTestButton, actionParams(marginEnd = dp(10)))
                 addView(curvedOutAndBackTrackingButton, actionParams(marginEnd = dp(10)))
                 addView(captureButton, actionParams())
             },
         )
-        addView(
-            quarterArcButton,
-            actionParams(marginStart = dp(190), marginTop = dp(16)),
-        )
     }
 
     /**
-     * Arms or disarms replayable frame capture. Only the operator turns this on:
-     * it retains several full-resolution frames and writes them to storage, and
-     * the evidence is only worth keeping around a run the operator is watching.
+     * Manual capture remains available for arbitrary experiments. Schemes B and
+     * C arm the same recorder automatically when their flight control actually starts.
      */
     private fun toggleFrameCapture() {
         val recorder = captureRecorder
@@ -512,6 +566,8 @@ class MainActivity : Activity() {
             render("影格證據儲存無法使用")
             return
         }
+        mainHandler.removeCallbacks(autoCaptureDisarmRunnable)
+        captureAutoArmedByTracking = false
         if (recorder.isArmed) {
             recorder.disarm()
             captureButton.text = "錄製影格證據"
@@ -534,6 +590,30 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun armFrameCaptureFor(mode: TapeTrackingMode) {
+        if (!mode.automaticallyCapturesEvidence) return
+        val recorder = captureRecorder
+        if (recorder == null) {
+            flightLog.write("automatic tape capture unavailable mode=$mode")
+            return
+        }
+        mainHandler.removeCallbacks(autoCaptureDisarmRunnable)
+        if (captureAutoArmedByTracking && recorder.isArmed) {
+            // A rapid restart is a new run: never mix its leading window with
+            // frames retained for the previous run.
+            recorder.disarm()
+            captureAutoArmedByTracking = false
+        }
+        if (!recorder.isArmed) {
+            recorder.arm()
+            captureAutoArmedByTracking = true
+            captureButton.text = "停止錄製影格"
+            flightLog.write("automatic tape capture armed mode=$mode")
+        } else {
+            flightLog.write("automatic tape capture using operator-armed recorder mode=$mode")
+        }
+    }
+
     /**
      * Flight state a capture cannot reconstruct from the frame itself. Camera
      * pitch is the commanded-and-accepted value, so a capture taken while a
@@ -546,6 +626,8 @@ class MainActivity : Activity() {
         "aircraft.headingDegrees" to (aircraftHeadingDegrees?.toString() ?: "unknown"),
         "aircraft.flying" to flying.toString(),
         "tracking.mode" to (activeTapeTrackingMode?.name ?: "off"),
+        "tracking.circularSpeed" to activeCircularTrackingSpeed.name,
+        "tracking.fixedHeadingSpeed" to activeFixedHeadingTrackingSpeed.name,
         "tracking.phase" to renderedTapeTrackingPhase.name,
     )
 
@@ -706,29 +788,79 @@ class MainActivity : Activity() {
     }
 
     private fun toggleCircularTapeTracking() {
-        toggleTapeTracking(TapeTrackingMode.CIRCULAR)
+        toggleTapeTracking(TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.FAST)
+    }
+
+    private fun toggleSlowCircularTapeTracking() {
+        toggleTapeTracking(TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.SLOW)
+    }
+
+    private fun toggleFixedHeadingLap() {
+        toggleTapeTracking(
+            TapeTrackingMode.FIXED_HEADING,
+            fixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST,
+        )
+    }
+
+    private fun toggleSlowFixedHeadingLap() {
+        toggleTapeTracking(
+            TapeTrackingMode.FIXED_HEADING,
+            fixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.SLOW,
+        )
     }
 
     private fun toggleCurvedOutAndBackTracking() {
         toggleTapeTracking(TapeTrackingMode.CURVED_OUT_AND_BACK)
     }
 
-    private fun toggleTapeTracking(mode: TapeTrackingMode) {
+    private fun toggleTapeTracking(
+        mode: TapeTrackingMode,
+        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
+        fixedHeadingTrackingSpeed: FixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST,
+    ) {
+        val sameSpeed =
+            when (mode) {
+                TapeTrackingMode.CIRCULAR ->
+                    activeCircularTrackingSpeed == circularTrackingSpeed
+                TapeTrackingMode.FIXED_HEADING ->
+                    activeFixedHeadingTrackingSpeed == fixedHeadingTrackingSpeed
+                else -> true
+            }
+        val sameRun = activeTapeTrackingMode == mode && sameSpeed
         when {
-            tapeTracking.enabled && activeTapeTrackingMode == mode ->
-                stopTapeTracking("${tapeTrackingName(mode)}已由操作者停止", release = true)
+            tapeTracking.enabled && sameRun ->
+                stopTapeTracking(
+                    "${
+                        tapeTrackingName(
+                            mode,
+                            circularTrackingSpeed,
+                            fixedHeadingTrackingSpeed,
+                        )
+                    }已由操作者停止",
+                    release = true,
+                )
             tapeTracking.enabled -> render("另一個黑膠帶追蹤模式正在使用中")
             tapeTrackingStartPending -> render("正在切換飛機避障模式，請稍候")
-            else -> startTapeTracking(mode)
+            else ->
+                startTapeTracking(
+                    mode,
+                    circularTrackingSpeed,
+                    fixedHeadingTrackingSpeed,
+                )
         }
     }
 
-
-    private fun startTapeTracking(mode: TapeTrackingMode) {
-        val trackingName = tapeTrackingName(mode)
+    private fun startTapeTracking(
+        mode: TapeTrackingMode,
+        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
+        fixedHeadingTrackingSpeed: FixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST,
+    ) {
+        val trackingName =
+            tapeTrackingName(mode, circularTrackingSpeed, fixedHeadingTrackingSpeed)
         flightLog.write(
-            "press: tape tracking mode=$mode registered=$registered connected=$aircraftConnected " +
-                "flying=$flying owned=$stickOwned cameraPitch=" +
+            "press: tape tracking mode=$mode circularSpeed=$circularTrackingSpeed " +
+                "fixedHeadingSpeed=$fixedHeadingTrackingSpeed registered=$registered " +
+                "connected=$aircraftConnected flying=$flying owned=$stickOwned cameraPitch=" +
                 (selectedCameraPitchDegrees?.let { "%.0f".format(it) } ?: "unknown"),
         )
         if (!registered || !aircraftConnected || !flying) {
@@ -762,6 +894,8 @@ class MainActivity : Activity() {
         }
         mainHandler.removeCallbacks(idleReleaseRunnable)
         activeTapeTrackingMode = mode
+        activeCircularTrackingSpeed = circularTrackingSpeed
+        activeFixedHeadingTrackingSpeed = fixedHeadingTrackingSpeed
         tapeTrackingStartPending = true
         render("$trackingName：正在關閉飛機避障…")
         avoidanceCheck.ensureClosed { status ->
@@ -778,6 +912,8 @@ class MainActivity : Activity() {
                     flightLog.write("tape tracking avoidance ${status.summary} detail=${status.detail}")
                     if (!status.closedConfirmed) {
                         activeTapeTrackingMode = null
+                        activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+                        activeFixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST
                         render(status.detail?.let { "無法關閉飛機避障：$it" } ?: "無法確認飛機避障已關閉")
                         readAvoidanceConfiguration()
                         return@runOnUiThread
@@ -800,14 +936,38 @@ class MainActivity : Activity() {
                                 TapeDetectionMode.STRAIGHT
                             },
                         )
-                        // The idle preview may have accepted scenery before takeoff.
-                        // A flight session must learn its board from the current route.
-                        tapeDetector?.resetTracking()
+                        // Preview is stateless. Flight control receives no path until
+                        // the detector confirms one full route across multiple frames.
+                        tapeDetector?.beginTrackingSession()
                         val now = System.nanoTime()
+                        if (mode == TapeTrackingMode.FIXED_HEADING) {
+                            val heading = aircraftHeadingDegrees
+                            if (
+                                heading == null ||
+                                aircraftHeadingAtNanos == 0L ||
+                                now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+                            ) {
+                                stopTapeTracking(
+                                    "沒有即時機頭方向，方案 B 未啟動",
+                                    release = true,
+                                )
+                                return@acquireControlLink
+                            }
+                            fixedHeadingReferenceDegrees = heading
+                        }
                         // The circular experiment uses a physically closed loop. Curved
                         // out-and-back tracking uses the same path detector with its endpoint armed.
-                        val endpointTurnEnabled = mode != TapeTrackingMode.CIRCULAR
-                        tapeTracking.start(now, mode, endpointTurnEnabled)
+                        val endpointTurnEnabled =
+                            mode != TapeTrackingMode.CIRCULAR &&
+                                mode != TapeTrackingMode.FIXED_HEADING
+                        tapeTracking.start(
+                            nowNanos = now,
+                            mode = mode,
+                            endpointTurnEnabled = endpointTurnEnabled,
+                            circularTrackingSpeed = circularTrackingSpeed,
+                            fixedHeadingTrackingSpeed = fixedHeadingTrackingSpeed,
+                        )
+                        armFrameCaptureFor(mode)
                         tapeTrackingStartedAtNanos = now
                         tapeTrackingAuthoritySeen =
                             stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
@@ -815,18 +975,36 @@ class MainActivity : Activity() {
                         commandedTapeYawRate = 0.0
                         commandedTapeForwardSpeed = 0.0
                         commandedTapeRightSpeed = 0.0
+                        diagnosticLapTimer.reset()
                         tapeCommandLoggedAtNanos = 0L
                         when (mode) {
                             TapeTrackingMode.STRAIGHT ->
                                 tapeTrackingButton.text = "停止直線黑膠帶追蹤"
-                            TapeTrackingMode.CIRCULAR ->
-                                circularTapeTrackingButton.text = "停止圓形黑膠帶追蹤"
+                            TapeTrackingMode.CIRCULAR -> {
+                                if (circularTrackingSpeed == CircularTrackingSpeed.SLOW) {
+                                    slowCircularTapeTrackingButton.text = "停止低速完整圈"
+                                } else {
+                                    circularTapeTrackingButton.text = "停止方案 C：切線高速循跡"
+                                }
+                            }
+                            TapeTrackingMode.FIXED_HEADING -> {
+                                if (
+                                    fixedHeadingTrackingSpeed ==
+                                    FixedHeadingTrackingSpeed.SLOW
+                                ) {
+                                    slowFixedHeadingLapButton.text = "停止低速定向滑行"
+                                } else {
+                                    fixedHeadingLapButton.text = "停止方案 B：定向滑行循跡"
+                                }
+                            }
                             TapeTrackingMode.CURVED_OUT_AND_BACK ->
                                 curvedOutAndBackTrackingButton.text = "停止弧形往返追蹤"
                         }
                         flightLog.write(
-                            "tape tracking started mode=$mode avoidance=CLOSE " +
-                                "endpointTurnEnabled=$endpointTurnEnabled",
+                            "tape tracking started mode=$mode " +
+                                "circularSpeed=$circularTrackingSpeed " +
+                                "fixedHeadingSpeed=$fixedHeadingTrackingSpeed " +
+                                "avoidance=CLOSE endpointTurnEnabled=$endpointTurnEnabled",
                         )
                         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
                         mainHandler.post(tapeTrackingTickRunnable)
@@ -850,7 +1028,7 @@ class MainActivity : Activity() {
                 tapeTrackingAuthoritySeen = true
             } else {
                 virtualStick.setYawRate(0.0)
-                virtualStick.setForwardOnly(0.0)
+                virtualStick.setHorizontalVelocity(0.0, 0.0)
                 if (
                     tapeTrackingAuthoritySeen ||
                     now - tapeTrackingStartedAtNanos >= AUTHORITY_HANDOVER_TIMEOUT_NANOS
@@ -860,21 +1038,82 @@ class MainActivity : Activity() {
                 }
             }
 
+            val fixedHeadingYawRate =
+                if (activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING && ownsAuthority) {
+                    val currentHeading = aircraftHeadingDegrees
+                    val referenceHeading = fixedHeadingReferenceDegrees
+                    if (
+                        currentHeading == null ||
+                        referenceHeading == null ||
+                        aircraftHeadingAtNanos == 0L ||
+                        now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+                    ) {
+                        stopTapeTracking("機頭方向資料停止更新，方案 B 已停止", release = true)
+                        return
+                    }
+                    fixedHeadingHoldYawRate(currentHeading, referenceHeading)
+                } else {
+                    null
+                }
 
             val decision = tapeTracking.tick(now)
-            if (decision.stopRequested) {
-                stopTapeTracking("末端確認逾時，黑膠帶追蹤已停止", release = true)
-                return
-            }
             if (decision.endpointReached) {
-                beginTapeTurnaround()
+                if (activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING) {
+                    stopTapeTracking("方案 B 已抵達黑膠帶終點", release = true)
+                } else {
+                    beginTapeTurnaround()
+                }
                 return
             }
-            val yawRate = if (ownsAuthority) decision.yawRateDegreesPerSecond else 0.0
+            if (decision.stopRequested) {
+                val reason =
+                    when (activeTapeTrackingMode) {
+                        TapeTrackingMode.FIXED_HEADING ->
+                            "方案 B 失去有效路徑或取得逾時，已停止"
+                        TapeTrackingMode.CIRCULAR ->
+                            "方案 C 路徑偏離或影格失效，已停止"
+                        else ->
+                            "末端確認逾時，黑膠帶追蹤已停止"
+                    }
+                stopTapeTracking(reason, release = true)
+                return
+            }
+            val yawRate =
+                if (ownsAuthority) {
+                    fixedHeadingYawRate ?: decision.yawRateDegreesPerSecond
+                } else {
+                    0.0
+                }
             val requestedForwardSpeed =
                 if (ownsAuthority) decision.forwardSpeedMetersPerSecond else 0.0
             val requestedRightSpeed =
                 if (ownsAuthority) decision.rightSpeedMetersPerSecond else 0.0
+            val lapAngle = when (activeTapeTrackingMode) {
+                TapeTrackingMode.CIRCULAR -> aircraftHeadingDegrees
+                TapeTrackingMode.FIXED_HEADING -> decision.controlledAngleDegrees
+                else -> null
+            }
+            if (
+                decision.phase == TapeTrackingPhase.TRACKING &&
+                lapAngle != null &&
+                !diagnosticLapTimer.armed
+            ) {
+                diagnosticLapTimer.arm(now, lapAngle)
+                flightLog.write(
+                    "diagnostic lap timer armed mode=$activeTapeTrackingMode angle=%.1f".format(lapAngle),
+                )
+            }
+            lapAngle?.let { angle ->
+                diagnosticLapTimer.update(now, angle)?.let { event ->
+                    flightLog.write(
+                        "diagnostic lap mode=$activeTapeTrackingMode n=${event.lapIndex} " +
+                            "seconds=%.2f meanGs=%.2f".format(
+                                event.lapSeconds,
+                                groundSpeedMetersPerSecond,
+                            ),
+                    )
+                }
+            }
             if (requestedForwardSpeed != 0.0 || requestedRightSpeed != 0.0) {
                 tapeTrackingStopReason()?.let { reason ->
                     stopTapeTracking(reason, release = true)
@@ -896,17 +1135,24 @@ class MainActivity : Activity() {
                 if (stopped || now - tapeCommandLoggedAtNanos >= TAPE_COMMAND_LOG_PERIOD_NANOS) {
                     tapeCommandLoggedAtNanos = now
                     flightLog.write(
-                        "tape tracking rawAngle=${decision.rawAngleDegrees.logNumber(1)} " +
-                            "angle=${decision.controlledAngleDegrees.logNumber(1)} " +
-                            "rawOffset=${decision.rawOffsetFraction.logNumber(3)} " +
-                            "offset=${decision.controlledOffsetFraction.logNumber(3)} " +
-                            "offsetRate=%+.3f ppYaw=%+.1f yaw=%+.1f forward=%.2f right=%+.2f phase=${decision.phase}".format(
-                                decision.offsetRatePerSecond,
-                                decision.purePursuitYawRateDegreesPerSecond,
-                                yawRate,
-                                requestedForwardSpeed,
-                                requestedRightSpeed,
-                            ),
+                        (
+                            "tape tracking mode=$activeTapeTrackingMode " +
+                                "rawAngle=${decision.rawAngleDegrees.logNumber(1)} " +
+                                "angle=${decision.controlledAngleDegrees.logNumber(1)} " +
+                                "rawOffset=${decision.rawOffsetFraction.logNumber(3)} " +
+                                "offset=${decision.controlledOffsetFraction.logNumber(3)} " +
+                                "offsetRate=%+.3f ppYaw=%+.1f yaw=%+.1f " +
+                                "forward=%.2f right=%+.2f gs=%.2f " +
+                                "travel=${usableBodyTravelDirectionDegrees(now).logNumber(1)} " +
+                                "phase=${decision.phase}"
+                            ).format(
+                            decision.offsetRatePerSecond,
+                            decision.purePursuitYawRateDegreesPerSecond,
+                            yawRate,
+                            requestedForwardSpeed,
+                            requestedRightSpeed,
+                            groundSpeedMetersPerSecond,
+                        ),
                     )
                 }
             }
@@ -950,9 +1196,25 @@ class MainActivity : Activity() {
 
 
 
-    private fun tapeTrackingName(mode: TapeTrackingMode? = activeTapeTrackingMode): String =
+    private fun tapeTrackingName(
+        mode: TapeTrackingMode? = activeTapeTrackingMode,
+        circularTrackingSpeed: CircularTrackingSpeed = activeCircularTrackingSpeed,
+        fixedHeadingTrackingSpeed: FixedHeadingTrackingSpeed =
+            activeFixedHeadingTrackingSpeed,
+    ): String =
         when (mode) {
-            TapeTrackingMode.CIRCULAR -> "圓形黑膠帶追蹤"
+            TapeTrackingMode.CIRCULAR ->
+                if (circularTrackingSpeed == CircularTrackingSpeed.SLOW) {
+                    "低速完整圈・0.20 m/s"
+                } else {
+                    "方案 C：切線高速循跡"
+                }
+            TapeTrackingMode.FIXED_HEADING ->
+                if (fixedHeadingTrackingSpeed == FixedHeadingTrackingSpeed.SLOW) {
+                    "低速定向滑行・0.20 m/s"
+                } else {
+                    "方案 B：定向滑行循跡"
+                }
             TapeTrackingMode.CURVED_OUT_AND_BACK -> "弧形往返追蹤"
             else -> "直線黑膠帶追蹤"
         }
@@ -970,7 +1232,7 @@ class MainActivity : Activity() {
             return
         }
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
-        virtualStick.setForwardOnly(0.0)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setYawRate(0.0)
         commandedTapeForwardSpeed = 0.0
         commandedTapeYawRate = 0.0
@@ -1002,22 +1264,46 @@ class MainActivity : Activity() {
         }
         tapeTracking.stop()
         tapeDetector?.setDetectionMode(TapeDetectionMode.PATH)
-        tapeDetector?.resetTracking()
+        tapeDetector?.endTrackingSession()
         tapeTrackingStartPending = false
         mainHandler.removeCallbacks(tapeTrackingTickRunnable)
         virtualStick.setYawRate(0.0)
-        virtualStick.setForwardOnly(0.0)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
         commandedTapeYawRate = 0.0
         commandedTapeForwardSpeed = 0.0
         commandedTapeRightSpeed = 0.0
         tapeTrackingAuthoritySeen = false
         tapeTrackingStartedAtNanos = 0L
+        fixedHeadingReferenceDegrees = null
+        if (captureAutoArmedByTracking) {
+            mainHandler.removeCallbacks(autoCaptureDisarmRunnable)
+            mainHandler.postDelayed(
+                autoCaptureDisarmRunnable,
+                AUTO_CAPTURE_DISARM_DELAY_MS,
+            )
+            flightLog.write(
+                "automatic tape capture trailing window scheduled delayMs=" +
+                    AUTO_CAPTURE_DISARM_DELAY_MS,
+            )
+        }
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
         tapeCommandLoggedAtNanos = 0L
         activeTapeTrackingMode = null
+        activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+        activeFixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST
         if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "直線黑膠帶追蹤"
         if (::circularTapeTrackingButton.isInitialized) {
-            circularTapeTrackingButton.text = "圓形黑膠帶追蹤"
+            circularTapeTrackingButton.text = "方案 C：切線高速循跡"
+        }
+        if (::slowCircularTapeTrackingButton.isInitialized) {
+            slowCircularTapeTrackingButton.text = "低速完整圈・0.20 m/s"
+        }
+        diagnosticLapTimer.reset()
+        if (::fixedHeadingLapButton.isInitialized) {
+            fixedHeadingLapButton.text = "方案 B：定向滑行循跡"
+        }
+        if (::slowFixedHeadingLapButton.isInitialized) {
+            slowFixedHeadingLapButton.text = "低速定向滑行・0.20 m/s"
         }
         if (::curvedOutAndBackTrackingButton.isInitialized) {
             curvedOutAndBackTrackingButton.text = "弧形往返追蹤"
@@ -1069,6 +1355,9 @@ class MainActivity : Activity() {
         if (isDeflected && quarterArcController != null) {
             finishQuarterArc("畫面搖桿已接管，無視覺 1/4 圈已停止", release = false)
         }
+        if (isDeflected && yawCapabilityTestActive) {
+            finishHeadingTurn("畫面搖桿已接管，原地 360° yaw 測試已停止", release = false)
+        }
         val horizontalStopReason =
             if (side == StickSide.RIGHT && isDeflected) {
                 horizontalActuationStopReason()
@@ -1100,7 +1389,10 @@ class MainActivity : Activity() {
             flightLog.write("height target cancelled by operator stick input")
             finishHeightHold("操作者接管升降，定高已取消", release = false)
         }
-        if (side == StickSide.LEFT && (x != 0.0 || y != 0.0) && headingTurn != null) {
+        if (
+            side == StickSide.LEFT && (x != 0.0 || y != 0.0) &&
+            headingTurn != null && !yawCapabilityTestActive
+        ) {
             finishHeadingTurn("操作者接管旋轉，180° 旋轉已取消", release = false)
         }
         virtualStick.setStick(side, x, y)
@@ -1172,6 +1464,10 @@ class MainActivity : Activity() {
         landButton.available = ready && flying
         val turning = headingTurn != null
         val quarterArcActive = quarterArcController != null
+        yawCapabilityTestButton.available =
+            yawCapabilityTestActive ||
+                (!turning && !quarterArcActive && !holdingHeight && !tapeTracking.enabled &&
+                    ready && flying)
         val heightButtonAvailable =
             ready && flying && !holdingHeight && !turning && !quarterArcActive &&
                 !tapeTracking.enabled
@@ -1185,15 +1481,37 @@ class MainActivity : Activity() {
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         circularTapeTrackingButton.available =
-            (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.CIRCULAR) ||
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.CIRCULAR &&
+                    activeCircularTrackingSpeed == CircularTrackingSpeed.FAST
+                ) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        slowCircularTapeTrackingButton.available =
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.CIRCULAR &&
+                    activeCircularTrackingSpeed == CircularTrackingSpeed.SLOW
+                ) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        fixedHeadingLapButton.available =
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+                    activeFixedHeadingTrackingSpeed == FixedHeadingTrackingSpeed.FAST
+                ) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        slowFixedHeadingLapButton.available =
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+                    activeFixedHeadingTrackingSpeed == FixedHeadingTrackingSpeed.SLOW
+                ) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         curvedOutAndBackTrackingButton.available =
             (tapeTracking.enabled &&
                 activeTapeTrackingMode == TapeTrackingMode.CURVED_OUT_AND_BACK) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
-        quarterArcButton.available =
-            quarterArcActive ||
-                (ready && flying && !turning && !holdingHeight && !tapeTracking.enabled)
         leftPad.isEnabled = ready && flying
         rightPad.isEnabled = ready && flying
         gimbalPad.isEnabled = ready
@@ -1415,6 +1733,11 @@ class MainActivity : Activity() {
             aircraftConnected = connected == true
             aircraftHeadingDegrees = null
             aircraftHeadingAtNanos = 0L
+            aircraftVelocityX = 0.0
+            aircraftVelocityY = 0.0
+            aircraftVelocityZ = 0.0
+            groundSpeedMetersPerSecond = 0.0
+            aircraftVelocityAtNanos = 0L
             obstacleSampleReceived = false
             obstacleSampleValid = false
             obstacleSampleAtNanos = 0L
@@ -1464,6 +1787,13 @@ class MainActivity : Activity() {
             true,
         ) { _, attitude ->
             runOnUiThread { publishAircraftAttitude(attitude) }
+        }
+        keyManager.listen(
+            KeyTools.createKey(FlightControllerKey.KeyAircraftVelocity),
+            this,
+            true,
+        ) { _, velocity ->
+            publishAircraftVelocity(velocity)
         }
         keyManager.listen(
             KeyTools.createKey(FlightControllerKey.KeyIsLandingConfirmationNeeded),
@@ -1717,7 +2047,7 @@ class MainActivity : Activity() {
 
     private fun stopHorizontalActuation(reason: String) {
         rightStickActive = false
-        virtualStick.setForwardOnly(0.0)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
         holdStatus = reason
         flightLog.write("horizontal actuation stopped: $reason")
         if (
@@ -1745,8 +2075,34 @@ class MainActivity : Activity() {
         aircraftHeadingAtNanos = System.nanoTime()
         headingTurn?.update(heading)
         driveHeadingTurn()
+        // Heading samples close both the endpoint half-turn and the standalone
+        // yaw-capability test; neither estimates completion from commanded time.
         quarterArcController?.updateHeading(heading)
         driveQuarterArc()
+    }
+
+    private fun publishAircraftVelocity(velocity: Velocity3D?) {
+        val x = velocity?.x?.takeIf(Double::isFinite) ?: return
+        val y = velocity.y?.takeIf(Double::isFinite) ?: return
+        val z = velocity.z?.takeIf(Double::isFinite) ?: return
+        aircraftVelocityX = x
+        aircraftVelocityY = y
+        aircraftVelocityZ = z
+        groundSpeedMetersPerSecond = hypot(x, y)
+        aircraftVelocityAtNanos = System.nanoTime()
+    }
+
+    private fun usableBodyTravelDirectionDegrees(nowNanos: Long): Double? {
+        if (
+            aircraftVelocityAtNanos == 0L ||
+            nowNanos - aircraftVelocityAtNanos > AIRCRAFT_VELOCITY_STALE_NANOS ||
+            groundSpeedMetersPerSecond < MIN_DIRECTIONAL_GROUND_SPEED_METERS_PER_SECOND
+        ) {
+            return null
+        }
+        val heading = aircraftHeadingDegrees ?: return null
+        val earthTravelDegrees = Math.toDegrees(atan2(aircraftVelocityY, aircraftVelocityX))
+        return wrapDegrees(earthTravelDegrees - heading)
     }
 
 
@@ -1778,6 +2134,77 @@ class MainActivity : Activity() {
     private fun anotherFlightControlActive(): Boolean =
         headingTurn != null || quarterArcController != null || holdingHeight || tapeTracking.enabled ||
             tapeTrackingStartPending || leftStickActive || rightStickActive
+
+    private fun toggleYawCapabilityTest() {
+        if (yawCapabilityTestActive) {
+            finishHeadingTurn("操作者停止原地 360° yaw 測試")
+            return
+        }
+        yawCapabilityStartFailure()?.let { reason ->
+            flightLog.write("yaw capability test refused: $reason")
+            render(reason)
+            return
+        }
+        render("正在取得控制權，準備原地旋轉 360°…")
+        acquireControlLink(
+            onFailure = { reason -> render("原地 360° yaw 測試未啟動：$reason") },
+        ) {
+            yawCapabilityStartFailure()?.let { reason ->
+                flightLog.write("yaw capability test aborted after acquire: $reason")
+                releaseControlLink { error ->
+                    render(
+                        if (error == null) {
+                            "原地 360° yaw 測試未啟動：$reason"
+                        } else {
+                            "原地 360° yaw 測試未啟動：$reason（釋放控制權失敗：$error）"
+                        },
+                    )
+                }
+                return@acquireControlLink
+            }
+            val initialHeading = checkNotNull(aircraftHeadingDegrees)
+            val now = System.nanoTime()
+            headingTurn = HeadingTurn(initialHeading, YAW_CAPABILITY_TARGET_DEGREES)
+            yawCapabilityTestActive = true
+            turnStartedAtNanos = now
+            turnCommandStartedAtNanos = 0L
+            turnAuthoritySeen =
+                stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
+            turnLastRenderedAtNanos = 0L
+            virtualStick.setHorizontalVelocity(0.0, 0.0)
+            virtualStick.setClimbRate(0.0)
+            virtualStick.setYawRate(0.0)
+            yawCapabilityTestButton.text = "停止原地 360° yaw 測試"
+            flightLog.write(
+                "yaw capability test armed heading=%.1f target=%.0f command=%.1f"
+                    .format(
+                        initialHeading,
+                        YAW_CAPABILITY_TARGET_DEGREES,
+                        YAW_CAPABILITY_RATE_DEGREES_PER_SECOND,
+                    ),
+            )
+            mainHandler.post(headingTurnTickRunnable)
+        }
+    }
+
+    private fun yawCapabilityStartFailure(nowNanos: Long = System.nanoTime()): String? {
+        if (anotherFlightControlActive()) return "請先停止其他飛行控制"
+        if (!registered || !aircraftConnected || !flying) {
+            return "飛機未在空中，無法執行原地 360° yaw 測試"
+        }
+        if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
+            return "電量狀態危急，不執行原地 360° yaw 測試"
+        }
+        val heading = aircraftHeadingDegrees
+        if (
+            heading == null ||
+            aircraftHeadingAtNanos == 0L ||
+            nowNanos - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+        ) {
+            return "沒有即時機頭方向，原地 360° yaw 測試不啟動"
+        }
+        return null
+    }
 
     private fun toggleQuarterArc() {
         if (quarterArcController != null) {
@@ -1812,7 +2239,6 @@ class MainActivity : Activity() {
             quarterArcAuthoritySeen =
                 stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
             quarterArcLastRenderedAtNanos = 0L
-            runOnUiThread { quarterArcButton.text = "停止無視覺 1/4 圈" }
             virtualStick.setHorizontalVelocity(0.0, 0.0)
             virtualStick.setYawRate(0.0)
             flightLog.write(
@@ -1962,7 +2388,6 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(quarterArcTickRunnable)
         virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setYawRate(0.0)
-        runOnUiThread { quarterArcButton.text = "無視覺右轉 1/4 圈" }
         holdStatus = message
         flightLog.write(
             "quarter arc stopped success=$succeeded elapsed=%.2f progress=%.1f reason=$message"
@@ -1980,9 +2405,11 @@ class MainActivity : Activity() {
 
     private fun armHeadingTurn(currentHeading: Double) {
         headingTurn = HeadingTurn(currentHeading)
+        yawCapabilityTestActive = false
         turnStartedAtNanos = System.nanoTime()
         turnCommandStartedAtNanos = 0L
         turnAuthoritySeen = false
+        turnLastRenderedAtNanos = 0L
         virtualStick.setYawRate(0.0)
         flightLog.write("$TURN_LABEL 180 armed heading=$currentHeading")
         mainHandler.post(headingTurnTickRunnable)
@@ -1998,23 +2425,25 @@ class MainActivity : Activity() {
 
     private fun driveHeadingTurn() {
         val turn = headingTurn ?: return
+        val capabilityTest = yawCapabilityTestActive
+        val label = if (capabilityTest) "原地 360° yaw 測試" else "$TURN_LABEL 180°"
         if (!stickOwned) {
-            finishHeadingTurn("$TURN_LABEL 180° 失去控制權，已停止", release = false)
+            finishHeadingTurn("$label 失去控制權，已停止", release = false)
             return
         }
         val ownsAuthority = stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
         if (ownsAuthority) {
             turnAuthoritySeen = true
         } else if (turnAuthoritySeen) {
-            finishHeadingTurn("遙控器已接管，$TURN_LABEL 180° 已停止", release = false)
+            finishHeadingTurn("遙控器已接管，$label 已停止", release = false)
             return
         } else {
             virtualStick.setYawRate(0.0)
             val waitedMs = (System.nanoTime() - turnStartedAtNanos) / 1_000_000L
             if (waitedMs > AUTHORITY_HANDOVER_TIMEOUT_MS) {
-                finishHeadingTurn("未取得控制權，$TURN_LABEL 180° 已取消")
+                finishHeadingTurn("未取得控制權，$label 已取消")
             } else {
-                holdStatus = "等待控制權移交後$TURN_LABEL 180°…"
+                holdStatus = "等待控制權移交後開始$label…"
                 render(holdStatus)
             }
             return
@@ -2025,30 +2454,75 @@ class MainActivity : Activity() {
             now - turnCommandStartedAtNanos > MAX_MOVING_HEADING_AGE_NANOS &&
             now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
         ) {
-            finishHeadingTurn("機頭方向資料停止更新，旋轉已停止")
+            finishHeadingTurn("機頭方向資料停止更新，$label 已停止")
             return
         }
-        if (now - turnStartedAtNanos > TURN_TIMEOUT_NANOS) {
-            finishHeadingTurn(
-                "$TURN_LABEL 180° 逾時，已轉 %.0f°".format(turn.progressDegrees),
-            )
+        val timeoutNanos =
+            if (capabilityTest) YAW_CAPABILITY_TIMEOUT_NANOS else TURN_TIMEOUT_NANOS
+        if (now - turnStartedAtNanos > timeoutNanos) {
+            finishHeadingTurn("$label 逾時，已轉 %.0f°".format(turn.progressDegrees))
             return
         }
         val remaining = (turn.targetDegrees - turn.progressDegrees).coerceAtLeast(0.0)
-        if (remaining <= TURN_TOLERANCE_DEGREES) {
-            finishHeadingTurn(
-                "$TURN_LABEL 180° 完成（%.0f°）".format(turn.progressDegrees),
-                succeeded = true,
-            )
+        val completed =
+            if (capabilityTest) remaining == 0.0 else remaining <= TURN_TOLERANCE_DEGREES
+        if (completed) {
+            if (capabilityTest) {
+                val elapsedSeconds =
+                    (now - turnCommandStartedAtNanos).coerceAtLeast(1L) / 1_000_000_000.0
+                val meanYawRate = turn.progressDegrees / elapsedSeconds
+                finishHeadingTurn(
+                    "原地 360° yaw 測試完成：%.2f 秒，實測平均 %.1f°/秒"
+                        .format(elapsedSeconds, meanYawRate),
+                    succeeded = true,
+                )
+            } else {
+                finishHeadingTurn(
+                    "$TURN_LABEL 180° 完成（%.0f°）".format(turn.progressDegrees),
+                    succeeded = true,
+                )
+            }
             return
         }
-        val speed = if (remaining <= TURN_SLOWDOWN_DEGREES) TURN_SLOW_SPEED_DPS else TURN_SPEED_DPS
+        val speed =
+            if (capabilityTest) {
+                YAW_CAPABILITY_RATE_DEGREES_PER_SECOND
+            } else if (remaining <= TURN_SLOWDOWN_DEGREES) {
+                TURN_SLOW_SPEED_DPS
+            } else {
+                TURN_SPEED_DPS
+            }
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setYawRate(speed)
-        holdStatus = "$TURN_LABEL 180°：已轉 %.0f°，剩 %.0f°".format(
-            turn.progressDegrees,
-            remaining,
-        )
-        render(holdStatus)
+        if (!capabilityTest || now - turnLastRenderedAtNanos >= TURN_RENDER_PERIOD_NANOS) {
+            turnLastRenderedAtNanos = now
+            val elapsedSeconds =
+                (now - turnCommandStartedAtNanos).coerceAtLeast(1L) / 1_000_000_000.0
+            val meanYawRate = turn.progressDegrees / elapsedSeconds
+            holdStatus =
+                if (capabilityTest) {
+                    "原地 yaw：%.0f° / 360°，命令 50.0°/秒，實測平均 %.1f°/秒"
+                        .format(turn.progressDegrees, meanYawRate)
+                } else {
+                    "$TURN_LABEL 180°：已轉 %.0f°，剩 %.0f°"
+                        .format(turn.progressDegrees, remaining)
+                }
+            if (capabilityTest) {
+                flightLog.write(
+                    (
+                        "yaw capability progress=%.1f remaining=%.1f elapsed=%.2f " +
+                            "command=%.1f actualMean=%.2f"
+                        ).format(
+                        turn.progressDegrees,
+                        remaining,
+                        elapsedSeconds,
+                        speed,
+                        meanYawRate,
+                    ),
+                )
+            }
+            render(holdStatus)
+        }
     }
 
     private fun finishHeadingTurn(
@@ -2056,21 +2530,43 @@ class MainActivity : Activity() {
         succeeded: Boolean = false,
         release: Boolean = true,
     ) {
-        if (headingTurn == null) return
+        val turn = headingTurn ?: return
+        val capabilityTest = yawCapabilityTestActive
+        val now = System.nanoTime()
+        val commandElapsedSeconds =
+            turnCommandStartedAtNanos.takeIf { it != 0L }?.let {
+                (now - it).coerceAtLeast(0L) / 1_000_000_000.0
+            }
+        val meanYawRate =
+            commandElapsedSeconds?.takeIf { it > 0.0 }?.let { turn.progressDegrees / it }
         headingTurn = null
+        yawCapabilityTestActive = false
         turnCommandStartedAtNanos = 0L
         turnAuthoritySeen = false
+        turnLastRenderedAtNanos = 0L
         mainHandler.removeCallbacks(headingTurnTickRunnable)
         virtualStick.setYawRate(0.0)
+        virtualStick.setHorizontalVelocity(0.0, 0.0)
+        if (::yawCapabilityTestButton.isInitialized) {
+            yawCapabilityTestButton.text = "原地 360°・50°/秒"
+        }
         holdStatus = message
-        flightLog.write(message)
+        if (capabilityTest) {
+            flightLog.write(
+                "yaw capability stopped success=$succeeded elapsed=${commandElapsedSeconds.logNumber(2)} " +
+                    "progress=%.1f actualMean=${meanYawRate.logNumber(2)} reason=$message"
+                        .format(turn.progressDegrees),
+            )
+        } else {
+            flightLog.write(message)
+        }
         if (tapeEndpointTurn) {
             tapeEndpointTurn = false
             tapeDetector?.resetTracking()
             if (succeeded && tapeTracking.enabled && flying && stickOwned) {
-                val now = System.nanoTime()
-                tapeTracking.resumeAfterTurn(now)
-                tapeTrackingStartedAtNanos = now
+                val resumedAt = System.nanoTime()
+                tapeTracking.resumeAfterTurn(resumedAt)
+                tapeTrackingStartedAtNanos = resumedAt
                 tapeTrackingAuthoritySeen =
                     stickStatus.authority == VirtualStickSession.MSDK_AUTHORITY_OWNER
                 renderedTapeTrackingPhase = TapeTrackingPhase.TURNING
@@ -2134,7 +2630,16 @@ class MainActivity : Activity() {
             return
         }
         if (holdingHeight) finishHeightHold("降落操作取消定高", release = false)
-        if (headingTurn != null) finishHeadingTurn("降落操作取消 180° 旋轉", release = false)
+        if (headingTurn != null) {
+            finishHeadingTurn(
+                if (yawCapabilityTestActive) {
+                    "降落操作取消原地 360° yaw 測試"
+                } else {
+                    "降落操作取消 180° 旋轉"
+                },
+                release = false,
+            )
+        }
         if (quarterArcController != null) {
             finishQuarterArc("降落操作取消無視覺 1/4 圈", release = false)
         }
@@ -2311,6 +2816,11 @@ class MainActivity : Activity() {
         holdStatus = ""
         if (headingTurn != null) {
             headingTurn = null
+            yawCapabilityTestActive = false
+            turnLastRenderedAtNanos = 0L
+            if (::yawCapabilityTestButton.isInitialized) {
+                yawCapabilityTestButton.text = "原地 360°・50°/秒"
+            }
             turnAuthoritySeen = false
             turnCommandStartedAtNanos = 0L
             mainHandler.removeCallbacks(headingTurnTickRunnable)
@@ -2703,7 +3213,13 @@ class MainActivity : Activity() {
         const val TURN_TOLERANCE_DEGREES = 2.0
         const val TURN_TICK_MS = 50L
         const val TURN_TIMEOUT_NANOS = 15_000_000_000L
+        const val YAW_CAPABILITY_TARGET_DEGREES = 360.0
+        const val YAW_CAPABILITY_RATE_DEGREES_PER_SECOND = 50.0
+        const val YAW_CAPABILITY_TIMEOUT_NANOS = 12_000_000_000L
+        const val TURN_RENDER_PERIOD_NANOS = 250_000_000L
         const val MAX_MOVING_HEADING_AGE_NANOS = 1_000_000_000L
+        const val AIRCRAFT_VELOCITY_STALE_NANOS = 1_000_000_000L
+        const val MIN_DIRECTIONAL_GROUND_SPEED_METERS_PER_SECOND = 0.12
 
         /** Fixed-radius quarter-arc experiment gates and closed-heading endpoint. */
         const val QUARTER_ARC_START_MIN_HEIGHT_METERS = 0.55
@@ -2759,6 +3275,8 @@ class MainActivity : Activity() {
         const val TAPE_MISSES_TO_CLEAR = 8
         const val TAPE_TRACKING_TICK_MS = 100L
         const val TAPE_CAPTURE_DIRECTORY = "tape-captures"
+        /** Lets the recorder receive its four 4 Hz post-loss frames before disarming. */
+        const val AUTO_CAPTURE_DISARM_DELAY_MS = 1_500L
         const val CAMERA_DOWN_PITCH_DEGREES = -90.0
         /** Absorbs floating-point noise in a confirmed pitch, never a deliberate tilt. */
         const val CAMERA_DOWN_PITCH_TOLERANCE_DEGREES = 0.5

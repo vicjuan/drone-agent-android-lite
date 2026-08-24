@@ -65,6 +65,8 @@ data class TapeLookahead(
 data class TapeDetection(
     val sourceWidth: Int,
     val sourceHeight: Int,
+    /** Monotonic timestamp taken before the frame was copied into the detector worker. */
+    val capturedAtNanos: Long,
     val bounds: NormalizedRect,
     val confidence: Double,
     val angleFromVerticalDegrees: Double,
@@ -100,6 +102,7 @@ data class TapeDetection(
         require(longSideFraction > 0.0 && longSideFraction.isFinite())
         require(nearFieldOffsetFraction in -0.5..0.5)
         require(anchorXFraction in 0.0..1.0 && anchorYFraction in 0.0..1.0)
+        require(capturedAtNanos >= 0L)
     }
 }
 

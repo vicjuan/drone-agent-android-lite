@@ -23,6 +23,17 @@ class HeadingTurnTest {
         assertEquals(90.0, turn.progressDegrees, 0.0)
     }
 
+    @Test
+    fun `full turn accumulates 360 degrees across both heading seams`() {
+        val turn = HeadingTurn(170.0, targetDegrees = 360.0)
+
+        assertEquals(340.0, turn.update(-170.0), 0.0)
+        assertEquals(180.0, turn.update(-10.0), 0.0)
+        assertEquals(20.0, turn.update(150.0), 0.0)
+        assertEquals(0.0, turn.update(170.0), 0.0)
+        assertEquals(360.0, turn.progressDegrees, 0.0)
+    }
+
 
     @Test
     fun `opposite drift does not create directed progress`() {
