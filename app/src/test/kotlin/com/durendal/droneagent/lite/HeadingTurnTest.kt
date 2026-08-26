@@ -1,6 +1,7 @@
 package com.durendal.droneagent.lite
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class HeadingTurnTest {
@@ -32,6 +33,62 @@ class HeadingTurnTest {
         assertEquals(20.0, turn.update(150.0), 0.0)
         assertEquals(0.0, turn.update(170.0), 0.0)
         assertEquals(360.0, turn.progressDegrees, 0.0)
+    }
+
+    @Test
+    fun `heading lead remains in MSDK signed angle range across both seams`() {
+        assertEquals(-170.0, wrapToSignedHeading(190.0), 0.0)
+        assertEquals(170.0, wrapToSignedHeading(-190.0), 0.0)
+        assertEquals(180.0, wrapToSignedHeading(180.0), 0.0)
+        assertEquals(-180.0, wrapToSignedHeading(-180.0), 0.0)
+    }
+
+    @Test
+    fun `yaw rate maps proportionally to bounded heading lead`() {
+        assertEquals(
+            -170.0,
+            checkNotNull(
+                headingTargetForYawRate(
+                    currentHeadingDegrees = 160.0,
+                    yawRateDegreesPerSecond = 25.0,
+                    maximumYawRateDegreesPerSecond = 50.0,
+                    maximumHeadingLeadDegrees = 60.0,
+                ),
+            ),
+            0.0,
+        )
+        assertEquals(
+            130.0,
+            checkNotNull(
+                headingTargetForYawRate(
+                    currentHeadingDegrees = 160.0,
+                    yawRateDegreesPerSecond = -25.0,
+                    maximumYawRateDegreesPerSecond = 50.0,
+                    maximumHeadingLeadDegrees = 60.0,
+                ),
+            ),
+            0.0,
+        )
+        assertEquals(
+            -140.0,
+            checkNotNull(
+                headingTargetForYawRate(
+                    currentHeadingDegrees = 160.0,
+                    yawRateDegreesPerSecond = 100.0,
+                    maximumYawRateDegreesPerSecond = 50.0,
+                    maximumHeadingLeadDegrees = 60.0,
+                ),
+            ),
+            0.0,
+        )
+        assertNull(
+            headingTargetForYawRate(
+                currentHeadingDegrees = Double.NaN,
+                yawRateDegreesPerSecond = 25.0,
+                maximumYawRateDegreesPerSecond = 50.0,
+                maximumHeadingLeadDegrees = 60.0,
+            ),
+        )
     }
 
 

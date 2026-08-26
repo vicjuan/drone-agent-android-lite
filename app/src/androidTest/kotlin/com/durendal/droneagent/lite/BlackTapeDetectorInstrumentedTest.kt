@@ -563,6 +563,100 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun flightFrameChoosesTapeOverDeskDistractors() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+
+        val detection =
+            detectSequence(
+                listOf(rgbaAsset("flight-tape-left-desk-distractors.jpg", width, height)),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            ).single()
+
+        assertTrue(diagnostics.single(), detection != null)
+        assertTrue(diagnostics.single(), checkNotNull(detection).anchorXFraction < 0.6)
+        assertEquals(diagnostics.single(), PathQuality.FULL_PATH, detection.quality)
+    }
+
+    @Test
+    fun trackedCircleSurvivesVisibleRouteStartTopologyChange() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val acquisition = rgbaAsset("flight-path-before-chroma-loss.jpg", width, height)
+        val before = rgbaAsset("flight-circle-before-direction-reject.png", width, height)
+        val topologyChange = rgbaAsset("flight-circle-direction-reject.png", width, height)
+        val frames = buildList {
+            repeat(3) { add(acquisition) }
+            add(before)
+            add(topologyChange)
+        }
+
+        val detections =
+            detectSequence(
+                frames,
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            )
+        assertTrue(diagnostics.joinToString("\n"), detections.drop(2).all { it != null })
+    }
+
+    @Test
+    fun deskDistractorsCannotQualifyForFlightControl() {
+        val width = 640
+        val height = 360
+        val diagnostics = mutableListOf<String>()
+        val frame = rgbaAsset("flight-desk-distractors-only.jpg", width, height)
+
+        val detections =
+            detectSequence(
+                listOf(frame, frame, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections.all { it == null })
+    }
+
+    @Test
+    fun trackedTapeDoesNotSwitchToDeskDistractorsAfterPathLoss() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val tape = rgbaAsset("flight-path-before-chroma-loss.jpg", width, height)
+        val distractors = rgbaAsset("flight-desk-distractors-full.jpg", width, height)
+        val frames = buildList {
+            repeat(3) { add(tape) }
+            repeat(10) { add(distractors) }
+        }
+
+        val detections =
+            detectSequence(
+                frames,
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections[2] != null)
+        assertTrue(diagnostics.joinToString("\n"), detections.drop(3).all { it == null })
+    }
+
+    @Test
     fun flightBoardBoundaryIsNotReacquiredAsTape() {
         val width = 1920
         val height = 1080
@@ -608,13 +702,41 @@ class BlackTapeDetectorInstrumentedTest {
                 height,
                 onDiagnostics = diagnostics::add,
                 beforeFrame = { index, detector ->
-                    if (index == 1) detector.beginTrackingSession()
+                    if (index == 1) {
+                        detector.beginTrackingSession(requireConsistentCurve = true)
+                    }
                 },
             )
 
         assertEquals(diagnostics.first(), null, detections.first())
         assertTrue(diagnostics.joinToString("\n"), detections.slice(1..2).all { it == null })
         assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun circularTrackingSessionRejectsStraightAcquisitionFrames() {
+        val width = 640
+        val height = 360
+        val curve = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(curve, width, height, direction = 1.0, value = 20)
+        val straight = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(straight, width, left = 305, top = 0, right = 335, bottom = height, value = 20)
+        val diagnostics = mutableListOf<String>()
+
+        val detections =
+            detectSequence(
+                listOf(curve, straight, curve, straight),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) {
+                        detector.beginTrackingSession(requireConsistentCurve = true)
+                    }
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections.all { it == null })
     }
 
     @Test

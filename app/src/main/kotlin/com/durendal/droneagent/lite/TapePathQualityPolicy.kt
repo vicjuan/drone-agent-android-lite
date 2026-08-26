@@ -126,7 +126,7 @@ internal object TapePathQualityPolicy {
         mode: TapeDetectionMode,
     ): Boolean = when {
         topology.closedLoop -> false
-        mode == TapeDetectionMode.PATH && topology.distalTerminus == CenterlineTerminus.NONE -> false
+        mode.usesPathGeometry && topology.distalTerminus == CenterlineTerminus.NONE -> false
         else -> topology.distalTerminus == CenterlineTerminus.INSIDE_FRAME
     }
 

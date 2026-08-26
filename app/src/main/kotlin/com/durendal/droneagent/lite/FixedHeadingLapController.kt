@@ -28,6 +28,11 @@ internal data class OmniCenterlineMeasurement(
     val curvaturePerMeter: Double,
     val lookaheadXFraction: Double,
     val lookaheadYFraction: Double,
+    val lookaheadRightMeters: Double,
+    val lookaheadForwardMeters: Double,
+    val lookaheadDistanceMeters: Double,
+    val projectionXFraction: Double,
+    val projectionYFraction: Double,
     val endpointDistanceMeters: Double? = null,
 )
 
@@ -54,13 +59,11 @@ internal class FixedHeadingLapController {
     private var phase = FixedHeadingLapPhase.DISABLED
     private var virtualHeadingDegrees = 0.0
     private var pathSpeedMetersPerSecond = 0.0
+    private var pathAccelerationMetersPerSecondSquared = 0.0
     private var trackingSpeed = FixedHeadingTrackingSpeed.FAST
     private var latestMeasurement: OmniCenterlineMeasurement? = null
     private var latestConfidence = 0.0
     private var lastDetectionAtNanos = 0L
-    private var endpointCandidateSinceNanos = 0L
-    private var endpointReached = false
-    private var accumulatedTurnDegrees = 0.0
     private var startedAtNanos = 0L
     private var lastTickAtNanos = 0L
     private var latestMeasurementCapturedAtNanos = 0L
@@ -74,13 +77,11 @@ internal class FixedHeadingLapController {
         phase = FixedHeadingLapPhase.ACQUIRING
         virtualHeadingDegrees = 0.0
         pathSpeedMetersPerSecond = 0.0
+        pathAccelerationMetersPerSecondSquared = 0.0
         this.trackingSpeed = trackingSpeed
         latestMeasurement = null
         latestConfidence = 0.0
-        endpointCandidateSinceNanos = 0L
-        endpointReached = false
         lastDetectionAtNanos = 0L
-        accumulatedTurnDegrees = 0.0
         startedAtNanos = nowNanos
         lastTickAtNanos = nowNanos
         latestMeasurementCapturedAtNanos = 0L
@@ -91,11 +92,9 @@ internal class FixedHeadingLapController {
         enabled = false
         phase = FixedHeadingLapPhase.DISABLED
         pathSpeedMetersPerSecond = 0.0
+        pathAccelerationMetersPerSecondSquared = 0.0
         trackingSpeed = FixedHeadingTrackingSpeed.FAST
         latestMeasurement = null
-        endpointCandidateSinceNanos = 0L
-        endpointReached = false
-        accumulatedTurnDegrees = 0.0
         lastTickAtNanos = 0L
         latestMeasurementCapturedAtNanos = 0L
         lastVirtualTurnRateDegreesPerSecond = 0.0
@@ -105,13 +104,10 @@ internal class FixedHeadingLapController {
         centerline: TapeCenterlinePath?,
         heightMeters: Double?,
         confidence: Double,
-        endpointCandidate: Boolean,
-        closedLoop: Boolean,
         nowNanos: Long,
         capturedAtNanos: Long = 0L,
     ) {
         if (!enabled) return
-        val hasPhysicalEndpoint = endpointCandidate && !closedLoop
         val measurementAtNanos = capturedAtNanos.takeIf { it > 0L } ?: nowNanos
         val measurementAgeSeconds = (
             (nowNanos - measurementAtNanos).coerceAtLeast(0L) / NANOS_PER_SECOND
@@ -127,13 +123,8 @@ internal class FixedHeadingLapController {
                 path = centerline,
                 heightMeters = heightMeters,
                 travelDirectionDegrees = virtualHeadingAtCapture,
-                lookaheadMeters =
-                    if (trackingSpeed == FixedHeadingTrackingSpeed.FAST) {
-                        FAST_LOOKAHEAD_METERS
-                    } else {
-                        SLOW_LOOKAHEAD_METERS
-                    },
-                endpointCandidate = hasPhysicalEndpoint,
+                lookaheadMeters = configuredLookaheadMeters(),
+                previousMeasurement = latestMeasurement,
             )
         }
         latestConfidence = confidence
@@ -142,24 +133,17 @@ internal class FixedHeadingLapController {
             lastDetectionAtNanos = nowNanos
             latestMeasurementCapturedAtNanos = measurementAtNanos
         }
-        val endpointAtAircraft =
-            hasPhysicalEndpoint &&
-                measurement?.endpointDistanceMeters?.let {
-                    it <= ENDPOINT_STOP_TOLERANCE_METERS
-                } == true
-        updateEndpointCandidate(endpointAtAircraft, nowNanos)
-        if (phase == FixedHeadingLapPhase.STOPPED || endpointCandidateSinceNanos != 0L) return
         if (measurement == null) {
             if (phase == FixedHeadingLapPhase.TRACKING) {
                 phase = FixedHeadingLapPhase.COASTING
+                pathAccelerationMetersPerSecondSquared = 0.0
             }
             return
         }
         if (phase == FixedHeadingLapPhase.ACQUIRING) {
-            // The first valid route sample defines the initial travel direction. Waiting
-            // for tape to align with image-up made an already valid circular path time out
-            // before issuing its first command.
-            virtualHeadingDegrees = measurement.tangentDegrees
+            // The first valid lookahead vector is already a closed-loop steering
+            // target: it contains both path direction and cross-track correction.
+            virtualHeadingDegrees = directionToLookahead(measurement)
             phase = FixedHeadingLapPhase.TRACKING
             lastTickAtNanos = nowNanos
         } else if (phase == FixedHeadingLapPhase.COASTING) {
@@ -177,42 +161,41 @@ internal class FixedHeadingLapController {
             return decision()
         }
         if (phase == FixedHeadingLapPhase.STOPPED) {
-            return decision(
-                stopRequested = !endpointReached,
-                endpointReached = endpointReached,
-            )
+            return decision(stopRequested = true)
         }
+
+        val elapsedSeconds =
+            ((nowNanos - lastTickAtNanos).coerceIn(0L, MAX_TICK_NANOS)) / NANOS_PER_SECOND
+        lastTickAtNanos = nowNanos
 
         val detectionAgeNanos = nowNanos - lastDetectionAtNanos
         if (latestMeasurement == null || detectionAgeNanos > staleWindowNanos()) {
             pathSpeedMetersPerSecond = 0.0
+            pathAccelerationMetersPerSecondSquared = 0.0
             phase = FixedHeadingLapPhase.STOPPED
             return decision(stopRequested = true)
         }
         if (phase == FixedHeadingLapPhase.COASTING) {
-            pathSpeedMetersPerSecond = 0.0
-            return decision()
+            pathAccelerationMetersPerSecondSquared = 0.0
+            pathSpeedMetersPerSecond = moveToward(
+                pathSpeedMetersPerSecond,
+                0.0,
+                MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
+            )
+            val headingRadians = Math.toRadians(virtualHeadingDegrees)
+            return decision(
+                forward = pathSpeedMetersPerSecond * cos(headingRadians),
+                right = pathSpeedMetersPerSecond * sin(headingRadians),
+            )
         }
 
         val measurement = checkNotNull(latestMeasurement)
-        val elapsedSeconds =
-            ((nowNanos - lastTickAtNanos).coerceIn(0L, MAX_TICK_NANOS)) / 1_000_000_000.0
-        lastTickAtNanos = nowNanos
-        val measurementAgeSeconds = (
-            (nowNanos - latestMeasurementCapturedAtNanos).coerceAtLeast(0L) /
-                NANOS_PER_SECOND
-            ).coerceAtMost(MAX_MEASUREMENT_AGE_COMPENSATION_SECONDS)
-        val predictedTangentDegrees = wrapDegrees(
-            measurement.tangentDegrees +
-                Math.toDegrees(
-                    pathSpeedMetersPerSecond *
-                        measurement.curvaturePerMeter *
-                        measurementAgeSeconds,
-                ),
-        )
-        val tangentError = shortestAngularDelta(virtualHeadingDegrees, predictedTangentDegrees)
-        if (abs(tangentError) > MAX_TRACKING_ANGLE_DEGREES) {
+        val desiredHeadingDegrees = directionToLookahead(measurement)
+        val guidanceError =
+            shortestAngularDelta(virtualHeadingDegrees, desiredHeadingDegrees)
+        if (abs(guidanceError) > MAX_TRACKING_ANGLE_DEGREES) {
             pathSpeedMetersPerSecond = 0.0
+            pathAccelerationMetersPerSecondSquared = 0.0
             phase = FixedHeadingLapPhase.STOPPED
             return decision(stopRequested = true)
         }
@@ -224,78 +207,65 @@ internal class FixedHeadingLapController {
                 DEGRADED_SPEED_METERS_PER_SECOND
             }
         val trackingAuthority = minOf(
-            1.0 - abs(tangentError) / SLOWDOWN_TANGENT_ERROR_DEGREES,
+            1.0 - abs(guidanceError) / SLOWDOWN_GUIDANCE_ERROR_DEGREES,
             1.0 - abs(measurement.lateralOffsetMeters) / SLOWDOWN_LATERAL_OFFSET_METERS,
         ).coerceIn(0.0, 1.0)
-        val authorityLimitedSpeed =
-            DEGRADED_SPEED_METERS_PER_SECOND +
-                (confidenceLimitedSpeed - DEGRADED_SPEED_METERS_PER_SECOND) *
-                    trackingAuthority
-        val targetSpeed =
-            minOf(trackingSpeed.targetMetersPerSecond, authorityLimitedSpeed)
-        pathSpeedMetersPerSecond =
-            if (targetSpeed <= pathSpeedMetersPerSecond) {
-                // Route authority may disappear within one camera frame. Acceleration is
-                // gradual; evidence-driven deceleration is immediate.
-                targetSpeed
-            } else {
-                moveToward(
-                    pathSpeedMetersPerSecond,
-                    targetSpeed,
-                    MAX_ACCELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
-                )
-            }
-        val virtualTurnRate = (
-            Math.toDegrees(pathSpeedMetersPerSecond * measurement.curvaturePerMeter) +
-                TANGENT_FEEDBACK_GAIN * tangentError
-            ).coerceIn(
-            -MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND,
-            MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND,
+        val authorityLimitedSpeed = confidenceLimitedSpeed * trackingAuthority
+        val lookaheadLimitedSpeed =
+            trackingSpeed.targetMetersPerSecond *
+                (measurement.lookaheadDistanceMeters / configuredLookaheadMeters())
+                    .coerceIn(0.0, 1.0)
+        val targetSpeed = minOf(
+            trackingSpeed.targetMetersPerSecond,
+            authorityLimitedSpeed,
+            lookaheadLimitedSpeed,
         )
-        val turnDegrees = virtualTurnRate * elapsedSeconds
+        updatePathSpeed(
+            targetSpeed = targetSpeed,
+            emergencyBrake = trackingAuthority == 0.0,
+            elapsedSeconds = elapsedSeconds,
+        )
+        val maximumTurnDegrees =
+            MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND * elapsedSeconds
+        val turnDegrees =
+            guidanceError.coerceIn(-maximumTurnDegrees, maximumTurnDegrees)
         virtualHeadingDegrees = wrapDegrees(virtualHeadingDegrees + turnDegrees)
-        lastVirtualTurnRateDegreesPerSecond = virtualTurnRate
-        accumulatedTurnDegrees += turnDegrees
-        if (hasCompletedFixedHeadingLap(accumulatedTurnDegrees)) {
-            pathSpeedMetersPerSecond = 0.0
-            endpointReached = true
-            phase = FixedHeadingLapPhase.STOPPED
-            return decision(endpointReached = true)
-        }
+        lastVirtualTurnRateDegreesPerSecond =
+            if (elapsedSeconds > 0.0) turnDegrees / elapsedSeconds else 0.0
 
         val headingRadians = Math.toRadians(virtualHeadingDegrees)
-        val correction = (
-            LATERAL_FEEDBACK_GAIN_PER_SECOND * measurement.lateralOffsetMeters
-            ).coerceIn(
-            -MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
-            MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
-        )
+        val correction =
+            if (pathSpeedMetersPerSecond == 0.0) {
+                (
+                    LATERAL_FEEDBACK_GAIN_PER_SECOND * measurement.lateralOffsetMeters
+                    ).coerceIn(
+                    -MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
+                    MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
+                )
+            } else {
+                0.0
+            }
+        val correctionHeadingRadians = Math.toRadians(measurement.tangentDegrees)
         val forward =
-            pathSpeedMetersPerSecond * cos(headingRadians) - correction * sin(headingRadians)
+            pathSpeedMetersPerSecond * cos(headingRadians) -
+                correction * sin(correctionHeadingRadians)
         val right =
-            pathSpeedMetersPerSecond * sin(headingRadians) + correction * cos(headingRadians)
+            pathSpeedMetersPerSecond * sin(headingRadians) +
+                correction * cos(correctionHeadingRadians)
         phase = FixedHeadingLapPhase.TRACKING
         return decision(forward = forward, right = right)
     }
 
-    private fun updateEndpointCandidate(candidate: Boolean, nowNanos: Long) {
-        if (phase != FixedHeadingLapPhase.TRACKING && phase != FixedHeadingLapPhase.COASTING) {
-            endpointCandidateSinceNanos = 0L
-            return
-        }
-        if (!candidate) {
-            endpointCandidateSinceNanos = 0L
-            return
-        }
-        pathSpeedMetersPerSecond = 0.0
-        phase = FixedHeadingLapPhase.COASTING
-        if (endpointCandidateSinceNanos == 0L) {
-            endpointCandidateSinceNanos = nowNanos
-        } else if (nowNanos - endpointCandidateSinceNanos >= ENDPOINT_CONFIRMATION_NANOS) {
-            endpointReached = true
-            phase = FixedHeadingLapPhase.STOPPED
-        }
-    }
+
+    private fun directionToLookahead(measurement: OmniCenterlineMeasurement): Double =
+        wrapDegrees(
+            Math.toDegrees(
+                atan2(
+                    measurement.lookaheadRightMeters,
+                    measurement.lookaheadForwardMeters,
+                ),
+            ),
+        )
 
     private fun staleWindowNanos(): Long {
         val speed = pathSpeedMetersPerSecond.coerceAtLeast(0.05)
@@ -303,11 +273,17 @@ internal class FixedHeadingLapController {
             .coerceIn(MIN_STALE_NANOS, MAX_STALE_NANOS)
     }
 
+    private fun configuredLookaheadMeters(): Double =
+        if (trackingSpeed == FixedHeadingTrackingSpeed.FAST) {
+            FAST_LOOKAHEAD_METERS
+        } else {
+            SLOW_LOOKAHEAD_METERS
+        }
+
     private fun decision(
         forward: Double = 0.0,
         right: Double = 0.0,
         stopRequested: Boolean = false,
-        endpointReached: Boolean = false,
     ): FixedHeadingLapDecision = FixedHeadingLapDecision(
         phase = phase,
         forwardMetersPerSecond = forward,
@@ -317,8 +293,50 @@ internal class FixedHeadingLapController {
         lateralOffsetMeters = latestMeasurement?.lateralOffsetMeters,
         curvaturePerMeter = latestMeasurement?.curvaturePerMeter,
         stopRequested = stopRequested,
-        endpointReached = endpointReached,
     )
+
+    private fun updatePathSpeed(
+        targetSpeed: Double,
+        emergencyBrake: Boolean,
+        elapsedSeconds: Double,
+    ) {
+        if (emergencyBrake) {
+            pathAccelerationMetersPerSecondSquared = 0.0
+            pathSpeedMetersPerSecond = moveToward(
+                pathSpeedMetersPerSecond,
+                targetSpeed,
+                MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
+            )
+            return
+        }
+
+        val speedError = targetSpeed - pathSpeedMetersPerSecond
+        val desiredAcceleration = (
+            speedError * SPEED_ERROR_RESPONSE_PER_SECOND
+            ).coerceIn(
+            -MAX_DECELERATION_METERS_PER_SECOND_SQUARED,
+            MAX_ACCELERATION_METERS_PER_SECOND_SQUARED,
+        )
+        pathAccelerationMetersPerSecondSquared = moveToward(
+            pathAccelerationMetersPerSecondSquared,
+            desiredAcceleration,
+            MAX_JERK_METERS_PER_SECOND_CUBED * elapsedSeconds,
+        )
+        val nextSpeed = (
+            pathSpeedMetersPerSecond +
+                pathAccelerationMetersPerSecondSquared * elapsedSeconds
+            ).coerceAtLeast(0.0)
+        val reachesTarget =
+            speedError == 0.0 ||
+                speedError > 0.0 && nextSpeed >= targetSpeed ||
+                speedError < 0.0 && nextSpeed <= targetSpeed
+        if (reachesTarget) {
+            pathSpeedMetersPerSecond = targetSpeed
+            pathAccelerationMetersPerSecondSquared = 0.0
+        } else {
+            pathSpeedMetersPerSecond = nextSpeed
+        }
+    }
 
     private fun moveToward(current: Double, target: Double, maximumDelta: Double): Double =
         when {
@@ -331,23 +349,23 @@ internal class FixedHeadingLapController {
         const val TARGET_SPEED_METERS_PER_SECOND = 0.90
         const val DEGRADED_SPEED_METERS_PER_SECOND = 0.22
         const val MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
+        const val MAX_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
+        const val MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED = 4.50
+        const val MAX_JERK_METERS_PER_SECOND_CUBED = 2.00
+        const val SPEED_ERROR_RESPONSE_PER_SECOND = 3.00
         const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 90.0
-        const val TANGENT_FEEDBACK_GAIN = 0.45
         const val LATERAL_FEEDBACK_GAIN_PER_SECOND = 0.8
-        const val MAX_LATERAL_CORRECTION_METERS_PER_SECOND = 0.10
+        const val MAX_LATERAL_CORRECTION_METERS_PER_SECOND = 0.25
         const val MIN_CONFIDENCE = 0.60
         const val MAX_TRACKING_ANGLE_DEGREES = 70.0
-        const val COMPLETE_LAP_DEGREES = 360.0
-        const val ENDPOINT_CONFIRMATION_NANOS = 500_000_000L
-        const val ENDPOINT_STOP_TOLERANCE_METERS = 0.08
         const val ACQUISITION_TIMEOUT_NANOS = 8_000_000_000L
         const val MAX_BLIND_DISTANCE_METERS = 0.10
         const val MIN_STALE_NANOS = 200_000_000L
         const val MAX_STALE_NANOS = 400_000_000L
         const val MAX_TICK_NANOS = 250_000_000L
-        const val FAST_LOOKAHEAD_METERS = 0.55
-        const val SLOW_LOOKAHEAD_METERS = 0.35
-        const val SLOWDOWN_TANGENT_ERROR_DEGREES = 35.0
+        const val FAST_LOOKAHEAD_METERS = 0.35
+        const val SLOW_LOOKAHEAD_METERS = 0.25
+        const val SLOWDOWN_GUIDANCE_ERROR_DEGREES = 35.0
         const val SLOWDOWN_LATERAL_OFFSET_METERS = 0.25
         const val MAX_MEASUREMENT_AGE_COMPENSATION_SECONDS = 0.20
         private const val NANOS_PER_SECOND = 1_000_000_000.0
@@ -361,6 +379,7 @@ internal object OmniCenterline {
         travelDirectionDegrees: Double,
         lookaheadMeters: Double = LOOKAHEAD_METERS,
         endpointCandidate: Boolean = false,
+        previousMeasurement: OmniCenterlineMeasurement? = null,
     ): OmniCenterlineMeasurement? {
         if (!heightMeters.isFinite() || heightMeters <= 0.0 || path.pointCount < MIN_POINT_COUNT) return null
         val aspectRatio = path.sourceWidth.toDouble() / path.sourceHeight
@@ -368,14 +387,8 @@ internal object OmniCenterline {
             TapeTrackingController.CAMERA_DIAGONAL_HALF_FOV_TANGENT / sqrt(1.0 + aspectRatio * aspectRatio)
         val frameHeightMeters = 2.0 * heightMeters * verticalHalfFovTangent
         val frameWidthMeters = frameHeightMeters * aspectRatio
-        val directionRadians = Math.toRadians(travelDirectionDegrees)
-        val entryOffsetMeters = ENTRY_OFFSET_FRAME_HEIGHT_FRACTION * frameHeightMeters
-        val targetXFraction =
-            FRAME_CENTER_FRACTION -
-                sin(directionRadians) * entryOffsetMeters / frameWidthMeters
-        val targetYFraction =
-            FRAME_CENTER_FRACTION +
-                cos(directionRadians) * entryOffsetMeters / frameHeightMeters
+        val targetXFraction = FRAME_CENTER_FRACTION
+        val targetYFraction = FRAME_CENTER_FRACTION
         val points = List(path.pointCount) { index ->
             GroundPoint(
                 rightMeters = (path.xFractions[index] - targetXFraction) * frameWidthMeters,
@@ -385,27 +398,68 @@ internal object OmniCenterline {
             )
         }
 
-        var nearest: Projection? = null
+        var bestCandidate: MeasurementCandidate? = null
         for (index in 0 until points.lastIndex) {
-            val start = points[index]
-            val end = points[index + 1]
-            val deltaRight = end.rightMeters - start.rightMeters
-            val deltaForward = end.forwardMeters - start.forwardMeters
-            val lengthSquared = deltaRight * deltaRight + deltaForward * deltaForward
-            if (lengthSquared <= 1e-9) continue
-            val fraction = (
-                -(start.rightMeters * deltaRight + start.forwardMeters * deltaForward) / lengthSquared
-                ).coerceIn(0.0, 1.0)
-            val projected = interpolate(start, end, fraction)
-            val distanceSquared =
-                projected.rightMeters * projected.rightMeters + projected.forwardMeters * projected.forwardMeters
-            if (nearest == null || distanceSquared < nearest.distanceSquared) {
-                nearest = Projection(index, fraction, projected, distanceSquared)
+            val projection = projectOntoSegment(points, index) ?: continue
+            val measurement = measurementForProjection(
+                points = points,
+                projection = projection,
+                travelDirectionDegrees = travelDirectionDegrees,
+                requestedLookaheadMeters = lookaheadMeters,
+                endpointCandidate = endpointCandidate,
+            ) ?: continue
+            val score = continuityScore(
+                measurement = measurement,
+                projectionDistanceSquared = projection.distanceSquared,
+                previousMeasurement = previousMeasurement,
+                frameWidthMeters = frameWidthMeters,
+                frameHeightMeters = frameHeightMeters,
+            ) ?: continue
+            if (bestCandidate == null || score < bestCandidate.score) {
+                bestCandidate = MeasurementCandidate(measurement, score)
             }
         }
-        val projection = nearest ?: return null
-        val tangentStart = points[(projection.segmentIndex - TANGENT_POINT_SPAN).coerceAtLeast(0)]
-        val tangentEnd = points[(projection.segmentIndex + 1 + TANGENT_POINT_SPAN).coerceAtMost(points.lastIndex)]
+        return bestCandidate?.measurement
+    }
+
+    private fun projectOntoSegment(
+        points: List<GroundPoint>,
+        segmentIndex: Int,
+    ): Projection? {
+        val start = points[segmentIndex]
+        val end = points[segmentIndex + 1]
+        val deltaRight = end.rightMeters - start.rightMeters
+        val deltaForward = end.forwardMeters - start.forwardMeters
+        val lengthSquared = deltaRight * deltaRight + deltaForward * deltaForward
+        if (lengthSquared <= 1e-9) return null
+        val fraction = (
+            -(start.rightMeters * deltaRight + start.forwardMeters * deltaForward) / lengthSquared
+            ).coerceIn(0.0, 1.0)
+        val projected = interpolate(start, end, fraction)
+        return Projection(
+            segmentIndex = segmentIndex,
+            segmentFraction = fraction,
+            point = projected,
+            distanceSquared =
+                projected.rightMeters * projected.rightMeters +
+                    projected.forwardMeters * projected.forwardMeters,
+        )
+    }
+
+    private fun measurementForProjection(
+        points: List<GroundPoint>,
+        projection: Projection,
+        travelDirectionDegrees: Double,
+        requestedLookaheadMeters: Double,
+        endpointCandidate: Boolean,
+    ): OmniCenterlineMeasurement? {
+        val tangentStart =
+            points[(projection.segmentIndex - TANGENT_POINT_SPAN).coerceAtLeast(0)]
+        val tangentEnd =
+            points[
+                (projection.segmentIndex + 1 + TANGENT_POINT_SPAN)
+                    .coerceAtMost(points.lastIndex)
+            ]
         val baseTangent = directionDegrees(
             tangentEnd.rightMeters - tangentStart.rightMeters,
             tangentEnd.forwardMeters - tangentStart.forwardMeters,
@@ -415,50 +469,117 @@ internal object OmniCenterline {
             abs(shortestAngularDelta(travelDirectionDegrees, baseTangent)) <=
                 abs(shortestAngularDelta(travelDirectionDegrees, reverseTangent))
         val tangent = if (followsIncreasingIndices) baseTangent else reverseTangent
-        if (abs(shortestAngularDelta(travelDirectionDegrees, tangent)) > MAX_DIRECTION_CHANGE_DEGREES) return null
+        if (
+            abs(shortestAngularDelta(travelDirectionDegrees, tangent)) >
+            MAX_DIRECTION_CHANGE_DEGREES
+        ) {
+            return null
+        }
 
         val remainingPathMeters =
             remainingPathDistance(points, projection, followsIncreasingIndices)
-        val lookahead =
-            lookaheadPoint(
-                points = points,
-                projection = projection,
-                increasing = followsIncreasingIndices,
-                targetDistance = lookaheadMeters,
-                acceptPathEnd = endpointCandidate,
-            ) ?: return null
-        val headingRadians = Math.toRadians(travelDirectionDegrees)
-        val rightNormalRight = cos(headingRadians)
-        val rightNormalForward = -sin(headingRadians)
-        val lateralLookahead =
-            lookahead.rightMeters * rightNormalRight + lookahead.forwardMeters * rightNormalForward
-        val lookaheadDistanceSquared =
-            lookahead.rightMeters * lookahead.rightMeters + lookahead.forwardMeters * lookahead.forwardMeters
-        if (lookaheadDistanceSquared < MIN_LOOKAHEAD_METERS * MIN_LOOKAHEAD_METERS) return null
         val tangentRadians = Math.toRadians(tangent)
         val pathRightNormalRight = cos(tangentRadians)
         val pathRightNormalForward = -sin(tangentRadians)
         val lateralOffset =
             projection.point.rightMeters * pathRightNormalRight +
                 projection.point.forwardMeters * pathRightNormalForward
+        if (endpointCandidate && remainingPathMeters < MIN_LOOKAHEAD_METERS) {
+            val endpoint = if (followsIncreasingIndices) points.last() else points.first()
+            return OmniCenterlineMeasurement(
+                tangentDegrees = tangent,
+                lateralOffsetMeters = lateralOffset,
+                curvaturePerMeter = 0.0,
+                lookaheadXFraction = endpoint.xFraction,
+                lookaheadYFraction = endpoint.yFraction,
+                lookaheadRightMeters = endpoint.rightMeters,
+                lookaheadForwardMeters = endpoint.forwardMeters,
+                lookaheadDistanceMeters = remainingPathMeters,
+                projectionXFraction = projection.point.xFraction,
+                projectionYFraction = projection.point.yFraction,
+                endpointDistanceMeters = remainingPathMeters,
+            )
+        }
+        val lookahead = lookaheadPoint(
+            points = points,
+            projection = projection,
+            increasing = followsIncreasingIndices,
+            targetDistance = requestedLookaheadMeters,
+        ) ?: return null
+        val headingRadians = Math.toRadians(travelDirectionDegrees)
+        val rightNormalRight = cos(headingRadians)
+        val rightNormalForward = -sin(headingRadians)
+        val lateralLookahead =
+            lookahead.point.rightMeters * rightNormalRight +
+                lookahead.point.forwardMeters * rightNormalForward
+        val lookaheadDistanceSquared =
+            lookahead.point.rightMeters * lookahead.point.rightMeters +
+                lookahead.point.forwardMeters * lookahead.point.forwardMeters
+        if (lookaheadDistanceSquared < MIN_LOOKAHEAD_METERS * MIN_LOOKAHEAD_METERS) return null
         return OmniCenterlineMeasurement(
             tangentDegrees = tangent,
             lateralOffsetMeters = lateralOffset,
             curvaturePerMeter = 2.0 * lateralLookahead / lookaheadDistanceSquared,
-            lookaheadXFraction = lookahead.xFraction,
-            lookaheadYFraction = lookahead.yFraction,
-            endpointDistanceMeters =
-                if (endpointCandidate) remainingPathMeters - entryOffsetMeters else null,
+            lookaheadXFraction = lookahead.point.xFraction,
+            lookaheadYFraction = lookahead.point.yFraction,
+            lookaheadRightMeters = lookahead.point.rightMeters,
+            lookaheadForwardMeters = lookahead.point.forwardMeters,
+            lookaheadDistanceMeters = lookahead.distanceMeters,
+            projectionXFraction = projection.point.xFraction,
+            projectionYFraction = projection.point.yFraction,
+            endpointDistanceMeters = if (endpointCandidate) remainingPathMeters else null,
         )
     }
+
+    private fun continuityScore(
+        measurement: OmniCenterlineMeasurement,
+        projectionDistanceSquared: Double,
+        previousMeasurement: OmniCenterlineMeasurement?,
+        frameWidthMeters: Double,
+        frameHeightMeters: Double,
+    ): Double? {
+        if (previousMeasurement == null) return projectionDistanceSquared
+        val projectionJumpMeters = groundDistance(
+            firstXFraction = previousMeasurement.projectionXFraction,
+            firstYFraction = previousMeasurement.projectionYFraction,
+            secondXFraction = measurement.projectionXFraction,
+            secondYFraction = measurement.projectionYFraction,
+            frameWidthMeters = frameWidthMeters,
+            frameHeightMeters = frameHeightMeters,
+        )
+        if (projectionJumpMeters > MAX_PROJECTION_JUMP_METERS) return null
+        val lookaheadJumpMeters = groundDistance(
+            firstXFraction = previousMeasurement.lookaheadXFraction,
+            firstYFraction = previousMeasurement.lookaheadYFraction,
+            secondXFraction = measurement.lookaheadXFraction,
+            secondYFraction = measurement.lookaheadYFraction,
+            frameWidthMeters = frameWidthMeters,
+            frameHeightMeters = frameHeightMeters,
+        )
+        if (lookaheadJumpMeters > MAX_LOOKAHEAD_JUMP_METERS) return null
+        return projectionDistanceSquared +
+            CONTINUITY_PROJECTION_WEIGHT * projectionJumpMeters * projectionJumpMeters +
+            CONTINUITY_LOOKAHEAD_WEIGHT * lookaheadJumpMeters * lookaheadJumpMeters
+    }
+
+    private fun groundDistance(
+        firstXFraction: Double,
+        firstYFraction: Double,
+        secondXFraction: Double,
+        secondYFraction: Double,
+        frameWidthMeters: Double,
+        frameHeightMeters: Double,
+    ): Double = hypot(
+        (secondXFraction - firstXFraction) * frameWidthMeters,
+        (secondYFraction - firstYFraction) * frameHeightMeters,
+    )
 
     private fun lookaheadPoint(
         points: List<GroundPoint>,
         projection: Projection,
         increasing: Boolean,
         targetDistance: Double,
-        acceptPathEnd: Boolean,
-    ): GroundPoint? {
+    ): Lookahead? {
         var current = projection.point
         var accumulated = 0.0
         var index = if (increasing) projection.segmentIndex + 1 else projection.segmentIndex
@@ -469,13 +590,24 @@ internal object OmniCenterline {
                 next.forwardMeters - current.forwardMeters,
             )
             if (segmentDistance > 0.0 && accumulated + segmentDistance >= targetDistance) {
-                return interpolate(current, next, (targetDistance - accumulated) / segmentDistance)
+                return Lookahead(
+                    point = interpolate(
+                        current,
+                        next,
+                        (targetDistance - accumulated) / segmentDistance,
+                    ),
+                    distanceMeters = targetDistance,
+                )
             }
             accumulated += segmentDistance
             current = next
             index += if (increasing) 1 else -1
         }
-        return if (acceptPathEnd) current else null
+        return if (accumulated >= MIN_LOOKAHEAD_METERS) {
+            Lookahead(point = current, distanceMeters = accumulated)
+        } else {
+            null
+        }
     }
 
     private fun remainingPathDistance(
@@ -525,13 +657,26 @@ internal object OmniCenterline {
         val distanceSquared: Double,
     )
 
+    private data class Lookahead(
+        val point: GroundPoint,
+        val distanceMeters: Double,
+    )
+
+    private data class MeasurementCandidate(
+        val measurement: OmniCenterlineMeasurement,
+        val score: Double,
+    )
+
     private const val LOOKAHEAD_METERS = 0.35
     private const val FRAME_CENTER_FRACTION = 0.5
-    private const val ENTRY_OFFSET_FRAME_HEIGHT_FRACTION = 0.44
     private const val MIN_LOOKAHEAD_METERS = 0.15
     private const val MIN_POINT_COUNT = 5
     private const val TANGENT_POINT_SPAN = 3
     private const val MAX_DIRECTION_CHANGE_DEGREES = 80.0
+    private const val MAX_PROJECTION_JUMP_METERS = 0.30
+    private const val MAX_LOOKAHEAD_JUMP_METERS = 0.45
+    private const val CONTINUITY_PROJECTION_WEIGHT = 2.0
+    private const val CONTINUITY_LOOKAHEAD_WEIGHT = 0.5
 }
 
 /**
@@ -554,8 +699,6 @@ internal fun fixedHeadingHoldYawRate(
 private const val FIXED_HEADING_HOLD_PROPORTIONAL_GAIN = 0.8
 private const val FIXED_HEADING_HOLD_MAX_YAW_RATE_DEGREES_PER_SECOND = 10.0
 
-internal fun hasCompletedFixedHeadingLap(accumulatedTurnDegrees: Double): Boolean =
-    abs(accumulatedTurnDegrees) >= FixedHeadingLapController.COMPLETE_LAP_DEGREES
 
 internal fun shortestAngularDelta(fromDegrees: Double, toDegrees: Double): Double {
     var delta = toDegrees - fromDegrees

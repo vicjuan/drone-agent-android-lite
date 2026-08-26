@@ -19,6 +19,19 @@ import java.util.concurrent.TimeUnit
 /** Which of the two Mode 2 sticks a sample came from. */
 enum class StickSide { LEFT, RIGHT }
 
+private sealed interface YawCommand {
+    val value: Double
+    val mode: YawControlMode
+
+    data class Rate(override val value: Double) : YawCommand {
+        override val mode = YawControlMode.ANGULAR_VELOCITY
+    }
+
+    data class Heading(override val value: Double) : YawCommand {
+        override val mode = YawControlMode.ANGLE
+    }
+}
+
 /** What the aircraft currently reports about virtual-stick control. */
 data class VirtualStickStatus(
     val enabled: Boolean = false,
@@ -41,7 +54,7 @@ data class VirtualStickStatus(
  * DjiBodyVelocityMapping, which has never been flown. The first flight moved
  * sideways on the "forward" button, so the field names lose to the aircraft:
  *   roll = forward m/s        pitch = right m/s
- *   verticalThrottle = up m/s yaw   = clockwise deg/s
+ *   verticalThrottle = up m/s yaw   = clockwise rate or ground-frame heading
  */
 class VirtualStickSession(
     private val onStatus: (VirtualStickStatus) -> Unit,
@@ -56,7 +69,7 @@ class VirtualStickSession(
     @Volatile private var commandedForwardMetersPerSecond = 0.0
     @Volatile private var commandedRightMetersPerSecond = 0.0
     @Volatile private var commandedClimbMetersPerSecond = 0.0
-    @Volatile private var commandedYawDegreesPerSecond = 0.0
+    @Volatile private var yawCommand: YawCommand = YawCommand.Rate(0.0)
     private var sendTask: ScheduledFuture<*>? = null
 
     /** Frames the aircraft accepted since the stream started, and failures. */
@@ -129,7 +142,9 @@ class VirtualStickSession(
     fun disable(onResult: (String?) -> Unit) {
         zeroAxes()
         stopSending()
-        runCatching { manager.sendVirtualStickAdvancedParam(currentParam()) }
+        runCatching {
+            manager.sendVirtualStickAdvancedParam(currentParam(YawCommand.Rate(0.0)))
+        }
         manager.setVirtualStickAdvancedModeEnabled(false)
         manager.disableVirtualStick(
             object : CommonCallbacks.CompletionCallback {
@@ -155,7 +170,8 @@ class VirtualStickSession(
     fun setStick(side: StickSide, x: Double, y: Double) {
         when (side) {
             StickSide.LEFT -> {
-                commandedYawDegreesPerSecond = x.coerceIn(-1.0, 1.0) * MAX_YAW_DEGREES_PER_SECOND
+                yawCommand =
+                    YawCommand.Rate(x.coerceIn(-1.0, 1.0) * MAX_YAW_DEGREES_PER_SECOND)
                 commandedClimbMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
             }
             StickSide.RIGHT -> {
@@ -175,14 +191,34 @@ class VirtualStickSession(
         commandedClimbMetersPerSecond = metersPerSecond.coerceIn(-MAX_VERTICAL_MPS, MAX_VERTICAL_MPS)
     }
 
-    /** Yaw command for autonomous closed-loop motion; positive is clockwise. */
+    /** Yaw-rate command for manual or autonomous motion; positive is clockwise. */
     fun setYawRate(degreesPerSecond: Double) {
-        commandedYawDegreesPerSecond =
-            degreesPerSecond.coerceIn(
-                -AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
-                AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
+        yawCommand =
+            YawCommand.Rate(
+                degreesPerSecond.coerceIn(
+                    -AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
+                    AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND,
+                ),
             )
     }
+
+    /**
+     * Ground-frame heading setpoint for the isolated yaw-capability experiment.
+     * Returns false instead of allowing an undefined command into the frame stream.
+     */
+    fun setYawHeading(degrees: Double): Boolean {
+        if (!degrees.isFinite()) return false
+        yawCommand =
+            YawCommand.Heading(
+                degrees.coerceIn(
+                    -MAX_YAW_HEADING_DEGREES,
+                    MAX_YAW_HEADING_DEGREES,
+                ),
+            )
+        return true
+    }
+
+    fun speedLevel(): Double = manager.speedLevel
 
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
     fun setForwardOnly(metersPerSecond: Double) {
@@ -224,7 +260,8 @@ class VirtualStickSession(
         frameFailures = 0
         sendTask = sender.scheduleAtFixedRate(
             {
-                runCatching { manager.sendVirtualStickAdvancedParam(currentParam()) }
+                val currentYawCommand = yawCommand
+                runCatching { manager.sendVirtualStickAdvancedParam(currentParam(currentYawCommand)) }
                     .onSuccess { frameCount += 1 }
                     .onFailure {
                         frameFailures += 1
@@ -234,19 +271,25 @@ class VirtualStickSession(
                 // commanded: enough to prove the stream is alive and what it
                 // carries, without the flood that destroyed earlier evidence.
                 if (frameCount % FRAME_RATE_HZ == 0L) {
+                    val yawActive =
+                        when (currentYawCommand) {
+                            is YawCommand.Rate -> currentYawCommand.value != 0.0
+                            is YawCommand.Heading -> true
+                        }
                     val moving =
                         commandedForwardMetersPerSecond != 0.0 ||
                             commandedRightMetersPerSecond != 0.0 ||
                             commandedClimbMetersPerSecond != 0.0 ||
-                            commandedYawDegreesPerSecond != 0.0
+                            yawActive
                     if (moving || frameFailures > 0) {
                         onFrameSummary(
                             "frames=$frameCount fails=$frameFailures " +
-                                "fwd=%.2f right=%.2f up=%.2f yaw=%.1f".format(
+                                "fwd=%.2f right=%.2f up=%.2f yawMode=%s yaw=%.1f".format(
                                     commandedForwardMetersPerSecond,
                                     commandedRightMetersPerSecond,
                                     commandedClimbMetersPerSecond,
-                                    commandedYawDegreesPerSecond,
+                                    currentYawCommand.mode.name,
+                                    currentYawCommand.value,
                                 ),
                         )
                     }
@@ -272,18 +315,18 @@ class VirtualStickSession(
         commandedForwardMetersPerSecond = 0.0
         commandedRightMetersPerSecond = 0.0
         commandedClimbMetersPerSecond = 0.0
-        commandedYawDegreesPerSecond = 0.0
+        yawCommand = YawCommand.Rate(0.0)
     }
 
-    private fun currentParam(): VirtualStickFlightControlParam =
+    private fun currentParam(currentYawCommand: YawCommand): VirtualStickFlightControlParam =
         VirtualStickFlightControlParam().apply {
             roll = commandedForwardMetersPerSecond
             pitch = commandedRightMetersPerSecond
             verticalThrottle = commandedClimbMetersPerSecond
-            yaw = commandedYawDegreesPerSecond
+            yaw = currentYawCommand.value
             rollPitchControlMode = RollPitchControlMode.VELOCITY
             verticalControlMode = VerticalControlMode.VELOCITY
-            yawControlMode = YawControlMode.ANGULAR_VELOCITY
+            yawControlMode = currentYawCommand.mode
             rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
         }
 
@@ -299,9 +342,13 @@ class VirtualStickSession(
         const val MAX_VERTICAL_MPS = 0.3
         const val MAX_YAW_DEGREES_PER_SECOND = 20.0
 
-        /** Separate ceiling for measured autonomous experiments; manual controls stay gentle. */
+        /**
+         * MSDK documents ±100°/s for yaw-rate control. Manual controls remain gentle;
+         * autonomous experiments may explicitly exercise the full documented range.
+         */
         const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 1.0
-        const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 60.0
+        const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 100.0
+        const val MAX_YAW_HEADING_DEGREES = 180.0
 
         private const val TAG = "LiteVirtualStick"
     }

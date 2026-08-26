@@ -27,12 +27,15 @@ enum class PathQuality {
 }
 
 /**
- * PATH follows a sampled tape centerline and is the passive preview default, so
- * curved tape is outlined before the operator enables autonomous tracking.
+ * Detection owns only image evidence. Every curved-flight controller consumes
+ * the same near-edge path, then projects that path into its own control frame.
  */
-internal enum class TapeDetectionMode {
-    STRAIGHT,
-    PATH,
+internal enum class TapeDetectionMode(
+    val usesPathGeometry: Boolean,
+    val trackingTargetYFraction: Double,
+) {
+    STRAIGHT(false, TRACKING_TARGET_Y_FRACTION),
+    PATH(true, TRACKING_TARGET_Y_FRACTION),
 }
 
 /**

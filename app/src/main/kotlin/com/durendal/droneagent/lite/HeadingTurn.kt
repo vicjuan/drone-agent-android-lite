@@ -13,6 +13,35 @@ internal fun boundedControlIntervalSeconds(
             .coerceIn(0.0, maximumSeconds)
     }
 
+internal fun wrapToSignedHeading(degrees: Double): Double {
+    require(degrees.isFinite()) { "heading must be finite" }
+    var wrapped = degrees % 360.0
+    if (wrapped > 180.0) wrapped -= 360.0
+    if (wrapped < -180.0) wrapped += 360.0
+    return wrapped
+}
+
+internal fun headingTargetForYawRate(
+    currentHeadingDegrees: Double,
+    yawRateDegreesPerSecond: Double,
+    maximumYawRateDegreesPerSecond: Double,
+    maximumHeadingLeadDegrees: Double,
+): Double? {
+    if (!currentHeadingDegrees.isFinite() || !yawRateDegreesPerSecond.isFinite()) return null
+    require(maximumYawRateDegreesPerSecond > 0.0 && maximumYawRateDegreesPerSecond.isFinite()) {
+        "maximum yaw rate must be finite and positive"
+    }
+    require(maximumHeadingLeadDegrees in 0.0..<180.0) {
+        "maximum heading lead must be in [0, 180)"
+    }
+    val headingLead =
+        yawRateDegreesPerSecond
+            .coerceIn(-maximumYawRateDegreesPerSecond, maximumYawRateDegreesPerSecond) /
+            maximumYawRateDegreesPerSecond *
+            maximumHeadingLeadDegrees
+    return wrapToSignedHeading(currentHeadingDegrees + headingLead)
+}
+
 /** Tracks clockwise yaw progress across the -180/180-degree heading boundary. */
 internal class HeadingTurn(
     initialHeadingDegrees: Double,

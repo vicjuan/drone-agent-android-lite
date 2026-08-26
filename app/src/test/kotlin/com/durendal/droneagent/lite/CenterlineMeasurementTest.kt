@@ -50,6 +50,7 @@ class CenterlineMeasurementTest {
         assertTrue(lookahead.yFraction < measurement.anchorYFraction)
     }
 
+
     @Test
     fun `a horizontal chain is measured the same way as a vertical one`() {
         val vertical = requireNotNull(measure(verticalChain(pointCount = 120)))
@@ -143,7 +144,10 @@ class CenterlineMeasurementTest {
         )
     }
 
-    private fun measure(points: List<CenterlinePoint>) = CenterlineMeasurement.measure(
+    private fun measure(
+        points: List<CenterlinePoint>,
+        trackingTargetYFraction: Double = TRACKING_TARGET_Y_FRACTION,
+    ) = CenterlineMeasurement.measure(
         estimate = CenterlineEstimate(
             points = points,
             confidence = 1.0,
@@ -151,6 +155,7 @@ class CenterlineMeasurementTest {
         ),
         frameWidth = FRAME_WIDTH,
         frameHeight = FRAME_HEIGHT,
+        trackingTargetYFraction = trackingTargetYFraction,
     )
 
     /** Ordered from the image bottom upward, as the extractor emits them. */

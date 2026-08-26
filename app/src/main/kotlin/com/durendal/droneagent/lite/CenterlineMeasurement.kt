@@ -48,8 +48,12 @@ internal object CenterlineMeasurement {
         estimate: CenterlineEstimate,
         frameWidth: Int,
         frameHeight: Int,
+        trackingTargetYFraction: Double = TRACKING_TARGET_Y_FRACTION,
     ): CenterlinePathMeasurement? {
         require(frameWidth > 0 && frameHeight > 0) { "frame dimensions must be positive" }
+        require(trackingTargetYFraction in 0.0..1.0) {
+            "tracking target y must be a frame fraction"
+        }
         val points = estimate.points
         if (points.size < MIN_POINT_COUNT) return null
 
@@ -65,7 +69,7 @@ internal object CenterlineMeasurement {
         // The extractor's first point is only a route-ordering endpoint. Control starts at the
         // closest point on the route to the aircraft reference drawn by the overlay.
         val aircraftX = frameWidth * TRACKING_TARGET_X_FRACTION
-        val aircraftY = frameHeight * TRACKING_TARGET_Y_FRACTION
+        val aircraftY = frameHeight * trackingTargetYFraction
         var anchorSegmentIndex = 0
         var anchorSegmentFraction = 0.0
         var anchorX = points.first().x
