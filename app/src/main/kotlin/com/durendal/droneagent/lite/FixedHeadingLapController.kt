@@ -20,6 +20,7 @@ internal enum class FixedHeadingTrackingSpeed(
 ) {
     SLOW(0.20),
     FAST(0.90),
+    BOOST(1.25),
 }
 
 internal data class OmniCenterlineMeasurement(
@@ -68,6 +69,8 @@ internal class FixedHeadingLapController {
     private var lastTickAtNanos = 0L
     private var latestMeasurementCapturedAtNanos = 0L
     private var lastVirtualTurnRateDegreesPerSecond = 0.0
+    private var pendingRecoveryMeasurement: OmniCenterlineMeasurement? = null
+    private var lossObservedAtNanos = 0L
 
     fun start(
         nowNanos: Long,
@@ -86,6 +89,8 @@ internal class FixedHeadingLapController {
         lastTickAtNanos = nowNanos
         latestMeasurementCapturedAtNanos = 0L
         lastVirtualTurnRateDegreesPerSecond = 0.0
+        pendingRecoveryMeasurement = null
+        lossObservedAtNanos = 0L
     }
 
     fun stop() {
@@ -98,6 +103,8 @@ internal class FixedHeadingLapController {
         lastTickAtNanos = 0L
         latestMeasurementCapturedAtNanos = 0L
         lastVirtualTurnRateDegreesPerSecond = 0.0
+        pendingRecoveryMeasurement = null
+        lossObservedAtNanos = 0L
     }
 
     fun observe(
@@ -116,26 +123,39 @@ internal class FixedHeadingLapController {
             virtualHeadingDegrees -
                 lastVirtualTurnRateDegreesPerSecond * measurementAgeSeconds,
         )
-        val measurement = if (centerline == null || heightMeters == null) {
-            null
-        } else {
-            OmniCenterline.measure(
-                path = centerline,
-                heightMeters = heightMeters,
-                travelDirectionDegrees = virtualHeadingAtCapture,
-                lookaheadMeters = configuredLookaheadMeters(),
-                previousMeasurement = latestMeasurement,
-            )
-        }
-        latestConfidence = confidence
+        val measurement =
+            if (centerline == null || heightMeters == null) {
+                null
+            } else {
+                val continuous = OmniCenterline.measure(
+                    path = centerline,
+                    heightMeters = heightMeters,
+                    travelDirectionDegrees = virtualHeadingAtCapture,
+                    lookaheadMeters = configuredLookaheadMeters(),
+                    previousMeasurement = latestMeasurement,
+                )
+                continuous ?: recoveryMeasurement(
+                    centerline = centerline,
+                    heightMeters = heightMeters,
+                    travelDirectionDegrees = virtualHeadingAtCapture,
+                    confidence = confidence,
+                )
+            }
         if (measurement != null) {
+            latestConfidence = confidence
             latestMeasurement = measurement
+            pendingRecoveryMeasurement = null
             lastDetectionAtNanos = nowNanos
             latestMeasurementCapturedAtNanos = measurementAtNanos
+            lossObservedAtNanos = 0L
         }
         if (measurement == null) {
+            if (centerline == null || heightMeters == null) {
+                pendingRecoveryMeasurement = null
+            }
             if (phase == FixedHeadingLapPhase.TRACKING) {
                 phase = FixedHeadingLapPhase.COASTING
+                lossObservedAtNanos = nowNanos
                 pathAccelerationMetersPerSecondSquared = 0.0
             }
             return
@@ -169,19 +189,33 @@ internal class FixedHeadingLapController {
         lastTickAtNanos = nowNanos
 
         val detectionAgeNanos = nowNanos - lastDetectionAtNanos
-        if (latestMeasurement == null || detectionAgeNanos > staleWindowNanos()) {
+        if (
+            latestMeasurement == null ||
+            detectionAgeNanos > REACQUISITION_TIMEOUT_NANOS
+        ) {
             pathSpeedMetersPerSecond = 0.0
             pathAccelerationMetersPerSecondSquared = 0.0
             phase = FixedHeadingLapPhase.STOPPED
             return decision(stopRequested = true)
         }
-        if (phase == FixedHeadingLapPhase.COASTING) {
-            pathAccelerationMetersPerSecondSquared = 0.0
-            pathSpeedMetersPerSecond = moveToward(
-                pathSpeedMetersPerSecond,
-                0.0,
-                MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
-            )
+        val speedHoldWindowNanos = staleWindowNanos()
+        val withinExplicitLossHold =
+            phase == FixedHeadingLapPhase.COASTING &&
+                lossObservedAtNanos > 0L &&
+                nowNanos - lossObservedAtNanos <= speedHoldWindowNanos
+        if (
+            phase == FixedHeadingLapPhase.COASTING ||
+            detectionAgeNanos > speedHoldWindowNanos
+        ) {
+            phase = FixedHeadingLapPhase.COASTING
+            if (!withinExplicitLossHold) {
+                pathAccelerationMetersPerSecondSquared = 0.0
+                pathSpeedMetersPerSecond = moveToward(
+                    pathSpeedMetersPerSecond,
+                    0.0,
+                    MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
+                )
+            }
             val headingRadians = Math.toRadians(virtualHeadingDegrees)
             return decision(
                 forward = pathSpeedMetersPerSecond * cos(headingRadians),
@@ -202,14 +236,30 @@ internal class FixedHeadingLapController {
 
         val confidenceLimitedSpeed =
             if (latestConfidence >= MIN_CONFIDENCE) {
-                TARGET_SPEED_METERS_PER_SECOND
+                trackingSpeed.targetMetersPerSecond
             } else {
                 DEGRADED_SPEED_METERS_PER_SECOND
             }
-        val trackingAuthority = minOf(
-            1.0 - abs(guidanceError) / SLOWDOWN_GUIDANCE_ERROR_DEGREES,
-            1.0 - abs(measurement.lateralOffsetMeters) / SLOWDOWN_LATERAL_OFFSET_METERS,
-        ).coerceIn(0.0, 1.0)
+        val trackingAuthority =
+            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
+                minOf(
+                    authorityAfterMargin(
+                        magnitude = abs(guidanceError),
+                        fullAuthorityLimit = BOOST_FULL_SPEED_GUIDANCE_ERROR_DEGREES,
+                        zeroAuthorityLimit = SLOWDOWN_GUIDANCE_ERROR_DEGREES,
+                    ),
+                    authorityAfterMargin(
+                        magnitude = abs(measurement.lateralOffsetMeters),
+                        fullAuthorityLimit = BOOST_FULL_SPEED_LATERAL_OFFSET_METERS,
+                        zeroAuthorityLimit = SLOWDOWN_LATERAL_OFFSET_METERS,
+                    ),
+                )
+            } else {
+                minOf(
+                    1.0 - abs(guidanceError) / SLOWDOWN_GUIDANCE_ERROR_DEGREES,
+                    1.0 - abs(measurement.lateralOffsetMeters) / SLOWDOWN_LATERAL_OFFSET_METERS,
+                ).coerceIn(0.0, 1.0)
+            }
         val authorityLimitedSpeed = confidenceLimitedSpeed * trackingAuthority
         val lookaheadLimitedSpeed =
             trackingSpeed.targetMetersPerSecond *
@@ -257,6 +307,60 @@ internal class FixedHeadingLapController {
     }
 
 
+    /**
+     * A specular highlight can redraw the same physical tape far enough to fail
+     * the previous-frame jump limits. Rebase only after two mutually continuous
+     * samples that still point along the commanded travel direction and remain
+     * close to the aircraft. One isolated reflection frame can therefore slow
+     * the aircraft, but cannot redirect it.
+     */
+    private fun recoveryMeasurement(
+        centerline: TapeCenterlinePath,
+        heightMeters: Double,
+        travelDirectionDegrees: Double,
+        confidence: Double,
+    ): OmniCenterlineMeasurement? {
+        if (phase == FixedHeadingLapPhase.ACQUIRING || confidence < MIN_CONFIDENCE) {
+            pendingRecoveryMeasurement = null
+            return null
+        }
+        val previousRecovery = pendingRecoveryMeasurement
+        if (previousRecovery == null) {
+            pendingRecoveryMeasurement =
+                OmniCenterline.measure(
+                    path = centerline,
+                    heightMeters = heightMeters,
+                    travelDirectionDegrees = travelDirectionDegrees,
+                    lookaheadMeters = configuredLookaheadMeters(),
+                )?.takeIf {
+                    isSafeRecoveryMeasurement(it, travelDirectionDegrees)
+                }
+            return null
+        }
+        val candidate = OmniCenterline.measure(
+            path = centerline,
+            heightMeters = heightMeters,
+            travelDirectionDegrees = travelDirectionDegrees,
+            lookaheadMeters = configuredLookaheadMeters(),
+            previousMeasurement = previousRecovery,
+        )
+        if (candidate == null || !isSafeRecoveryMeasurement(candidate, travelDirectionDegrees)) {
+            pendingRecoveryMeasurement = null
+            return null
+        }
+        return candidate
+    }
+
+    private fun isSafeRecoveryMeasurement(
+        measurement: OmniCenterlineMeasurement,
+        travelDirectionDegrees: Double,
+    ): Boolean =
+        abs(shortestAngularDelta(
+            travelDirectionDegrees,
+            directionToLookahead(measurement),
+        )) <= MAX_RECOVERY_GUIDANCE_ERROR_DEGREES &&
+            abs(measurement.lateralOffsetMeters) <= MAX_RECOVERY_LATERAL_OFFSET_METERS
+
     private fun directionToLookahead(measurement: OmniCenterlineMeasurement): Double =
         wrapDegrees(
             Math.toDegrees(
@@ -269,16 +373,34 @@ internal class FixedHeadingLapController {
 
     private fun staleWindowNanos(): Long {
         val speed = pathSpeedMetersPerSecond.coerceAtLeast(0.05)
-        return (MAX_BLIND_DISTANCE_METERS / speed * 1_000_000_000.0).toLong()
-            .coerceIn(MIN_STALE_NANOS, MAX_STALE_NANOS)
+        val committedBoost =
+            trackingSpeed == FixedHeadingTrackingSpeed.BOOST &&
+                latestConfidence >= BOOST_COMMIT_CONFIDENCE
+        val maximumBlindDistanceMeters =
+            if (committedBoost) BOOST_MAX_BLIND_DISTANCE_METERS else MAX_BLIND_DISTANCE_METERS
+        val maximumStaleNanos =
+            if (committedBoost) BOOST_MAX_STALE_NANOS else MAX_STALE_NANOS
+        return (maximumBlindDistanceMeters / speed * 1_000_000_000.0).toLong()
+            .coerceIn(MIN_STALE_NANOS, maximumStaleNanos)
     }
 
     private fun configuredLookaheadMeters(): Double =
-        if (trackingSpeed == FixedHeadingTrackingSpeed.FAST) {
-            FAST_LOOKAHEAD_METERS
-        } else {
-            SLOW_LOOKAHEAD_METERS
+        when (trackingSpeed) {
+            FixedHeadingTrackingSpeed.SLOW -> SLOW_LOOKAHEAD_METERS
+            FixedHeadingTrackingSpeed.FAST -> FAST_LOOKAHEAD_METERS
+            FixedHeadingTrackingSpeed.BOOST -> BOOST_LOOKAHEAD_METERS
         }
+
+    private fun authorityAfterMargin(
+        magnitude: Double,
+        fullAuthorityLimit: Double,
+        zeroAuthorityLimit: Double,
+    ): Double =
+        (
+            1.0 -
+                (magnitude - fullAuthorityLimit) /
+                (zeroAuthorityLimit - fullAuthorityLimit)
+            ).coerceIn(0.0, 1.0)
 
     private fun decision(
         forward: Double = 0.0,
@@ -311,16 +433,28 @@ internal class FixedHeadingLapController {
         }
 
         val speedError = targetSpeed - pathSpeedMetersPerSecond
+        val maximumAcceleration =
+            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
+                BOOST_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED
+            } else {
+                MAX_ACCELERATION_METERS_PER_SECOND_SQUARED
+            }
+        val maximumJerk =
+            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
+                BOOST_MAX_JERK_METERS_PER_SECOND_CUBED
+            } else {
+                MAX_JERK_METERS_PER_SECOND_CUBED
+            }
         val desiredAcceleration = (
             speedError * SPEED_ERROR_RESPONSE_PER_SECOND
             ).coerceIn(
             -MAX_DECELERATION_METERS_PER_SECOND_SQUARED,
-            MAX_ACCELERATION_METERS_PER_SECOND_SQUARED,
+            maximumAcceleration,
         )
         pathAccelerationMetersPerSecondSquared = moveToward(
             pathAccelerationMetersPerSecondSquared,
             desiredAcceleration,
-            MAX_JERK_METERS_PER_SECOND_CUBED * elapsedSeconds,
+            maximumJerk * elapsedSeconds,
         )
         val nextSpeed = (
             pathSpeedMetersPerSecond +
@@ -346,27 +480,37 @@ internal class FixedHeadingLapController {
         }
 
     internal companion object {
-        const val TARGET_SPEED_METERS_PER_SECOND = 0.90
         const val DEGRADED_SPEED_METERS_PER_SECOND = 0.22
         const val MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
+        const val BOOST_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 1.00
         const val MAX_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
-        const val MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED = 4.50
+        const val MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED = 1.50
         const val MAX_JERK_METERS_PER_SECOND_CUBED = 2.00
+        const val BOOST_MAX_JERK_METERS_PER_SECOND_CUBED = 4.00
         const val SPEED_ERROR_RESPONSE_PER_SECOND = 3.00
-        const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 90.0
+        const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 60.0
         const val LATERAL_FEEDBACK_GAIN_PER_SECOND = 0.8
         const val MAX_LATERAL_CORRECTION_METERS_PER_SECOND = 0.25
         const val MIN_CONFIDENCE = 0.60
+        const val BOOST_COMMIT_CONFIDENCE = 0.75
         const val MAX_TRACKING_ANGLE_DEGREES = 70.0
         const val ACQUISITION_TIMEOUT_NANOS = 8_000_000_000L
         const val MAX_BLIND_DISTANCE_METERS = 0.10
-        const val MIN_STALE_NANOS = 200_000_000L
-        const val MAX_STALE_NANOS = 400_000_000L
+        const val BOOST_MAX_BLIND_DISTANCE_METERS = 0.22
+        const val MIN_STALE_NANOS = 80_000_000L
+        const val MAX_STALE_NANOS = 150_000_000L
+        const val BOOST_MAX_STALE_NANOS = 180_000_000L
+        const val REACQUISITION_TIMEOUT_NANOS = 1_200_000_000L
         const val MAX_TICK_NANOS = 250_000_000L
         const val FAST_LOOKAHEAD_METERS = 0.35
+        const val BOOST_LOOKAHEAD_METERS = 0.45
         const val SLOW_LOOKAHEAD_METERS = 0.25
         const val SLOWDOWN_GUIDANCE_ERROR_DEGREES = 35.0
+        const val BOOST_FULL_SPEED_GUIDANCE_ERROR_DEGREES = 10.0
+        const val MAX_RECOVERY_GUIDANCE_ERROR_DEGREES = 35.0
+        const val MAX_RECOVERY_LATERAL_OFFSET_METERS = 0.20
         const val SLOWDOWN_LATERAL_OFFSET_METERS = 0.25
+        const val BOOST_FULL_SPEED_LATERAL_OFFSET_METERS = 0.08
         const val MAX_MEASUREMENT_AGE_COMPENSATION_SECONDS = 0.20
         private const val NANOS_PER_SECOND = 1_000_000_000.0
     }

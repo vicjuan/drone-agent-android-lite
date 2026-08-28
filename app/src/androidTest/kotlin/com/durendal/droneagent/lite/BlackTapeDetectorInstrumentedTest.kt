@@ -287,6 +287,42 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(detection.nearFieldOffsetFraction > 0.10)
         assertTrue(detection.bounds.right > 0.68)
     }
+
+    @Test
+    fun trackedTapeDoesNotCollapseOntoThinCardboardJoin() {
+        val width = 640
+        val height = 360
+        val tape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(tape, width, height, direction = 1.0, value = 20)
+        val cardboardJoin = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center =
+                width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                cardboardJoin,
+                width,
+                left = (center - 1.0).toInt(),
+                top = y,
+                right = (center + 1.0).toInt(),
+                bottom = y + 1,
+                value = 45,
+            )
+        }
+        val diagnostics = mutableListOf<String>()
+
+        val detections =
+            detectSequence(
+                listOf(tape, cardboardJoin, cardboardJoin),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+            )
+
+        assertTrue(diagnostics.first(), detections.first() != null)
+        assertTrue(diagnostics.joinToString("\n"), detections.drop(1).all { it == null })
+        assertTrue(diagnostics.last(), diagnostics.last().contains("width:"))
+    }
     @Test
     fun finalCardboardScreenshotUiIsNotAcceptedAsCameraTape() {
         // This asset is a screenshot with the app's dark status panel, controls,
@@ -532,7 +568,7 @@ class BlackTapeDetectorInstrumentedTest {
         }
     }
     @Test
-    fun latestFlightProvidesTwoQualifiedEndpointFramesBeforeDetectorFlicker() {
+    fun oneSidedDeskEdgeCannotProvideEndpointEvidenceBeforeTapeAppears() {
         val width = 1920
         val height = 1080
         val diagnostics = mutableListOf<String>()
@@ -554,12 +590,14 @@ class BlackTapeDetectorInstrumentedTest {
                 },
             )
 
-        val endpointEvidence = detections.mapIndexed { index, detection ->
+        val evidence = detections.mapIndexed { index, detection ->
             "$index:${detection?.quality}:${detection?.endpointCandidate}:${diagnostics[index]}"
         }
-        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it != null })
-        assertTrue(endpointEvidence.joinToString("\n"), detections.take(2).all { it?.endpointCandidate == true })
-        assertTrue(endpointEvidence.joinToString("\n"), detections.drop(2).none { it?.endpointCandidate == true })
+        assertTrue(evidence.joinToString("\n"), detections[0]?.endpointCandidate == true)
+        assertTrue(evidence.joinToString("\n"), detections[1] == null)
+        assertTrue(evidence.joinToString("\n"), detections[2] == null)
+        assertEquals(evidence.joinToString("\n"), PathQuality.FULL_PATH, detections[3]?.quality)
+        assertTrue(evidence.joinToString("\n"), detections[3]?.endpointCandidate != true)
     }
 
     @Test
@@ -1088,6 +1126,46 @@ class BlackTapeDetectorInstrumentedTest {
             assertTrue(diagnostics, diagnostics.contains("frames=received:3 accepted:1"))
             assertTrue(diagnostics, diagnostics.contains("throttle:1 busy:0 invalid:1"))
             assertTrue(diagnostics, diagnostics.contains("completed:1 failed:0"))
+        } finally {
+            detector.close()
+        }
+    }
+
+    @Test
+    fun frameProfileAccountsForEveryOpenCvStage() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillRect(frame, width, left = 305, top = 0, right = 335, bottom = height, value = 20)
+        val profiles = LinkedBlockingQueue<TapeFrameProfile>()
+        val detector = BlackTapeDetector(
+            onResult = {},
+            onError = { throw AssertionError("detector failed", it) },
+            onFrameProfile = profiles::offer,
+        )
+        detector.setDetectionMode(TapeDetectionMode.STRAIGHT)
+        try {
+            detector.submitRgba(frame, 0, frame.size, width, height)
+            val profile =
+                profiles.poll(3, TimeUnit.SECONDS)
+                    ?: throw AssertionError("detector did not publish a frame profile")
+            val accountedNanos =
+                profile.preprocessingNanos +
+                    profile.thresholdingNanos +
+                    profile.floorContextNanos +
+                    profile.morphologyAndContoursNanos +
+                    profile.candidateScoringNanos +
+                    profile.cleanupNanos
+            val processingNanos =
+                profile.processingCompletedAtNanos - profile.processingStartedAtNanos
+
+            assertTrue(profile.preprocessingNanos > 0L)
+            assertTrue(profile.thresholdingNanos > 0L)
+            assertTrue(profile.floorContextNanos > 0L)
+            assertTrue(profile.morphologyAndContoursNanos > 0L)
+            assertTrue(profile.candidateScoringNanos > 0L)
+            assertTrue(profile.cleanupNanos > 0L)
+            assertTrue("accounted=$accountedNanos processing=$processingNanos", accountedNanos <= processingNanos)
         } finally {
             detector.close()
         }

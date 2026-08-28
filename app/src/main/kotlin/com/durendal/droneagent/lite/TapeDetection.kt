@@ -142,6 +142,7 @@ internal object TapeOrientation {
 internal enum class TapeCandidateRejection {
     INVALID_GEOMETRY,
     AREA,
+    WIDTH,
     LENGTH,
     CURVATURE,
     DIRECTION_CONTINUITY,

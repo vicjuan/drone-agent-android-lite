@@ -39,6 +39,18 @@ data class VirtualStickStatus(
     val authority: String = "UNKNOWN",
 )
 
+
+data class VirtualStickFrameProfile(
+    val sentAtNanos: Long,
+    val sendDurationNanos: Long,
+    val horizontalCommandUpdatedAtNanos: Long,
+    val succeeded: Boolean,
+    val forwardMetersPerSecond: Double,
+    val rightMetersPerSecond: Double,
+    val climbMetersPerSecond: Double,
+    val yawMode: String,
+    val yawValue: Double,
+)
 /**
  * MSDK virtual-stick lifecycle plus the fixed-rate sender it requires.
  *
@@ -59,6 +71,7 @@ data class VirtualStickStatus(
 class VirtualStickSession(
     private val onStatus: (VirtualStickStatus) -> Unit,
     private val onFrameSummary: (String) -> Unit = {},
+    private val onFrameSent: (VirtualStickFrameProfile) -> Unit = {},
 ) {
 
     private val manager = VirtualStickManager.getInstance()
@@ -70,6 +83,7 @@ class VirtualStickSession(
     @Volatile private var commandedRightMetersPerSecond = 0.0
     @Volatile private var commandedClimbMetersPerSecond = 0.0
     @Volatile private var yawCommand: YawCommand = YawCommand.Rate(0.0)
+    @Volatile private var horizontalCommandUpdatedAtNanos = 0L
     private var sendTask: ScheduledFuture<*>? = null
 
     /** Frames the aircraft accepted since the stream started, and failures. */
@@ -241,6 +255,7 @@ class VirtualStickSession(
                 -AUTONOMOUS_MAX_HORIZONTAL_MPS,
                 AUTONOMOUS_MAX_HORIZONTAL_MPS,
             )
+        horizontalCommandUpdatedAtNanos = System.nanoTime()
     }
 
 
@@ -261,12 +276,35 @@ class VirtualStickSession(
         sendTask = sender.scheduleAtFixedRate(
             {
                 val currentYawCommand = yawCommand
-                runCatching { manager.sendVirtualStickAdvancedParam(currentParam(currentYawCommand)) }
+                val currentHorizontalCommandUpdatedAtNanos = horizontalCommandUpdatedAtNanos
+                val sendStartedAtNanos = System.nanoTime()
+                val sendResult =
+                    runCatching { manager.sendVirtualStickAdvancedParam(currentParam(currentYawCommand)) }
+                val sendCompletedAtNanos = System.nanoTime()
+                sendResult
                     .onSuccess { frameCount += 1 }
                     .onFailure {
                         frameFailures += 1
                         Log.w(TAG, "frame send failed", it)
                     }
+                try {
+                    onFrameSent(
+                        VirtualStickFrameProfile(
+                            sentAtNanos = sendStartedAtNanos,
+                            sendDurationNanos = sendCompletedAtNanos - sendStartedAtNanos,
+                            horizontalCommandUpdatedAtNanos =
+                                currentHorizontalCommandUpdatedAtNanos,
+                            succeeded = sendResult.isSuccess,
+                            forwardMetersPerSecond = commandedForwardMetersPerSecond,
+                            rightMetersPerSecond = commandedRightMetersPerSecond,
+                            climbMetersPerSecond = commandedClimbMetersPerSecond,
+                            yawMode = currentYawCommand.mode.name,
+                            yawValue = currentYawCommand.value,
+                        ),
+                    )
+                } catch (error: Throwable) {
+                    Log.w(TAG, "profiling callback failed", error)
+                }
                 // One line per second, and only while something is actually being
                 // commanded: enough to prove the stream is alive and what it
                 // carries, without the flood that destroyed earlier evidence.
@@ -343,10 +381,11 @@ class VirtualStickSession(
         const val MAX_YAW_DEGREES_PER_SECOND = 20.0
 
         /**
-         * MSDK documents ±100°/s for yaw-rate control. Manual controls remain gentle;
-         * autonomous experiments may explicitly exercise the full documented range.
+         * Autonomous body-velocity authority. Manual controls remain deliberately
+         * gentle; the red high-speed profile may explicitly use 1.25 m/s while the
+         * path controller retains confidence, lookahead, offset, and loss gates.
          */
-        const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 1.0
+        const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 1.25
         const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 100.0
         const val MAX_YAW_HEADING_DEGREES = 180.0
 

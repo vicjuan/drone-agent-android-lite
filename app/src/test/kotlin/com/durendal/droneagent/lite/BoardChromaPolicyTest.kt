@@ -6,34 +6,71 @@ import org.junit.Test
 
 class BoardChromaPolicyTest {
     @Test
-    fun `tracked cardboard survives absolute chroma drift when its reference still matches`() {
+    fun `cardboard on both sides with sufficient coverage is accepted`() {
         assertTrue(
-            acceptsCorrugatedBoard(
-                absoluteChromaMatch = false,
-                overlapsPreviousRoute = true,
-                matchesAcceptedBoardReference = true,
+            BilateralBoardPolicy.accepts(
+                pairCount = 40,
+                sampleCoverageFraction = 0.90,
+                compatiblePairFraction = 0.90,
+                leftMatchFraction = 0.90,
+                rightMatchFraction = 0.88,
+                bothSidesMatchFraction = 0.84,
             ),
         )
     }
 
     @Test
-    fun `a new route still requires absolute cardboard chroma`() {
+    fun `cardboard on only one side is rejected`() {
         assertFalse(
-            acceptsCorrugatedBoard(
-                absoluteChromaMatch = false,
-                overlapsPreviousRoute = false,
-                matchesAcceptedBoardReference = true,
+            BilateralBoardPolicy.accepts(
+                pairCount = 40,
+                sampleCoverageFraction = 0.90,
+                compatiblePairFraction = 0.90,
+                leftMatchFraction = 0.95,
+                rightMatchFraction = 0.50,
+                bothSidesMatchFraction = 0.48,
             ),
         )
     }
 
     @Test
-    fun `an overlapping route cannot bypass both colour gates`() {
+    fun `different bad sections on each side cannot pass through averages`() {
         assertFalse(
-            acceptsCorrugatedBoard(
-                absoluteChromaMatch = false,
-                overlapsPreviousRoute = true,
-                matchesAcceptedBoardReference = false,
+            BilateralBoardPolicy.accepts(
+                pairCount = 40,
+                sampleCoverageFraction = 0.90,
+                compatiblePairFraction = 0.90,
+                leftMatchFraction = 0.90,
+                rightMatchFraction = 0.90,
+                bothSidesMatchFraction = 0.75,
+            ),
+        )
+    }
+
+    @Test
+    fun `samples that mostly fall outside the image or on black pixels are rejected`() {
+        assertFalse(
+            BilateralBoardPolicy.accepts(
+                pairCount = 40,
+                sampleCoverageFraction = 0.60,
+                compatiblePairFraction = 0.90,
+                leftMatchFraction = 0.95,
+                rightMatchFraction = 0.95,
+                bothSidesMatchFraction = 0.90,
+            ),
+        )
+    }
+
+    @Test
+    fun `two differently coloured sides are rejected`() {
+        assertFalse(
+            BilateralBoardPolicy.accepts(
+                pairCount = 40,
+                sampleCoverageFraction = 0.90,
+                compatiblePairFraction = 0.60,
+                leftMatchFraction = 0.95,
+                rightMatchFraction = 0.95,
+                bothSidesMatchFraction = 0.90,
             ),
         )
     }

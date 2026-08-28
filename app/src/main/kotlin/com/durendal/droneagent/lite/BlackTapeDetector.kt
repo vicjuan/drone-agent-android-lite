@@ -17,14 +17,45 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.hypot
 
-internal fun acceptsCorrugatedBoard(
-    absoluteChromaMatch: Boolean,
-    overlapsPreviousRoute: Boolean,
-    matchesAcceptedBoardReference: Boolean,
-): Boolean =
-    absoluteChromaMatch ||
-        (overlapsPreviousRoute && matchesAcceptedBoardReference)
+internal object BilateralBoardPolicy {
+    const val MIN_PAIR_COUNT = 10
+    const val MIN_SAMPLE_COVERAGE_FRACTION = 0.70
+    const val MIN_COMPATIBLE_PAIR_FRACTION = 0.70
+    const val MIN_SIDE_MATCH_FRACTION = 0.85
+    const val MIN_BOTH_SIDES_MATCH_FRACTION = 0.80
 
+    fun accepts(
+        pairCount: Int,
+        sampleCoverageFraction: Double,
+        compatiblePairFraction: Double,
+        leftMatchFraction: Double,
+        rightMatchFraction: Double,
+        bothSidesMatchFraction: Double,
+    ): Boolean =
+        pairCount >= MIN_PAIR_COUNT &&
+            sampleCoverageFraction >= MIN_SAMPLE_COVERAGE_FRACTION &&
+            compatiblePairFraction >= MIN_COMPATIBLE_PAIR_FRACTION &&
+            leftMatchFraction >= MIN_SIDE_MATCH_FRACTION &&
+            rightMatchFraction >= MIN_SIDE_MATCH_FRACTION &&
+            bothSidesMatchFraction >= MIN_BOTH_SIDES_MATCH_FRACTION
+}
+
+
+internal data class TapeFrameProfile(
+    val sequence: Long,
+    val receivedAtNanos: Long,
+    val processingStartedAtNanos: Long,
+    val processingCompletedAtNanos: Long,
+    val preprocessingNanos: Long,
+    val thresholdingNanos: Long,
+    val floorContextNanos: Long,
+    val morphologyAndContoursNanos: Long,
+    val candidateScoringNanos: Long,
+    val cleanupNanos: Long,
+    val width: Int,
+    val height: Int,
+    val detected: Boolean,
+)
 /**
  * Finds a dark, tape-shaped region on brown corrugated board. Otsu adapts to
  * exposure, but its threshold is capped so a bright wall cannot make the whole
@@ -34,6 +65,7 @@ internal fun acceptsCorrugatedBoard(
 class BlackTapeDetector internal constructor(
     private val onResult: (TapeDetection?) -> Unit,
     private val onError: (Throwable) -> Unit = {},
+    private val onFrameProfile: (TapeFrameProfile) -> Unit = {},
     // Replay evidence is opt-in and owned by the caller: the detector knows the
     // frame and its masks, but only the Activity knows gimbal pose and height.
     private val captureRecorder: TapeCaptureRecorder? = null,
@@ -84,6 +116,12 @@ class BlackTapeDetector internal constructor(
     @Volatile private var lastFloorSeedCount = 0
     @Volatile private var lastFloorFraction = 0.0
     @Volatile private var lastFrameMillis = 0.0
+    private var lastPreprocessingNanos = 0L
+    private var lastThresholdingNanos = 0L
+    private var lastFloorContextNanos = 0L
+    private var lastMorphologyAndContoursNanos = 0L
+    private var lastCandidateScoringNanos = 0L
+    private var lastCleanupNanos = 0L
     @Volatile private var lastPathCoverage = 0.0
     @Volatile private var lastBranchCount = 0
     @Volatile private var lastRegionDescription = "none"
@@ -266,7 +304,7 @@ class BlackTapeDetector internal constructor(
                 "pathCurve=%.1f pathSmooth=%.2f otsu=%.1f effective=%.1f separation=%.1f " +
                 "shadowPixels=%d contours=%d floorSeeds=%d floor=%.2f coverage=%.2f branches=%d " +
                 "region=%s candidate=[%s] arcReject=[%s] " +
-                "rejects=invalid:%d area:%d length:%d curve:%d direction:%d " +
+                "rejects=invalid:%d area:%d width:%d length:%d curve:%d direction:%d " +
                 "edge:%d chroma:%d floor:%d boardColor:%d noCenterline:%d noNearField:%d " +
                 "branch:%d shortLookahead:%d"
             ).format(
@@ -300,6 +338,7 @@ class BlackTapeDetector internal constructor(
             lastArcRejection,
             rejectionCounts[TapeCandidateRejection.INVALID_GEOMETRY.ordinal],
             rejectionCounts[TapeCandidateRejection.AREA.ordinal],
+            rejectionCounts[TapeCandidateRejection.WIDTH.ordinal],
             rejectionCounts[TapeCandidateRejection.LENGTH.ordinal],
             rejectionCounts[TapeCandidateRejection.CURVATURE.ordinal],
             rejectionCounts[TapeCandidateRejection.DIRECTION_CONTINUITY.ordinal],
@@ -330,11 +369,40 @@ class BlackTapeDetector internal constructor(
         frameNanos: Long,
     ): TapeDetection? {
         frameSequence++
+        val currentFrameSequence = frameSequence
         val capturing = captureRecorder?.isArmed == true
         capturePlanes = if (capturing) ArrayList() else null
         val startedAtNanos = System.nanoTime()
+        lastPreprocessingNanos = 0L
+        lastThresholdingNanos = 0L
+        lastFloorContextNanos = 0L
+        lastMorphologyAndContoursNanos = 0L
+        lastCandidateScoringNanos = 0L
+        lastCleanupNanos = 0L
         val verdict = detectFrame(rgbaBytes, width, height, frameNanos)
-        lastFrameMillis = (System.nanoTime() - startedAtNanos) / 1_000_000.0
+        val completedAtNanos = System.nanoTime()
+        lastFrameMillis = (completedAtNanos - startedAtNanos) / 1_000_000.0
+        try {
+            onFrameProfile(
+                TapeFrameProfile(
+                    sequence = currentFrameSequence,
+                    receivedAtNanos = frameNanos,
+                    processingStartedAtNanos = startedAtNanos,
+                    processingCompletedAtNanos = completedAtNanos,
+                    preprocessingNanos = lastPreprocessingNanos,
+                    thresholdingNanos = lastThresholdingNanos,
+                    floorContextNanos = lastFloorContextNanos,
+                    morphologyAndContoursNanos = lastMorphologyAndContoursNanos,
+                    candidateScoringNanos = lastCandidateScoringNanos,
+                    cleanupNanos = lastCleanupNanos,
+                    width = width,
+                    height = height,
+                    detected = verdict != null,
+                ),
+            )
+        } catch (error: Throwable) {
+            onError(IllegalStateException("profiling callback failed", error))
+        }
         if (capturing) offerCapture(rgbaBytes, width, height, frameNanos, verdict)
         capturePlanes = null
         return verdict
@@ -346,6 +414,7 @@ class BlackTapeDetector internal constructor(
         height: Int,
         frameNanos: Long,
     ): TapeDetection? {
+        val preprocessingStartedAtNanos = System.nanoTime()
         val source = Mat(height, width, org.opencv.core.CvType.CV_8UC4)
         val resized = Mat()
         val rgb = Mat()
@@ -428,6 +497,8 @@ class BlackTapeDetector internal constructor(
             Imgproc.cvtColor(analysis, rgb, Imgproc.COLOR_RGBA2RGB)
             Imgproc.cvtColor(rgb, gray, Imgproc.COLOR_RGB2GRAY)
             Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
+            lastPreprocessingNanos = System.nanoTime() - preprocessingStartedAtNanos
+            val thresholdingStartedAtNanos = System.nanoTime()
             val otsuThreshold = Imgproc.threshold(
                 blurred,
                 blackMask,
@@ -448,12 +519,14 @@ class BlackTapeDetector internal constructor(
                 )
             }
             val separation = classSeparation(blurred, effectiveThreshold)
+            lastThresholdingNanos = System.nanoTime() - thresholdingStartedAtNanos
             lastClassSeparation = separation
             if (separation < MIN_CLASS_SEPARATION_LUMINANCE) {
                 registerDetectionMiss()
                 return null
             }
 
+            val floorContextStartedAtNanos = System.nanoTime()
             Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
             val analysisPixelCount = analysis.cols() * analysis.rows()
             if (labBytes.size != analysisPixelCount * LAB_CHANNELS) {
@@ -470,6 +543,8 @@ class BlackTapeDetector internal constructor(
             lastFloorFraction =
                 Core.countNonZero(floorMask).toDouble() / floorMask.total().coerceAtLeast(1L)
             recordCapturePlane("floorMask", floorMask)
+            lastFloorContextNanos = System.nanoTime() - floorContextStartedAtNanos
+            val morphologyStartedAtNanos = System.nanoTime()
             Imgproc.morphologyEx(
                 blackMask,
                 bridgedBlackMask,
@@ -497,6 +572,8 @@ class BlackTapeDetector internal constructor(
                 Imgproc.RETR_EXTERNAL,
                 Imgproc.CHAIN_APPROX_SIMPLE,
             )
+            lastMorphologyAndContoursNanos = System.nanoTime() - morphologyStartedAtNanos
+            val candidateScoringStartedAtNanos = System.nanoTime()
             lastContourCount = contours.size
 
             val frameArea = analysis.cols().toDouble() * analysis.rows()
@@ -550,6 +627,7 @@ class BlackTapeDetector internal constructor(
                 }
             }
             val winner = best
+            lastCandidateScoringNanos = System.nanoTime() - candidateScoringStartedAtNanos
             if (winner == null) {
                 registerDetectionMiss()
                 return null
@@ -567,14 +645,13 @@ class BlackTapeDetector internal constructor(
             previousRouteStartYFraction = winner.routeStartYFraction
             lastPathAxis = "CENTERLINE"
             lastPathSampleCount = winner.pathSampleCount
-            return TapeDetection(
+            val detection = TapeDetection(
                 sourceWidth = width,
                 sourceHeight = height,
                 capturedAtNanos = frameNanos,
                 bounds = NormalizedRect(
                     left = rect.x.toDouble() / analysis.cols(),
                     top = rect.y.toDouble() / analysis.rows(),
-
                     right = (rect.x + rect.width).toDouble() / analysis.cols(),
                     bottom = (rect.y + rect.height).toDouble() / analysis.rows(),
                 ),
@@ -589,7 +666,9 @@ class BlackTapeDetector internal constructor(
                 closedLoop = winner.closedLoop,
                 centerline = winner.centerline,
             )
+            return detection
         } finally {
+            val cleanupStartedAtNanos = System.nanoTime()
             candidateMask.release()
             contours.forEach(MatOfPoint::release)
             hierarchy.release()
@@ -607,6 +686,7 @@ class BlackTapeDetector internal constructor(
             rgb.release()
             resized.release()
             source.release()
+            lastCleanupNanos = System.nanoTime() - cleanupStartedAtNanos
         }
     }
     private fun diagonalGlareBridgeKernel(descending: Boolean): Mat {
@@ -788,18 +868,22 @@ class BlackTapeDetector internal constructor(
         lastBranchCount = estimate.topology.branchCount
         val refinedBounds = centerlineBounds(estimate, frameWidth, frameHeight)
         lastCandidateMetrics =
-            "#%d bounds=%dx%d@%d,%d anchor=%.3f,%.3f arc=%.3f width=%.3f coverage=%.3f".format(
-                contourIndex,
-                refinedBounds.width,
-                refinedBounds.height,
-                refinedBounds.x,
-                refinedBounds.y,
-                measurement?.anchorXFraction ?: 0.0,
-                measurement?.anchorYFraction ?: 0.0,
-                measurement?.arcLengthFraction ?: 0.0,
-                estimate.components.widthConsistency,
-                coverage,
-            )
+            (
+                "#%d bounds=%dx%d@%d,%d anchor=%.3f,%.3f arc=%.3f width=%.3f " +
+                    "widthConsistency=%.3f coverage=%.3f"
+                ).format(
+                    contourIndex,
+                    refinedBounds.width,
+                    refinedBounds.height,
+                    refinedBounds.x,
+                    refinedBounds.y,
+                    measurement?.anchorXFraction ?: 0.0,
+                    measurement?.anchorYFraction ?: 0.0,
+                    measurement?.arcLengthFraction ?: 0.0,
+                    measurement?.medianWidthFraction ?: 0.0,
+                    estimate.components.widthConsistency,
+                    coverage,
+                )
         val verdict = TapePathQualityPolicy.evaluate(
             estimate = estimate,
             measurement = measurement,
@@ -815,6 +899,14 @@ class BlackTapeDetector internal constructor(
         }
 
         val overlapsPrevious = overlapsPrevious(refinedBounds)
+        // Today's multi-panel course exposed dark cardboard joins only a few
+        // analysis pixels wide. They can overlap real tape at an intersection
+        // and inherit continuity, but their median width is below the smallest
+        // genuine tape path retained by the recorded-flight corpus.
+        if (measurement.medianWidthFraction < MIN_PATH_MEDIAN_WIDTH_FRACTION) {
+            rejectionCounts[TapeCandidateRejection.WIDTH.ordinal] += 1
+            return null
+        }
         // The arc test exists to stop a wall or floor edge being acquired as
         // curved tape. It guards acquisition only: a path already being tracked
         // has proved itself, and demanding it re-prove curvature every frame
@@ -870,45 +962,74 @@ class BlackTapeDetector internal constructor(
         }
         val boardColor = boardColorContext(estimate, frameWidth, frameHeight)
         val boardColorHasEnoughSamples =
-            boardColor != null && boardColor.pairCount >= MIN_BOARD_COLOR_PAIR_COUNT
+            boardColor != null &&
+                boardColor.pairCount >= BilateralBoardPolicy.MIN_PAIR_COUNT &&
+                boardColor.sampleCoverageFraction >=
+                BilateralBoardPolicy.MIN_SAMPLE_COVERAGE_FRACTION
+        val absoluteBoardSidesMatch =
+            boardColor?.let {
+                BilateralBoardPolicy.accepts(
+                    pairCount = it.pairCount,
+                    sampleCoverageFraction = it.sampleCoverageFraction,
+                    compatiblePairFraction = it.compatiblePairFraction,
+                    leftMatchFraction = it.leftAbsoluteMatchFraction,
+                    rightMatchFraction = it.rightAbsoluteMatchFraction,
+                    bothSidesMatchFraction = it.bothAbsoluteMatchFraction,
+                )
+            } == true
         val boardColorMatchesReference =
-            boardColorHasEnoughSamples &&
-                boardColor?.referenceDistance?.let {
-                    it <= MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+            boardReferenceA != null &&
+                boardColor?.let {
+                    BilateralBoardPolicy.accepts(
+                        pairCount = it.pairCount,
+                        sampleCoverageFraction = it.sampleCoverageFraction,
+                        compatiblePairFraction = it.compatiblePairFraction,
+                        leftMatchFraction = it.leftReferenceMatchFraction,
+                        rightMatchFraction = it.rightReferenceMatchFraction,
+                        bothSidesMatchFraction = it.bothReferenceMatchFraction,
+                    ) &&
+                        it.referenceDistance?.let { distance ->
+                            distance <= MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+                        } == true
                 } == true
-        if (trackingSessionActive && boardReferenceA != null && !boardColorHasEnoughSamples) {
+        val isCorrugatedBoard =
+            if (boardReferenceA == null) {
+                absoluteBoardSidesMatch
+            } else {
+                boardColorMatchesReference
+            }
+        if (trackingSessionActive && (!boardColorHasEnoughSamples || !isCorrugatedBoard)) {
             rejectionCounts[TapeCandidateRejection.BOARD_COLOR_CONTEXT.ordinal] += 1
             return null
         }
         if (boardColor != null) {
-            val boardChromaA = boardColor.meanA - LAB_NEUTRAL_CHROMA
-            val boardChromaB = boardColor.meanB - LAB_NEUTRAL_CHROMA
-            // Acquisition requires the absolute cardboard chroma. Once an overlapping
-            // route matches that accepted reference, continuity supplies hysteresis
-            // across exposure and white-balance drift.
-            val isCorrugatedBoard =
-                acceptsCorrugatedBoard(
-                    absoluteChromaMatch = isCorrugatedBoardChroma(boardChromaA, boardChromaB),
-                    overlapsPreviousRoute = overlapsPrevious,
-                    matchesAcceptedBoardReference = boardColorMatchesReference,
-                )
             lastCandidateMetrics +=
-                " board=%.2f/%d ref=%s substrate=%s".format(
+                (
+                    " board=cov%.2f pair%.2f L%.2f R%.2f both%.2f/%d " +
+                        "ref=%s substrate=%s"
+                    ).format(
+                    boardColor.sampleCoverageFraction,
                     boardColor.compatiblePairFraction,
+                    if (boardReferenceA == null) {
+                        boardColor.leftAbsoluteMatchFraction
+                    } else {
+                        boardColor.leftReferenceMatchFraction
+                    },
+                    if (boardReferenceA == null) {
+                        boardColor.rightAbsoluteMatchFraction
+                    } else {
+                        boardColor.rightReferenceMatchFraction
+                    },
+                    if (boardReferenceA == null) {
+                        boardColor.bothAbsoluteMatchFraction
+                    } else {
+                        boardColor.bothReferenceMatchFraction
+                    },
                     boardColor.pairCount,
                     boardColor.referenceDistance?.let { "%.1f".format(it) } ?: "none",
                     if (isCorrugatedBoard) "cardboard" else "other",
                 )
-            if (
-                boardColorHasEnoughSamples &&
-                (
-                    !isCorrugatedBoard ||
-                        boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION ||
-                        boardColor.referenceDistance?.let {
-                            it > MAX_BOARD_REFERENCE_CHROMA_DISTANCE
-                        } == true
-                    )
-            ) {
+            if (boardColorHasEnoughSamples && !isCorrugatedBoard) {
                 rejectionCounts[TapeCandidateRejection.BOARD_COLOR_CONTEXT.ordinal] += 1
                 return null
             }
@@ -1188,8 +1309,17 @@ class BlackTapeDetector internal constructor(
         val points = estimate.points
         if (points.size < 2) return null
         val sampleStep = max(1, points.size / MAX_BOARD_COLOR_SAMPLES)
+        val referenceA = boardReferenceA
+        val referenceB = boardReferenceB
+        var attemptedPairCount = 0
         var pairCount = 0
         var compatiblePairCount = 0
+        var leftAbsoluteMatchCount = 0
+        var rightAbsoluteMatchCount = 0
+        var bothAbsoluteMatchCount = 0
+        var leftReferenceMatchCount = 0
+        var rightReferenceMatchCount = 0
+        var bothReferenceMatchCount = 0
         var leftASum = 0.0
         var leftBSum = 0.0
         var rightASum = 0.0
@@ -1202,6 +1332,7 @@ class BlackTapeDetector internal constructor(
             val tangentY = next.y - previous.y
             val tangentLength = hypot(tangentX, tangentY)
             if (tangentLength <= 0.0) continue
+            attemptedPairCount++
 
             val point = points[index]
             val normalX = -tangentY / tangentLength
@@ -1235,23 +1366,48 @@ class BlackTapeDetector internal constructor(
             val leftB = (labBytes[leftLab + LAB_B_CHANNEL].toInt() and 0xFF).toDouble()
             val rightA = (labBytes[rightLab + LAB_A_CHANNEL].toInt() and 0xFF).toDouble()
             val rightB = (labBytes[rightLab + LAB_B_CHANNEL].toInt() and 0xFF).toDouble()
+            val leftAbsoluteMatch =
+                isCorrugatedBoardChroma(
+                    leftA - LAB_NEUTRAL_CHROMA,
+                    leftB - LAB_NEUTRAL_CHROMA,
+                )
+            val rightAbsoluteMatch =
+                isCorrugatedBoardChroma(
+                    rightA - LAB_NEUTRAL_CHROMA,
+                    rightB - LAB_NEUTRAL_CHROMA,
+                )
+            val leftReferenceMatch =
+                referenceA != null &&
+                    referenceB != null &&
+                    hypot(leftA - referenceA, leftB - referenceB) <=
+                    MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+            val rightReferenceMatch =
+                referenceA != null &&
+                    referenceB != null &&
+                    hypot(rightA - referenceA, rightB - referenceB) <=
+                    MAX_BOARD_REFERENCE_CHROMA_DISTANCE
+
             if (hypot(leftA - rightA, leftB - rightB) <= MAX_BOARD_SIDE_CHROMA_DISTANCE) {
                 compatiblePairCount++
             }
+            if (leftAbsoluteMatch) leftAbsoluteMatchCount++
+            if (rightAbsoluteMatch) rightAbsoluteMatchCount++
+            if (leftAbsoluteMatch && rightAbsoluteMatch) bothAbsoluteMatchCount++
+            if (leftReferenceMatch) leftReferenceMatchCount++
+            if (rightReferenceMatch) rightReferenceMatchCount++
+            if (leftReferenceMatch && rightReferenceMatch) bothReferenceMatchCount++
             pairCount++
             leftASum += leftA
             leftBSum += leftB
             rightASum += rightA
             rightBSum += rightB
         }
-        if (pairCount == 0) return null
+        if (pairCount == 0 || attemptedPairCount == 0) return null
 
         val leftA = leftASum / pairCount
         val leftB = leftBSum / pairCount
         val rightA = rightASum / pairCount
         val rightB = rightBSum / pairCount
-        val referenceA = boardReferenceA
-        val referenceB = boardReferenceB
         val referenceDistance =
             if (referenceA == null || referenceB == null) {
                 null
@@ -1261,9 +1417,17 @@ class BlackTapeDetector internal constructor(
                     hypot(rightA - referenceA, rightB - referenceB),
                 )
             }
+        fun matchFraction(count: Int): Double = count.toDouble() / pairCount
         return BoardColorContext(
             pairCount = pairCount,
-            compatiblePairFraction = compatiblePairCount.toDouble() / pairCount,
+            sampleCoverageFraction = pairCount.toDouble() / attemptedPairCount,
+            compatiblePairFraction = matchFraction(compatiblePairCount),
+            leftAbsoluteMatchFraction = matchFraction(leftAbsoluteMatchCount),
+            rightAbsoluteMatchFraction = matchFraction(rightAbsoluteMatchCount),
+            bothAbsoluteMatchFraction = matchFraction(bothAbsoluteMatchCount),
+            leftReferenceMatchFraction = matchFraction(leftReferenceMatchCount),
+            rightReferenceMatchFraction = matchFraction(rightReferenceMatchCount),
+            bothReferenceMatchFraction = matchFraction(bothReferenceMatchCount),
             meanA = (leftA + rightA) / 2.0,
             meanB = (leftB + rightB) / 2.0,
             referenceDistance = referenceDistance,
@@ -1278,6 +1442,17 @@ class BlackTapeDetector internal constructor(
     private fun acquireBoardReference(candidate: Candidate): Boolean {
         val boardColor = candidate.boardColor
         val lookahead = candidate.lookahead
+        val boardColorAccepted =
+            boardColor?.let {
+                BilateralBoardPolicy.accepts(
+                    pairCount = it.pairCount,
+                    sampleCoverageFraction = it.sampleCoverageFraction,
+                    compatiblePairFraction = it.compatiblePairFraction,
+                    leftMatchFraction = it.leftAbsoluteMatchFraction,
+                    rightMatchFraction = it.rightAbsoluteMatchFraction,
+                    bothSidesMatchFraction = it.bothAbsoluteMatchFraction,
+                )
+            } == true
         if (
             candidate.quality != PathQuality.FULL_PATH ||
             lookahead == null ||
@@ -1286,9 +1461,7 @@ class BlackTapeDetector internal constructor(
             ACQUISITION_MIN_ANCHOR_X..ACQUISITION_MAX_ANCHOR_X ||
             candidate.anchorYFraction < ACQUISITION_MIN_ANCHOR_Y ||
             candidate.longSideFraction < MIN_PATH_FRACTION ||
-            boardColor == null ||
-            boardColor.pairCount < MIN_BOARD_COLOR_PAIR_COUNT ||
-            boardColor.compatiblePairFraction < MIN_BOARD_COLOR_PAIR_FRACTION ||
+            !boardColorAccepted ||
             (
                 requiresConsistentCurveAcquisition &&
                     abs(candidate.lookaheadHeadingChangeDegrees) <
@@ -1298,6 +1471,7 @@ class BlackTapeDetector internal constructor(
             clearBoardReferenceAcquisition()
             return false
         }
+        val acceptedBoardColor = checkNotNull(boardColor)
 
         val sample = BoardReferenceAcquisitionSample(
             anchorXFraction = candidate.anchorXFraction,
@@ -1305,8 +1479,8 @@ class BlackTapeDetector internal constructor(
             angleFromVerticalDegrees = candidate.angleFromVerticalDegrees,
             lookaheadXFraction = lookahead.xFraction,
             lookaheadYFraction = lookahead.yFraction,
-            boardA = boardColor.meanA,
-            boardB = boardColor.meanB,
+            boardA = acceptedBoardColor.meanA,
+            boardB = acceptedBoardColor.meanB,
             curveHeadingChangeDegrees = candidate.lookaheadHeadingChangeDegrees,
             totalPathTurnDegrees = candidate.totalPathTurnDegrees,
         )
@@ -1517,7 +1691,14 @@ class BlackTapeDetector internal constructor(
     )
     private data class BoardColorContext(
         val pairCount: Int,
+        val sampleCoverageFraction: Double,
         val compatiblePairFraction: Double,
+        val leftAbsoluteMatchFraction: Double,
+        val rightAbsoluteMatchFraction: Double,
+        val bothAbsoluteMatchFraction: Double,
+        val leftReferenceMatchFraction: Double,
+        val rightReferenceMatchFraction: Double,
+        val bothReferenceMatchFraction: Double,
         val meanA: Double,
         val meanB: Double,
         val referenceDistance: Double?,
@@ -1572,11 +1753,9 @@ class BlackTapeDetector internal constructor(
         const val LAB_B_CHANNEL = 2
         const val MAX_BOARD_COLOR_SAMPLES = 64
         const val BOARD_COLOR_TANGENT_SPAN = 2
-        const val MIN_BOARD_COLOR_PAIR_COUNT = 10
         const val MIN_BOARD_COLOR_SAMPLE_DISTANCE_PIXELS = 4.0
         const val BOARD_COLOR_SAMPLE_DISTANCE_WIDTH_FACTOR = 0.75
         const val MAX_BOARD_SIDE_CHROMA_DISTANCE = 24.0
-        const val MIN_BOARD_COLOR_PAIR_FRACTION = 0.70
         const val MAX_BOARD_REFERENCE_CHROMA_DISTANCE = 20.0
         const val BOARD_REFERENCE_ACQUISITION_SAMPLES = 3
         const val ACQUISITION_MIN_ANCHOR_X = 0.15
@@ -1609,12 +1788,13 @@ class BlackTapeDetector internal constructor(
         const val PATH_OPEN_KERNEL_SIZE = 3.0
         const val MIN_PATH_AREA_FRACTION = 0.0008
         const val MAX_PATH_AREA_FRACTION = 0.18
+        const val MIN_PATH_MEDIAN_WIDTH_FRACTION = 0.012
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
-        // A tracked path may cross a floor-material boundary, and glare can make
-        // flood-fill miss every pixel in one side window. Once overlap and CIELAB
-        // confirm the established route, keep only the surrounding-floor gate;
-        // acquisition remains strict, and continuity still expires after bounded misses.
+        // The flood-fill mask can miss an entire side under glare even when the
+        // per-centerline CIELAB samples prove that both sides match the learned
+        // board. BilateralBoardPolicy is the hard gate; this coarse tracked-path
+        // side metric must not override that stronger evidence.
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12
         const val MIN_TRACKED_PATH_SIDE_FLOOR = 0.0
 
