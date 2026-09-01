@@ -11,7 +11,7 @@
 
 ## 重要限制
 
-- `flight-profile.tsv` 會在每次開啟 `MainActivity` 時覆寫。實飛結束後先等待至少 2 秒，正常離開 App，**不要再次開啟 App**，立即複製檔案。
+- 新版為每次 `MainActivity` session 建立唯一的 `flight-profile-<wall-clock-ms>-<monotonic-nanos>.tsv`，避免 Activity 重建時覆寫或共用 writer。以 Flight Log 的 `profiling start session=... trace=...` 選取該次實飛檔案；不要只憑檔案修改時間猜測。
 - 舊 trace 只能重算當時已記錄的大區段，不能事後產生不存在的 OpenCV 子階段時間戳。
 - 新版 trace 才包含 `preprocessMs`、`thresholdMs`、`floorContextMs`、`morphologyContoursMs`、`candidateMs`、`cleanupMs`、`otherMs`、`visionToCallbackMs`、`uiToTickMs`、`decisionMs`、`decisionToCommandMs`、`commandToFrameMs` 與 `intervalMs`。
 - DJI Assistant 2 能匯出紀錄，不代表紀錄可由第三方工具解析。不能猜測欄位、解密內容或杜撰飛控內部耗時。
@@ -115,8 +115,11 @@ Get-ChildItem "$Root\dji-aircraft-original" -Recurse -File |
 
 ```powershell
 adb devices -l
-adb pull "/sdcard/Android/data/com.durendal.droneagent.app/files/flight-profile.tsv" "$Root\app\flight-profile.tsv"
 adb pull "/sdcard/Android/data/com.durendal.droneagent.app/files/flight-log.txt" "$Root\app\flight-log.txt"
+adb shell "ls -lt /sdcard/Android/data/com.durendal.droneagent.app/files/flight-profile-*.tsv"
+# 將 <session-id> 換成 flight-log.txt 中該次實飛的 profiling start session。
+$Profile = "flight-profile-<session-id>.tsv"
+adb pull "/sdcard/Android/data/com.durendal.droneagent.app/files/$Profile" "$Root\app\$Profile"
 ```
 
 若路徑不存在，先執行：
@@ -128,12 +131,12 @@ adb shell "find /sdcard/Android/data/com.durendal.droneagent.app/files -maxdepth
 複製完成後計算 hash：
 
 ```powershell
-Get-FileHash "$Root\app\flight-profile.tsv","$Root\app\flight-log.txt" -Algorithm SHA256 |
+Get-FileHash "$Root\app\$Profile","$Root\app\flight-log.txt" -Algorithm SHA256 |
   Format-Table Path,Hash -AutoSize |
   Out-File "$Root\app\SHA256.txt" -Encoding UTF8
 ```
 
-確認 `flight-profile.tsv` 第一列必須是：
+確認所選 `flight-profile-<session-id>.tsv` 第一列必須是：
 
 ```text
 elapsedMs	monotonicNanos	event	frameNanos	durationMs	details

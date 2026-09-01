@@ -408,6 +408,33 @@ class CenterlineExtractorTest {
     private data class Point(val x: Double, val y: Double)
     private data class Nearest(val distance: Double, val fraction: Double)
 
+    @Test
+    fun `byte mask adapter preserves boolean mask extraction exactly`() {
+        val booleanMask =
+            maskAlongPath(
+                width = 200,
+                height = 200,
+                path =
+                    listOf(
+                        Point(90.0, 195.0),
+                        Point(105.0, 130.0),
+                        Point(145.0, 65.0),
+                        Point(170.0, 5.0),
+                    ),
+                halfWidth = { 7.0 },
+            )
+        val byteMask =
+            ByteSegmentationMask(
+                booleanMask.width,
+                booleanMask.height,
+                ByteArray(booleanMask.tape.size) { index ->
+                    if (booleanMask.tape[index]) 0xFF.toByte() else 0
+                },
+            )
+
+        assertEquals(extractor.extract(booleanMask), extractor.extract(byteMask))
+    }
+
     private fun nearestPathFraction(point: Point, path: List<Point>): Nearest {
         val segmentLengths = path.zipWithNext(::distance)
         val totalLength = segmentLengths.sum().coerceAtLeast(1e-9)

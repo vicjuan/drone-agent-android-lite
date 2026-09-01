@@ -39,11 +39,26 @@ data class VirtualStickStatus(
     val authority: String = "UNKNOWN",
 )
 
+internal enum class VirtualStickFrameRate(
+    val hertz: Long,
+) {
+    BASELINE_20(20L),
+    EXPERIMENT_40(40L),
+    ;
+
+    val periodMillis: Long
+        get() = 1_000L / hertz
+
+    fun toggled(): VirtualStickFrameRate =
+        if (this == BASELINE_20) EXPERIMENT_40 else BASELINE_20
+}
+
 
 data class VirtualStickFrameProfile(
     val sentAtNanos: Long,
     val sendDurationNanos: Long,
     val horizontalCommandUpdatedAtNanos: Long,
+    val configuredRateHz: Long,
     val succeeded: Boolean,
     val forwardMetersPerSecond: Double,
     val rightMetersPerSecond: Double,
@@ -85,6 +100,8 @@ class VirtualStickSession(
     @Volatile private var yawCommand: YawCommand = YawCommand.Rate(0.0)
     @Volatile private var horizontalCommandUpdatedAtNanos = 0L
     private var sendTask: ScheduledFuture<*>? = null
+    private var selectedFrameRate = VirtualStickFrameRate.EXPERIMENT_40
+    @Volatile private var firstFrameSentAtNanos = 0L
 
     /** Frames the aircraft accepted since the stream started, and failures. */
     @Volatile private var frameCount = 0L
@@ -137,7 +154,7 @@ class VirtualStickSession(
                 override fun onSuccess() {
                     manager.setVirtualStickAdvancedModeEnabled(true)
                     startSending()
-                    Log.i(TAG, "virtual stick enabled at ${FRAME_RATE_HZ}Hz")
+                    Log.i(TAG, "virtual stick enabled at ${frameRate().hertz}Hz")
                     onResult(null)
                 }
 
@@ -174,6 +191,16 @@ class VirtualStickSession(
             },
         )
     }
+
+    @Synchronized
+    internal fun selectFrameRate(frameRate: VirtualStickFrameRate): Boolean {
+        if (sendTask != null) return false
+        selectedFrameRate = frameRate
+        return true
+    }
+
+    @Synchronized
+    internal fun frameRate(): VirtualStickFrameRate = selectedFrameRate
 
     /**
      * Mode 2 sample from one stick, in normalised [-1, 1] with y positive up:
@@ -234,6 +261,7 @@ class VirtualStickSession(
 
     fun speedLevel(): Double = manager.speedLevel
 
+
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
     fun setForwardOnly(metersPerSecond: Double) {
         commandedForwardMetersPerSecond = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
@@ -270,14 +298,16 @@ class VirtualStickSession(
     @Synchronized
     private fun startSending(): Boolean {
         if (sendTask != null) return false
-        val periodMs = 1_000L / FRAME_RATE_HZ
+        val activeFrameRate = selectedFrameRate
         frameCount = 0
         frameFailures = 0
+        firstFrameSentAtNanos = 0L
         sendTask = sender.scheduleAtFixedRate(
             {
                 val currentYawCommand = yawCommand
                 val currentHorizontalCommandUpdatedAtNanos = horizontalCommandUpdatedAtNanos
                 val sendStartedAtNanos = System.nanoTime()
+                if (firstFrameSentAtNanos == 0L) firstFrameSentAtNanos = sendStartedAtNanos
                 val sendResult =
                     runCatching { manager.sendVirtualStickAdvancedParam(currentParam(currentYawCommand)) }
                 val sendCompletedAtNanos = System.nanoTime()
@@ -294,6 +324,7 @@ class VirtualStickSession(
                             sendDurationNanos = sendCompletedAtNanos - sendStartedAtNanos,
                             horizontalCommandUpdatedAtNanos =
                                 currentHorizontalCommandUpdatedAtNanos,
+                            configuredRateHz = activeFrameRate.hertz,
                             succeeded = sendResult.isSuccess,
                             forwardMetersPerSecond = commandedForwardMetersPerSecond,
                             rightMetersPerSecond = commandedRightMetersPerSecond,
@@ -308,7 +339,8 @@ class VirtualStickSession(
                 // One line per second, and only while something is actually being
                 // commanded: enough to prove the stream is alive and what it
                 // carries, without the flood that destroyed earlier evidence.
-                if (frameCount % FRAME_RATE_HZ == 0L) {
+                val attemptedFrames = frameCount + frameFailures
+                if (attemptedFrames % activeFrameRate.hertz == 0L) {
                     val yawActive =
                         when (currentYawCommand) {
                             is YawCommand.Rate -> currentYawCommand.value != 0.0
@@ -320,8 +352,16 @@ class VirtualStickSession(
                             commandedClimbMetersPerSecond != 0.0 ||
                             yawActive
                     if (moving || frameFailures > 0) {
+                        val elapsedNanos = sendStartedAtNanos - firstFrameSentAtNanos
+                        val actualRateHz =
+                            if (attemptedFrames > 1L && elapsedNanos > 0L) {
+                                (attemptedFrames - 1L) * NANOS_PER_SECOND / elapsedNanos
+                            } else {
+                                0.0
+                            }
                         onFrameSummary(
                             "frames=$frameCount fails=$frameFailures " +
+                                "configuredHz=${activeFrameRate.hertz} actualHz=%.3f ".format(actualRateHz) +
                                 "fwd=%.2f right=%.2f up=%.2f yawMode=%s yaw=%.1f".format(
                                     commandedForwardMetersPerSecond,
                                     commandedRightMetersPerSecond,
@@ -334,7 +374,7 @@ class VirtualStickSession(
                 }
             },
             0L,
-            periodMs,
+            activeFrameRate.periodMillis,
             TimeUnit.MILLISECONDS,
         )
         return true
@@ -369,9 +409,7 @@ class VirtualStickSession(
         }
 
     companion object {
-        /** MSDK's documented virtual-stick cadence; the main project uses the same rate. */
-        const val FRAME_RATE_HZ = 20L
-
+        private const val NANOS_PER_SECOND = 1_000_000_000.0
         /** Authority owner name that means this app's frames are the ones being flown. */
         const val MSDK_AUTHORITY_OWNER = "MSDK"
 
@@ -382,10 +420,10 @@ class VirtualStickSession(
 
         /**
          * Autonomous body-velocity authority. Manual controls remain deliberately
-         * gentle; the red high-speed profile may explicitly use 1.25 m/s while the
+         * gentle; fixed-heading profiles may explicitly use up to 2.0 m/s while the
          * path controller retains confidence, lookahead, offset, and loss gates.
          */
-        const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 1.25
+        const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 2.0
         const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 100.0
         const val MAX_YAW_HEADING_DEGREES = 180.0
 

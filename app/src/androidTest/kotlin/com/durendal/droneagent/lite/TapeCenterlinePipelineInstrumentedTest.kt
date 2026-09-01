@@ -66,6 +66,21 @@ class TapeCenterlinePipelineInstrumentedTest {
             quantile(sorted, 0.95) < FRAME_BUDGET_MILLIS * MAXIMUM_BUDGET_SHARE,
         )
     }
+    @Test
+    fun stableCurvedFramesUseTemporalNormalTracking() {
+        detector().use { active ->
+            active.setDetectionMode(TapeDetectionMode.PATH)
+            assertEquals(PathQuality.FULL_PATH, submit(active, curvedFrame())?.quality)
+            assertEquals(PathQuality.FULL_PATH, submit(active, curvedFrame())?.quality)
+            val diagnostics = active.diagnosticsSummary()
+            Log.i(TAG, "temporal $diagnostics")
+            assertTrue(
+                "second stable frame should avoid a complete skeleton walk: $diagnostics",
+                diagnostics.contains("pathAxis=TEMPORAL_NORMALS"),
+            )
+        }
+    }
+
 
     /** A UI screenshot must not promote its dark controls or bottom bar to tape. */
     @Test

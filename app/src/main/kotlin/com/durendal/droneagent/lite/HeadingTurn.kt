@@ -21,25 +21,92 @@ internal fun wrapToSignedHeading(degrees: Double): Double {
     return wrapped
 }
 
-internal fun headingTargetForYawRate(
-    currentHeadingDegrees: Double,
-    yawRateDegreesPerSecond: Double,
-    maximumYawRateDegreesPerSecond: Double,
-    maximumHeadingLeadDegrees: Double,
-): Double? {
-    if (!currentHeadingDegrees.isFinite() || !yawRateDegreesPerSecond.isFinite()) return null
-    require(maximumYawRateDegreesPerSecond > 0.0 && maximumYawRateDegreesPerSecond.isFinite()) {
-        "maximum yaw rate must be finite and positive"
+/**
+ * Converts a camera-relative path bearing into a bounded DJI earth-frame heading setpoint.
+ *
+ * ANGLE mode is position control: its input must be an absolute heading, never a yaw rate
+ * disguised as a heading lead. The bearing comes from the directed look-ahead point, not
+ * the undirected near-field tape tangent, so its sign identifies the upcoming turn.
+ */
+internal class AngleHeadingController(
+    private val maximumSetpointRateDegreesPerSecond: Double =
+        DEFAULT_MAXIMUM_SETPOINT_RATE_DEGREES_PER_SECOND,
+    private val maximumHeadingLeadDegrees: Double = DEFAULT_MAXIMUM_HEADING_LEAD_DEGREES,
+) {
+    private var commandedHeadingDegrees: Double? = null
+    private var lastUpdateAtNanos = 0L
+
+    init {
+        require(
+            maximumSetpointRateDegreesPerSecond.isFinite() &&
+                maximumSetpointRateDegreesPerSecond > 0.0,
+        ) {
+            "maximum heading setpoint rate must be finite and positive"
+        }
+        require(maximumHeadingLeadDegrees.isFinite() && maximumHeadingLeadDegrees in 0.0..<180.0) {
+            "maximum heading lead must be finite and in [0, 180)"
+        }
     }
-    require(maximumHeadingLeadDegrees in 0.0..<180.0) {
-        "maximum heading lead must be in [0, 180)"
+
+    fun reset() {
+        commandedHeadingDegrees = null
+        lastUpdateAtNanos = 0L
     }
-    val headingLead =
-        yawRateDegreesPerSecond
-            .coerceIn(-maximumYawRateDegreesPerSecond, maximumYawRateDegreesPerSecond) /
-            maximumYawRateDegreesPerSecond *
-            maximumHeadingLeadDegrees
-    return wrapToSignedHeading(currentHeadingDegrees + headingLead)
+
+    fun update(
+        currentHeadingDegrees: Double,
+        relativePathBearingDegrees: Double?,
+        pathTracking: Boolean,
+        nowNanos: Long,
+    ): Double? {
+        if (
+            !currentHeadingDegrees.isFinite() ||
+            relativePathBearingDegrees?.isFinite() == false ||
+            nowNanos < 0L
+        ) {
+            return null
+        }
+        if (!pathTracking || relativePathBearingDegrees == null) {
+            val heldHeading = wrapToSignedHeading(currentHeadingDegrees)
+            commandedHeadingDegrees = heldHeading
+            lastUpdateAtNanos = nowNanos
+            return heldHeading
+        }
+
+        val desiredHeading =
+            wrapToSignedHeading(currentHeadingDegrees + relativePathBearingDegrees)
+        val previousHeading = commandedHeadingDegrees ?: currentHeadingDegrees
+        val intervalSeconds =
+            boundedControlIntervalSeconds(
+                nowNanos = nowNanos,
+                previousNanos = lastUpdateAtNanos,
+                initialSeconds = INITIAL_UPDATE_INTERVAL_SECONDS,
+                maximumSeconds = MAXIMUM_UPDATE_INTERVAL_SECONDS,
+            )
+        val maximumStep = maximumSetpointRateDegreesPerSecond * intervalSeconds
+        val slewedHeading =
+            wrapToSignedHeading(
+                previousHeading +
+                    shortestAngularDelta(previousHeading, desiredHeading)
+                        .coerceIn(-maximumStep, maximumStep),
+            )
+        val boundedHeading =
+            wrapToSignedHeading(
+                currentHeadingDegrees +
+                    shortestAngularDelta(currentHeadingDegrees, slewedHeading)
+                        .coerceIn(-maximumHeadingLeadDegrees, maximumHeadingLeadDegrees),
+            )
+        commandedHeadingDegrees = boundedHeading
+        lastUpdateAtNanos = nowNanos
+        return boundedHeading
+    }
+
+    companion object {
+        const val DEFAULT_MAXIMUM_SETPOINT_RATE_DEGREES_PER_SECOND = 10.0
+        const val DEFAULT_MAXIMUM_HEADING_LEAD_DEGREES = 5.0
+        private const val INITIAL_UPDATE_INTERVAL_SECONDS = 0.1
+        private const val MAXIMUM_UPDATE_INTERVAL_SECONDS = 0.2
+    }
 }
 
 /** Tracks clockwise yaw progress across the -180/180-degree heading boundary. */

@@ -12,16 +12,19 @@ internal enum class FixedHeadingLapPhase {
     ACQUIRING,
     TRACKING,
     COASTING,
+    RECOVERING_FRAME_STREAM,
     STOPPED,
 }
 
-internal enum class FixedHeadingTrackingSpeed(
-    val targetMetersPerSecond: Double,
+internal enum class FixedHeadingActuationPhaseLead(
+    val degrees: Double,
+    val targetSpeedMetersPerSecond: Double,
 ) {
-    SLOW(0.20),
-    FAST(0.90),
-    BOOST(1.25),
+    DEGREES_0(0.0, 1.25),
+    DEGREES_14(14.0, 1.25),
+    DEGREES_16(16.0, 1.35),
 }
+
 
 internal data class OmniCenterlineMeasurement(
     val tangentDegrees: Double,
@@ -58,10 +61,11 @@ internal class FixedHeadingLapController {
         private set
 
     private var phase = FixedHeadingLapPhase.DISABLED
+    private var actuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_0
+    private var targetSpeedMetersPerSecond = TARGET_SPEED_METERS_PER_SECOND
     private var virtualHeadingDegrees = 0.0
     private var pathSpeedMetersPerSecond = 0.0
     private var pathAccelerationMetersPerSecondSquared = 0.0
-    private var trackingSpeed = FixedHeadingTrackingSpeed.FAST
     private var latestMeasurement: OmniCenterlineMeasurement? = null
     private var latestConfidence = 0.0
     private var lastDetectionAtNanos = 0L
@@ -71,17 +75,19 @@ internal class FixedHeadingLapController {
     private var lastVirtualTurnRateDegreesPerSecond = 0.0
     private var pendingRecoveryMeasurement: OmniCenterlineMeasurement? = null
     private var lossObservedAtNanos = 0L
+    private var frameStreamRecoveryStartedAtNanos = 0L
 
     fun start(
         nowNanos: Long,
-        trackingSpeed: FixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST,
+        actuationPhaseLead: FixedHeadingActuationPhaseLead,
     ) {
         enabled = true
+        this.actuationPhaseLead = actuationPhaseLead
+        targetSpeedMetersPerSecond = actuationPhaseLead.targetSpeedMetersPerSecond
         phase = FixedHeadingLapPhase.ACQUIRING
         virtualHeadingDegrees = 0.0
         pathSpeedMetersPerSecond = 0.0
         pathAccelerationMetersPerSecondSquared = 0.0
-        this.trackingSpeed = trackingSpeed
         latestMeasurement = null
         latestConfidence = 0.0
         lastDetectionAtNanos = 0L
@@ -91,6 +97,7 @@ internal class FixedHeadingLapController {
         lastVirtualTurnRateDegreesPerSecond = 0.0
         pendingRecoveryMeasurement = null
         lossObservedAtNanos = 0L
+        frameStreamRecoveryStartedAtNanos = 0L
     }
 
     fun stop() {
@@ -98,13 +105,31 @@ internal class FixedHeadingLapController {
         phase = FixedHeadingLapPhase.DISABLED
         pathSpeedMetersPerSecond = 0.0
         pathAccelerationMetersPerSecondSquared = 0.0
-        trackingSpeed = FixedHeadingTrackingSpeed.FAST
         latestMeasurement = null
         lastTickAtNanos = 0L
         latestMeasurementCapturedAtNanos = 0L
         lastVirtualTurnRateDegreesPerSecond = 0.0
         pendingRecoveryMeasurement = null
         lossObservedAtNanos = 0L
+        frameStreamRecoveryStartedAtNanos = 0L
+    }
+
+    /**
+     * Holds position while MSDK rebuilds its decoded-frame callback. This is a
+     * separate timeout from ordinary path loss: extending path-loss tolerance
+     * would permit blind motion, while stream recovery always commands zero.
+     */
+    fun beginFrameStreamRecovery(nowNanos: Long) {
+        if (!enabled || phase == FixedHeadingLapPhase.STOPPED) return
+        phase = FixedHeadingLapPhase.RECOVERING_FRAME_STREAM
+        frameStreamRecoveryStartedAtNanos = nowNanos
+        pathSpeedMetersPerSecond = 0.0
+        pathAccelerationMetersPerSecondSquared = 0.0
+        latestMeasurement = null
+        latestConfidence = 0.0
+        pendingRecoveryMeasurement = null
+        lossObservedAtNanos = nowNanos
+        lastTickAtNanos = nowNanos
     }
 
     fun observe(
@@ -126,6 +151,13 @@ internal class FixedHeadingLapController {
         val measurement =
             if (centerline == null || heightMeters == null) {
                 null
+            } else if (phase == FixedHeadingLapPhase.RECOVERING_FRAME_STREAM) {
+                recoveryMeasurement(
+                    centerline = centerline,
+                    heightMeters = heightMeters,
+                    travelDirectionDegrees = virtualHeadingAtCapture,
+                    confidence = confidence,
+                )
             } else {
                 val continuous = OmniCenterline.measure(
                     path = centerline,
@@ -166,8 +198,13 @@ internal class FixedHeadingLapController {
             virtualHeadingDegrees = directionToLookahead(measurement)
             phase = FixedHeadingLapPhase.TRACKING
             lastTickAtNanos = nowNanos
-        } else if (phase == FixedHeadingLapPhase.COASTING) {
+        } else if (
+            phase == FixedHeadingLapPhase.COASTING ||
+            phase == FixedHeadingLapPhase.RECOVERING_FRAME_STREAM
+        ) {
             phase = FixedHeadingLapPhase.TRACKING
+            frameStreamRecoveryStartedAtNanos = 0L
+            lastTickAtNanos = nowNanos
         }
     }
 
@@ -182,6 +219,17 @@ internal class FixedHeadingLapController {
         }
         if (phase == FixedHeadingLapPhase.STOPPED) {
             return decision(stopRequested = true)
+        }
+        if (phase == FixedHeadingLapPhase.RECOVERING_FRAME_STREAM) {
+            if (
+                nowNanos - frameStreamRecoveryStartedAtNanos >=
+                FRAME_STREAM_RECOVERY_TIMEOUT_NANOS
+            ) {
+                phase = FixedHeadingLapPhase.STOPPED
+                return decision(stopRequested = true)
+            }
+            lastTickAtNanos = nowNanos
+            return decision()
         }
 
         val elapsedSeconds =
@@ -236,37 +284,30 @@ internal class FixedHeadingLapController {
 
         val confidenceLimitedSpeed =
             if (latestConfidence >= MIN_CONFIDENCE) {
-                trackingSpeed.targetMetersPerSecond
+                targetSpeedMetersPerSecond
             } else {
                 DEGRADED_SPEED_METERS_PER_SECOND
             }
         val trackingAuthority =
-            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
-                minOf(
-                    authorityAfterMargin(
-                        magnitude = abs(guidanceError),
-                        fullAuthorityLimit = BOOST_FULL_SPEED_GUIDANCE_ERROR_DEGREES,
-                        zeroAuthorityLimit = SLOWDOWN_GUIDANCE_ERROR_DEGREES,
-                    ),
-                    authorityAfterMargin(
-                        magnitude = abs(measurement.lateralOffsetMeters),
-                        fullAuthorityLimit = BOOST_FULL_SPEED_LATERAL_OFFSET_METERS,
-                        zeroAuthorityLimit = SLOWDOWN_LATERAL_OFFSET_METERS,
-                    ),
-                )
-            } else {
-                minOf(
-                    1.0 - abs(guidanceError) / SLOWDOWN_GUIDANCE_ERROR_DEGREES,
-                    1.0 - abs(measurement.lateralOffsetMeters) / SLOWDOWN_LATERAL_OFFSET_METERS,
-                ).coerceIn(0.0, 1.0)
-            }
+            minOf(
+                authorityAfterMargin(
+                    magnitude = abs(guidanceError),
+                    fullAuthorityLimit = HIGH_SPEED_FULL_AUTHORITY_GUIDANCE_ERROR_DEGREES,
+                    zeroAuthorityLimit = SLOWDOWN_GUIDANCE_ERROR_DEGREES,
+                ),
+                authorityAfterMargin(
+                    magnitude = abs(measurement.lateralOffsetMeters),
+                    fullAuthorityLimit = HIGH_SPEED_FULL_AUTHORITY_LATERAL_OFFSET_METERS,
+                    zeroAuthorityLimit = SLOWDOWN_LATERAL_OFFSET_METERS,
+                ),
+            )
         val authorityLimitedSpeed = confidenceLimitedSpeed * trackingAuthority
         val lookaheadLimitedSpeed =
-            trackingSpeed.targetMetersPerSecond *
+            targetSpeedMetersPerSecond *
                 (measurement.lookaheadDistanceMeters / configuredLookaheadMeters())
                     .coerceIn(0.0, 1.0)
         val targetSpeed = minOf(
-            trackingSpeed.targetMetersPerSecond,
+            targetSpeedMetersPerSecond,
             authorityLimitedSpeed,
             lookaheadLimitedSpeed,
         )
@@ -283,7 +324,9 @@ internal class FixedHeadingLapController {
         lastVirtualTurnRateDegreesPerSecond =
             if (elapsedSeconds > 0.0) turnDegrees / elapsedSeconds else 0.0
 
-        val headingRadians = Math.toRadians(virtualHeadingDegrees)
+        val phaseLeadDegrees = appliedActuationPhaseLeadDegrees()
+        val commandHeadingDegrees = wrapDegrees(virtualHeadingDegrees + phaseLeadDegrees)
+        val commandHeadingRadians = Math.toRadians(commandHeadingDegrees)
         val correction =
             if (pathSpeedMetersPerSecond == 0.0) {
                 (
@@ -295,12 +338,13 @@ internal class FixedHeadingLapController {
             } else {
                 0.0
             }
-        val correctionHeadingRadians = Math.toRadians(measurement.tangentDegrees)
+        val correctionHeadingRadians =
+            Math.toRadians(measurement.tangentDegrees + phaseLeadDegrees)
         val forward =
-            pathSpeedMetersPerSecond * cos(headingRadians) -
+            pathSpeedMetersPerSecond * cos(commandHeadingRadians) -
                 correction * sin(correctionHeadingRadians)
         val right =
-            pathSpeedMetersPerSecond * sin(headingRadians) +
+            pathSpeedMetersPerSecond * sin(commandHeadingRadians) +
                 correction * cos(correctionHeadingRadians)
         phase = FixedHeadingLapPhase.TRACKING
         return decision(forward = forward, right = right)
@@ -373,23 +417,31 @@ internal class FixedHeadingLapController {
 
     private fun staleWindowNanos(): Long {
         val speed = pathSpeedMetersPerSecond.coerceAtLeast(0.05)
-        val committedBoost =
-            trackingSpeed == FixedHeadingTrackingSpeed.BOOST &&
-                latestConfidence >= BOOST_COMMIT_CONFIDENCE
+        val committedHighSpeed =
+            latestConfidence >= HIGH_SPEED_COMMIT_CONFIDENCE
         val maximumBlindDistanceMeters =
-            if (committedBoost) BOOST_MAX_BLIND_DISTANCE_METERS else MAX_BLIND_DISTANCE_METERS
+            if (committedHighSpeed) HIGH_SPEED_MAX_BLIND_DISTANCE_METERS else MAX_BLIND_DISTANCE_METERS
         val maximumStaleNanos =
-            if (committedBoost) BOOST_MAX_STALE_NANOS else MAX_STALE_NANOS
+            if (committedHighSpeed) HIGH_SPEED_MAX_STALE_NANOS else MAX_STALE_NANOS
         return (maximumBlindDistanceMeters / speed * 1_000_000_000.0).toLong()
             .coerceIn(MIN_STALE_NANOS, maximumStaleNanos)
     }
 
-    private fun configuredLookaheadMeters(): Double =
-        when (trackingSpeed) {
-            FixedHeadingTrackingSpeed.SLOW -> SLOW_LOOKAHEAD_METERS
-            FixedHeadingTrackingSpeed.FAST -> FAST_LOOKAHEAD_METERS
-            FixedHeadingTrackingSpeed.BOOST -> BOOST_LOOKAHEAD_METERS
+    private fun configuredLookaheadMeters(): Double = LOOKAHEAD_METERS
+
+    private fun appliedActuationPhaseLeadDegrees(): Double {
+        if (
+            phase != FixedHeadingLapPhase.TRACKING ||
+            pathSpeedMetersPerSecond == 0.0
+        ) {
+            return 0.0
         }
+        return when {
+            lastVirtualTurnRateDegreesPerSecond > 0.0 -> actuationPhaseLead.degrees
+            lastVirtualTurnRateDegreesPerSecond < 0.0 -> -actuationPhaseLead.degrees
+            else -> 0.0
+        }
+    }
 
     private fun authorityAfterMargin(
         magnitude: Double,
@@ -433,28 +485,16 @@ internal class FixedHeadingLapController {
         }
 
         val speedError = targetSpeed - pathSpeedMetersPerSecond
-        val maximumAcceleration =
-            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
-                BOOST_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED
-            } else {
-                MAX_ACCELERATION_METERS_PER_SECOND_SQUARED
-            }
-        val maximumJerk =
-            if (trackingSpeed == FixedHeadingTrackingSpeed.BOOST) {
-                BOOST_MAX_JERK_METERS_PER_SECOND_CUBED
-            } else {
-                MAX_JERK_METERS_PER_SECOND_CUBED
-            }
         val desiredAcceleration = (
             speedError * SPEED_ERROR_RESPONSE_PER_SECOND
             ).coerceIn(
             -MAX_DECELERATION_METERS_PER_SECOND_SQUARED,
-            maximumAcceleration,
+            HIGH_SPEED_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED,
         )
         pathAccelerationMetersPerSecondSquared = moveToward(
             pathAccelerationMetersPerSecondSquared,
             desiredAcceleration,
-            maximumJerk * elapsedSeconds,
+            HIGH_SPEED_MAX_JERK_METERS_PER_SECOND_CUBED * elapsedSeconds,
         )
         val nextSpeed = (
             pathSpeedMetersPerSecond +
@@ -480,37 +520,36 @@ internal class FixedHeadingLapController {
         }
 
     internal companion object {
+        const val TARGET_SPEED_METERS_PER_SECOND = 1.25
+        const val FASTER_TARGET_SPEED_METERS_PER_SECOND = 1.35
+        const val LOOKAHEAD_METERS = 0.45
         const val DEGRADED_SPEED_METERS_PER_SECOND = 0.22
-        const val MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
-        const val BOOST_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 1.00
+        const val HIGH_SPEED_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 1.00
         const val MAX_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
         const val MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED = 1.50
-        const val MAX_JERK_METERS_PER_SECOND_CUBED = 2.00
-        const val BOOST_MAX_JERK_METERS_PER_SECOND_CUBED = 4.00
+        const val HIGH_SPEED_MAX_JERK_METERS_PER_SECOND_CUBED = 4.00
         const val SPEED_ERROR_RESPONSE_PER_SECOND = 3.00
         const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 60.0
         const val LATERAL_FEEDBACK_GAIN_PER_SECOND = 0.8
         const val MAX_LATERAL_CORRECTION_METERS_PER_SECOND = 0.25
         const val MIN_CONFIDENCE = 0.60
-        const val BOOST_COMMIT_CONFIDENCE = 0.75
+        const val HIGH_SPEED_COMMIT_CONFIDENCE = 0.75
         const val MAX_TRACKING_ANGLE_DEGREES = 70.0
         const val ACQUISITION_TIMEOUT_NANOS = 8_000_000_000L
         const val MAX_BLIND_DISTANCE_METERS = 0.10
-        const val BOOST_MAX_BLIND_DISTANCE_METERS = 0.22
+        const val HIGH_SPEED_MAX_BLIND_DISTANCE_METERS = 0.30
         const val MIN_STALE_NANOS = 80_000_000L
         const val MAX_STALE_NANOS = 150_000_000L
-        const val BOOST_MAX_STALE_NANOS = 180_000_000L
-        const val REACQUISITION_TIMEOUT_NANOS = 1_200_000_000L
+        const val HIGH_SPEED_MAX_STALE_NANOS = 180_000_000L
+        const val REACQUISITION_TIMEOUT_NANOS = 4_000_000_000L
+        const val FRAME_STREAM_RECOVERY_TIMEOUT_NANOS = 4_000_000_000L
         const val MAX_TICK_NANOS = 250_000_000L
-        const val FAST_LOOKAHEAD_METERS = 0.35
-        const val BOOST_LOOKAHEAD_METERS = 0.45
-        const val SLOW_LOOKAHEAD_METERS = 0.25
         const val SLOWDOWN_GUIDANCE_ERROR_DEGREES = 35.0
-        const val BOOST_FULL_SPEED_GUIDANCE_ERROR_DEGREES = 10.0
+        const val HIGH_SPEED_FULL_AUTHORITY_GUIDANCE_ERROR_DEGREES = 10.0
         const val MAX_RECOVERY_GUIDANCE_ERROR_DEGREES = 35.0
         const val MAX_RECOVERY_LATERAL_OFFSET_METERS = 0.20
         const val SLOWDOWN_LATERAL_OFFSET_METERS = 0.25
-        const val BOOST_FULL_SPEED_LATERAL_OFFSET_METERS = 0.08
+        const val HIGH_SPEED_FULL_AUTHORITY_LATERAL_OFFSET_METERS = 0.08
         const val MAX_MEASUREMENT_AGE_COMPENSATION_SECONDS = 0.20
         private const val NANOS_PER_SECOND = 1_000_000_000.0
     }
@@ -541,12 +580,27 @@ internal object OmniCenterline {
                 yFraction = path.yFractions[index].toDouble(),
             )
         }
+        // Every segment is a possible projection. Prefix arc lengths make each
+        // candidate's remaining distance O(1) and its lookahead lookup O(log n)
+        // instead of walking the rest of the centerline again.
+        val cumulativeDistances = DoubleArray(points.size)
+        for (index in 1 until points.size) {
+            val previous = points[index - 1]
+            val current = points[index]
+            cumulativeDistances[index] =
+                cumulativeDistances[index - 1] +
+                    hypot(
+                        current.rightMeters - previous.rightMeters,
+                        current.forwardMeters - previous.forwardMeters,
+                    )
+        }
+        val groundPath = GroundPath(points, cumulativeDistances)
 
         var bestCandidate: MeasurementCandidate? = null
         for (index in 0 until points.lastIndex) {
             val projection = projectOntoSegment(points, index) ?: continue
             val measurement = measurementForProjection(
-                points = points,
+                path = groundPath,
                 projection = projection,
                 travelDirectionDegrees = travelDirectionDegrees,
                 requestedLookaheadMeters = lookaheadMeters,
@@ -591,12 +645,13 @@ internal object OmniCenterline {
     }
 
     private fun measurementForProjection(
-        points: List<GroundPoint>,
+        path: GroundPath,
         projection: Projection,
         travelDirectionDegrees: Double,
         requestedLookaheadMeters: Double,
         endpointCandidate: Boolean,
     ): OmniCenterlineMeasurement? {
+        val points = path.points
         val tangentStart =
             points[(projection.segmentIndex - TANGENT_POINT_SPAN).coerceAtLeast(0)]
         val tangentEnd =
@@ -621,7 +676,7 @@ internal object OmniCenterline {
         }
 
         val remainingPathMeters =
-            remainingPathDistance(points, projection, followsIncreasingIndices)
+            remainingPathDistance(path, projection, followsIncreasingIndices)
         val tangentRadians = Math.toRadians(tangent)
         val pathRightNormalRight = cos(tangentRadians)
         val pathRightNormalForward = -sin(tangentRadians)
@@ -645,7 +700,7 @@ internal object OmniCenterline {
             )
         }
         val lookahead = lookaheadPoint(
-            points = points,
+            path = path,
             projection = projection,
             increasing = followsIncreasingIndices,
             targetDistance = requestedLookaheadMeters,
@@ -719,59 +774,37 @@ internal object OmniCenterline {
     )
 
     private fun lookaheadPoint(
-        points: List<GroundPoint>,
+        path: GroundPath,
         projection: Projection,
         increasing: Boolean,
         targetDistance: Double,
     ): Lookahead? {
-        var current = projection.point
-        var accumulated = 0.0
-        var index = if (increasing) projection.segmentIndex + 1 else projection.segmentIndex
-        while (index in points.indices) {
-            val next = points[index]
-            val segmentDistance = hypot(
-                next.rightMeters - current.rightMeters,
-                next.forwardMeters - current.forwardMeters,
-            )
-            if (segmentDistance > 0.0 && accumulated + segmentDistance >= targetDistance) {
-                return Lookahead(
-                    point = interpolate(
-                        current,
-                        next,
-                        (targetDistance - accumulated) / segmentDistance,
-                    ),
-                    distanceMeters = targetDistance,
-                )
+        val projectionDistance = path.distanceAt(projection)
+        val endDistance =
+            if (increasing) {
+                minOf(projectionDistance + targetDistance, path.totalDistance)
+            } else {
+                maxOf(projectionDistance - targetDistance, 0.0)
             }
-            accumulated += segmentDistance
-            current = next
-            index += if (increasing) 1 else -1
-        }
-        return if (accumulated >= MIN_LOOKAHEAD_METERS) {
-            Lookahead(point = current, distanceMeters = accumulated)
-        } else {
-            null
-        }
+        val availableDistance = abs(endDistance - projectionDistance)
+        if (availableDistance < MIN_LOOKAHEAD_METERS) return null
+        return Lookahead(
+            point = path.pointAt(endDistance),
+            distanceMeters = availableDistance,
+        )
     }
 
     private fun remainingPathDistance(
-        points: List<GroundPoint>,
+        path: GroundPath,
         projection: Projection,
         increasing: Boolean,
     ): Double {
-        var current = projection.point
-        var distance = 0.0
-        var index = if (increasing) projection.segmentIndex + 1 else projection.segmentIndex
-        while (index in points.indices) {
-            val next = points[index]
-            distance += hypot(
-                next.rightMeters - current.rightMeters,
-                next.forwardMeters - current.forwardMeters,
-            )
-            current = next
-            index += if (increasing) 1 else -1
+        val projectionDistance = path.distanceAt(projection)
+        return if (increasing) {
+            path.totalDistance - projectionDistance
+        } else {
+            projectionDistance
         }
-        return distance
     }
 
     private fun interpolate(first: GroundPoint, second: GroundPoint, fraction: Double): GroundPoint =
@@ -785,6 +818,45 @@ internal object OmniCenterline {
     private fun directionDegrees(right: Double, forward: Double): Double? {
         if (right == 0.0 && forward == 0.0) return null
         return wrapDegrees(Math.toDegrees(atan2(right, forward)))
+    }
+
+    private data class GroundPath(
+        val points: List<GroundPoint>,
+        val cumulativeDistances: DoubleArray,
+    ) {
+        val totalDistance: Double
+            get() = cumulativeDistances.last()
+
+        fun distanceAt(projection: Projection): Double {
+            val segmentStart = cumulativeDistances[projection.segmentIndex]
+            val segmentEnd = cumulativeDistances[projection.segmentIndex + 1]
+            return segmentStart + (segmentEnd - segmentStart) * projection.segmentFraction
+        }
+
+        fun pointAt(distance: Double): GroundPoint {
+            if (distance <= 0.0) return points.first()
+            if (distance >= totalDistance) return points.last()
+            var low = 1
+            var high = cumulativeDistances.lastIndex
+            while (low < high) {
+                val middle = (low + high) ushr 1
+                if (cumulativeDistances[middle] < distance) {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            val segmentEndIndex = low
+            val segmentStartIndex = segmentEndIndex - 1
+            val segmentStartDistance = cumulativeDistances[segmentStartIndex]
+            val segmentLength = cumulativeDistances[segmentEndIndex] - segmentStartDistance
+            if (segmentLength <= 0.0) return points[segmentEndIndex]
+            return interpolate(
+                points[segmentStartIndex],
+                points[segmentEndIndex],
+                (distance - segmentStartDistance) / segmentLength,
+            )
+        }
     }
 
     private data class GroundPoint(

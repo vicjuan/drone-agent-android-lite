@@ -10,6 +10,7 @@ import android.view.SurfaceView
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -27,6 +28,7 @@ class CameraPreview(
     context: Context,
     private val onRgbaFrame: (ByteArray, Int, Int, Int, Int) -> Unit,
     private val onFrameStreamStale: () -> Unit,
+    private val onFrameStreamRecovered: () -> Unit,
 ) {
 
     val view = SurfaceView(context)
@@ -42,6 +44,7 @@ class CameraPreview(
     private val callbackCount = AtomicLong(0L)
     private val rgbaCallbackCount = AtomicLong(0L)
     private val formatMismatchCount = AtomicLong(0L)
+    private val frameStreamRecoveryPending = AtomicBoolean(false)
     private val firstCallbackAtNanos = AtomicLong(0L)
     @Volatile private var lastCallbackAtNanos = 0L
     @Volatile private var lastFrameWidth = 0
@@ -64,6 +67,10 @@ class CameraPreview(
             lastFrameHeight = height
             frameStreamStale = false
             rgbaCallbackCount.incrementAndGet()
+            if (frameStreamRecoveryPending.compareAndSet(true, false)) {
+                Log.i(TAG, "RGBA frame stream recovered")
+                onFrameStreamRecovered()
+            }
             onRgbaFrame(frameData, offset, length, width, height)
         } else {
             formatMismatchCount.incrementAndGet()
@@ -144,6 +151,7 @@ class CameraPreview(
             if (frameAgeNanos >= FRAME_STALE_NANOS) {
                 if (!frameStreamStale) {
                     frameStreamStale = true
+                    frameStreamRecoveryPending.set(true)
                     Log.w(TAG, "RGBA frame stream stale; reattaching listener")
                     onFrameStreamStale()
                 }

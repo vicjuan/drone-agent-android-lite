@@ -23,13 +23,36 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `circular decision follows directed lookahead when tangent points the other way`() {
+        val controller = circularTrackingController()
+        controller.observe(
+            observation(
+                angleDegrees = 40.0,
+                longSideFraction = 0.8,
+                lookahead = TapeLookahead(xFraction = 0.30, yFraction = 0.50),
+            ),
+            seconds(3),
+        )
+
+        val decision = controller.tick(seconds(3))
+
+        assertTrue(checkNotNull(decision.controlledAngleDegrees) > 0.0)
+        assertEquals(
+            Math.toDegrees(kotlin.math.atan2(-0.20 * (1600.0 / 900.0), 0.44)),
+            checkNotNull(decision.pathBearingDegrees),
+            1e-9,
+        )
+        assertTrue(checkNotNull(decision.pathBearingDegrees) < 0.0)
+    }
+
+    @Test
     fun `scheme B ignores physical endpoint hints from partial circle detections`() {
         val controller = TapeTrackingController()
         val centerline = fixedHeadingPath()
         controller.start(
             nowNanos = 1L,
             mode = TapeTrackingMode.FIXED_HEADING,
-            fixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.SLOW,
+            fixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_0,
         )
         var decision: TapeTrackingDecision? = null
         repeat(8) { index ->
@@ -785,6 +808,110 @@ class TapeTrackingControllerTest {
         val missing = controller.tick(missingAt)
         assertTrue(missing.forwardSpeedMetersPerSecond > 0.0)
         assertEquals(0.0, missing.rightSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `circular lateral derivative strengthens growing error and damps recovery`() {
+        val controller = circularTrackingController()
+        val firstAt = seconds(3)
+        val path = observation(
+            angleDegrees = 15.0,
+            longSideFraction = 1.1,
+            nearFieldOffsetFraction = 0.10,
+            lookahead = TapeLookahead(xFraction = 0.60, yFraction = 0.55),
+            endpointCandidate = false,
+            closedLoop = true,
+            capturedAtNanos = firstAt,
+        )
+        controller.observe(path, firstAt)
+        val initial = controller.tick(firstAt)
+
+        val growingAt = firstAt + 100_000_000L
+        controller.observe(
+            path.copy(
+                nearFieldOffsetFraction = 0.20,
+                capturedAtNanos = growingAt,
+            ),
+            growingAt,
+        )
+        val growing = controller.tick(growingAt)
+
+        val recoveringAt = growingAt + 100_000_000L
+        controller.observe(
+            path.copy(
+                nearFieldOffsetFraction = 0.10,
+                capturedAtNanos = recoveringAt,
+            ),
+            recoveringAt,
+        )
+        val recovering = controller.tick(recoveringAt)
+
+        assertTrue(initial.rightSpeedMetersPerSecond > 0.0)
+        assertTrue(growing.rightSpeedMetersPerSecond > initial.rightSpeedMetersPerSecond)
+        assertTrue(recovering.rightSpeedMetersPerSecond < growing.rightSpeedMetersPerSecond)
+        assertTrue(
+            growing.rightSpeedMetersPerSecond <=
+                TapeTrackingController.CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
+        )
+    }
+
+    @Test
+    fun `angle profile slows for cross track error and stops at safety boundary`() {
+        val controller = TapeTrackingController()
+        controller.start(
+            nowNanos = 0L,
+            mode = TapeTrackingMode.CIRCULAR,
+            circularTrackingSpeed = CircularTrackingSpeed.ANGLE,
+        )
+        assertEquals(TapeTrackingPhase.TRACKING, controller.tick(seconds(2)).phase)
+        val path = observation(
+            angleDegrees = 0.0,
+            longSideFraction = 1.1,
+            lookahead = TapeLookahead(xFraction = 0.5, yFraction = 0.45),
+            heightAboveGroundMeters = 1.0,
+            endpointCandidate = false,
+            closedLoop = true,
+            capturedAtNanos = seconds(2),
+        )
+        var decision = controller.tick(seconds(2))
+        repeat(20) { index ->
+            val now = seconds(2) + index * 100_000_000L
+            controller.observe(path.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+        assertEquals(CircularTrackingSpeed.ANGLE.targetMetersPerSecond, decision.forwardSpeedMetersPerSecond, 0.001)
+
+        repeat(10) { index ->
+            val now = seconds(4) + index * 100_000_000L
+            controller.observe(
+                path.copy(
+                    nearFieldOffsetFraction = 0.19,
+                    capturedAtNanos = now,
+                ),
+                now,
+            )
+            decision = controller.tick(now)
+        }
+        assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
+        assertTrue(
+            "moderate offset speed=${decision.forwardSpeedMetersPerSecond}",
+            decision.forwardSpeedMetersPerSecond <
+                CircularTrackingSpeed.ANGLE.targetMetersPerSecond,
+        )
+
+        repeat(10) { index ->
+            val now = seconds(5) + index * 100_000_000L
+            controller.observe(
+                path.copy(
+                    nearFieldOffsetFraction = 0.40,
+                    capturedAtNanos = now,
+                ),
+                now,
+            )
+            decision = controller.tick(now)
+        }
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertTrue(decision.rightSpeedMetersPerSecond > 0.0)
     }
 
     @Test

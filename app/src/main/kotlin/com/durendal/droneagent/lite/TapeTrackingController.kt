@@ -1,6 +1,7 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.sign
 import kotlin.math.sqrt
@@ -10,6 +11,7 @@ internal enum class TapeTrackingPhase {
     DISABLED,
     RECENTERING,
     RECOVERING_AFTER_TURN,
+    RECOVERING_FRAME_STREAM,
     TRACKING,
     ALIGNING_CURVE,
     REACQUIRING_PATH,
@@ -29,12 +31,13 @@ internal enum class TapeTrackingMode(
 
 internal val TapeTrackingMode.detectionMode: TapeDetectionMode
     get() = if (followsCurvedPath) TapeDetectionMode.PATH else TapeDetectionMode.STRAIGHT
-
 internal enum class CircularTrackingSpeed(
     val targetMetersPerSecond: Double,
+    val latencyCompensatedLookahead: Boolean,
 ) {
-    SLOW(0.50),
-    FAST(0.85),
+    ANGLE(0.10, latencyCompensatedLookahead = true),
+    SLOW(0.50, latencyCompensatedLookahead = false),
+    FAST(0.85, latencyCompensatedLookahead = true),
 }
 
 
@@ -97,6 +100,7 @@ internal data class TapeTrackingDecision(
     val controlledOffsetFraction: Double? = null,
     val offsetRatePerSecond: Double = 0.0,
     val purePursuitYawRateDegreesPerSecond: Double = 0.0,
+    val pathBearingDegrees: Double? = null,
     val rawCurvaturePerMeter: Double? = null,
     val predictedCurvaturePerMeter: Double? = null,
     val trustedCurvaturePerMeter: Double? = null,
@@ -194,7 +198,8 @@ internal class TapeTrackingController {
         mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT,
         endpointTurnEnabled: Boolean = true,
         circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
-        fixedHeadingTrackingSpeed: FixedHeadingTrackingSpeed = FixedHeadingTrackingSpeed.FAST,
+        fixedHeadingActuationPhaseLead: FixedHeadingActuationPhaseLead =
+            FixedHeadingActuationPhaseLead.DEGREES_0,
     ) {
         enabled = true
         this.mode = mode
@@ -204,7 +209,10 @@ internal class TapeTrackingController {
         awaitingPostTurnDetection = false
         if (mode == TapeTrackingMode.FIXED_HEADING) {
             phase = TapeTrackingPhase.RECENTERING
-            fixedHeadingLapController.start(nowNanos, fixedHeadingTrackingSpeed)
+            fixedHeadingLapController.start(
+                nowNanos,
+                fixedHeadingActuationPhaseLead,
+            )
         } else {
             beginRecentering(nowNanos)
         }
@@ -234,6 +242,13 @@ internal class TapeTrackingController {
         awaitingPostTurnDetection = true
         postTurnRecoveryUntilNanos = 0L
         beginRecentering(nowNanos)
+    }
+
+    fun beginFrameStreamRecovery(nowNanos: Long): Boolean {
+        if (!enabled || mode != TapeTrackingMode.FIXED_HEADING) return false
+        fixedHeadingLapController.beginFrameStreamRecovery(nowNanos)
+        phase = TapeTrackingPhase.RECOVERING_FRAME_STREAM
+        return true
     }
 
 
@@ -367,6 +382,7 @@ internal class TapeTrackingController {
             TapeTrackingPhase.DISABLED,
             TapeTrackingPhase.RECENTERING,
             TapeTrackingPhase.ALIGNING_CURVE,
+            TapeTrackingPhase.RECOVERING_FRAME_STREAM,
             TapeTrackingPhase.REACQUIRING_PATH,
             TapeTrackingPhase.TURNING,
             -> Unit
@@ -380,6 +396,8 @@ internal class TapeTrackingController {
                 FixedHeadingLapPhase.DISABLED, FixedHeadingLapPhase.STOPPED ->
                     TapeTrackingPhase.DISABLED
                 FixedHeadingLapPhase.ACQUIRING -> TapeTrackingPhase.RECENTERING
+                FixedHeadingLapPhase.RECOVERING_FRAME_STREAM ->
+                    TapeTrackingPhase.RECOVERING_FRAME_STREAM
                 FixedHeadingLapPhase.TRACKING, FixedHeadingLapPhase.COASTING ->
                     TapeTrackingPhase.TRACKING
             }
@@ -535,6 +553,7 @@ internal class TapeTrackingController {
         // displaced rail translates first instead of spending the frame spinning.
         val targetRightSpeed = desiredRightSpeed()
         profileForwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos)
+        val pathBearingDegrees = desiredLookaheadBearingDegrees(nowNanos)
         val purePursuitCurvature = desiredPurePursuitCurvaturePerMeter(nowNanos)
         val yawLimitedTargetSpeed =
             if (mode == TapeTrackingMode.CIRCULAR && purePursuitCurvature != null) {
@@ -561,6 +580,7 @@ internal class TapeTrackingController {
             forwardSpeedMetersPerSecond = forwardSpeed,
             rightSpeedMetersPerSecond = rightSpeed,
             purePursuitYawRateDegreesPerSecond = purePursuitYawRate ?: 0.0,
+            pathBearingDegrees = pathBearingDegrees,
         )
     }
 
@@ -1069,9 +1089,9 @@ internal class TapeTrackingController {
             }
             rawLookaheadXFraction = lookahead.xFraction
             rawLookaheadYFraction = lookahead.yFraction
-            if (mode == TapeTrackingMode.CIRCULAR && circularTrackingSpeed == CircularTrackingSpeed.FAST) {
-                // At 0.85 m/s the old EMA added roughly two detector periods of lag.
-                // The rate-filtered prediction below handles noise without aiming at old pixels.
+            if (mode == TapeTrackingMode.CIRCULAR && circularTrackingSpeed.latencyCompensatedLookahead) {
+                // Latency-sensitive profiles use the current target plus bounded motion
+                // prediction instead of aiming at an EMA-delayed pixel.
                 controlledLookaheadXFraction = lookahead.xFraction
                 controlledLookaheadYFraction = lookahead.yFraction
             } else {
@@ -1275,6 +1295,22 @@ internal class TapeTrackingController {
         )
     }
 
+    /**
+     * Bearing from the aircraft reference to the predicted point ahead on the path.
+     * Unlike the undirected near-field tape tangent, this preserves which side the
+     * upcoming route actually occupies.
+     */
+    private fun desiredLookaheadBearingDegrees(nowNanos: Long): Double? {
+        if (pathQuality != PathQuality.FULL_PATH) return null
+        val lookahead = predictedLookahead(nowNanos) ?: return null
+        val aspectRatio = lookaheadFrameAspectRatio ?: return null
+        val lateralDistance =
+            (lookahead.xFraction - TRACKING_TARGET_X_FRACTION) * aspectRatio
+        val forwardDistance = TRACKING_TARGET_Y_FRACTION - lookahead.yFraction
+        if (forwardDistance <= 0.0) return null
+        return Math.toDegrees(atan2(lateralDistance, forwardDistance))
+    }
+
     private fun hasUsablePurePursuitTarget(nowNanos: Long): Boolean =
         desiredPurePursuitCurvaturePerMeter(nowNanos) != null
 
@@ -1457,6 +1493,16 @@ internal class TapeTrackingController {
             return appliedForwardSpeedMetersPerSecond
         }
         if (
+            targetForwardSpeedMetersPerSecond <= 0.0 &&
+            controlledHorizontalOffsetFraction?.let {
+                projectedCrossTrackMagnitude(it) >= CIRCULAR_FORWARD_STOP_OFFSET_FRACTION
+            } == true
+        ) {
+            appliedForwardSpeedMetersPerSecond = 0.0
+            appliedForwardAccelerationMetersPerSecondSquared = 0.0
+            return 0.0
+        }
+        if (
             targetForwardSpeedMetersPerSecond < appliedForwardSpeedMetersPerSecond &&
             (circularDetectionGap || pathQuality == PathQuality.LOST)
         ) {
@@ -1517,7 +1563,10 @@ internal class TapeTrackingController {
                     offset + CIRCULAR_CENTERING_DEAD_ZONE_FRACTION
                 else -> 0.0
             }
-            return (effectiveOffset * CIRCULAR_LATERAL_PROPORTIONAL_GAIN).coerceIn(
+            return (
+                effectiveOffset * CIRCULAR_LATERAL_PROPORTIONAL_GAIN +
+                    offsetRatePerSecond * CIRCULAR_LATERAL_DERIVATIVE_GAIN
+                ).coerceIn(
                 -CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
                 CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND,
             )
@@ -1636,25 +1685,25 @@ internal class TapeTrackingController {
         trackingSpeedMetersPerSecond: Double,
         offsetFraction: Double,
     ): Double {
+        val projectedMagnitude = projectedCrossTrackMagnitude(offsetFraction)
+        val forwardAuthority = (
+            (CIRCULAR_FORWARD_STOP_OFFSET_FRACTION - projectedMagnitude) /
+                (
+                    CIRCULAR_FORWARD_STOP_OFFSET_FRACTION -
+                        CIRCULAR_FULL_SPEED_OFFSET_FRACTION
+                    )
+            ).coerceIn(0.0, 1.0)
+        return trackingSpeedMetersPerSecond * forwardAuthority
+    }
+
+    private fun projectedCrossTrackMagnitude(offsetFraction: Double): Double {
         val projectedDelta =
-            offsetRatePerSecond * FAST_TRACKING_RESPONSE_PREVIEW_SECONDS
-        val projectedMagnitude = maxOf(
+            offsetRatePerSecond * CROSS_TRACK_RESPONSE_PREVIEW_SECONDS
+        return maxOf(
             abs(offsetFraction),
             abs(projectedDelta),
             abs(offsetFraction + projectedDelta),
         )
-        val authorityFraction = (
-            (CIRCULAR_FAST_SLOWDOWN_OFFSET_FRACTION - projectedMagnitude) /
-                (
-                    CIRCULAR_FAST_SLOWDOWN_OFFSET_FRACTION -
-                        CIRCULAR_FAST_FULL_SPEED_OFFSET_FRACTION
-                    )
-            ).coerceIn(0.0, 1.0)
-        return CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND +
-            (
-                trackingSpeedMetersPerSecond -
-                    CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND
-                ) * authorityFraction
     }
 
     private fun postTurnRecoveryDurationNanos(): Long =
@@ -1710,6 +1759,7 @@ internal class TapeTrackingController {
         endpointReached: Boolean = false,
         stopRequested: Boolean = false,
         purePursuitYawRateDegreesPerSecond: Double = 0.0,
+        pathBearingDegrees: Double? = null,
     ): TapeTrackingDecision {
         check(!endpointReached || phase == TapeTrackingPhase.TURNING) {
             "A physical endpoint can only be reported while turning around"
@@ -1727,6 +1777,7 @@ internal class TapeTrackingController {
             controlledOffsetFraction = controlledHorizontalOffsetFraction,
             offsetRatePerSecond = offsetRatePerSecond,
             purePursuitYawRateDegreesPerSecond = purePursuitYawRateDegreesPerSecond,
+            pathBearingDegrees = pathBearingDegrees,
             rawCurvaturePerMeter = rawCurvaturePerMeter,
             predictedCurvaturePerMeter = predictedCurvaturePerMeter,
             trustedCurvaturePerMeter = trustedCurvaturePerMeter,
@@ -1844,9 +1895,10 @@ internal class TapeTrackingController {
                 CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
         const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.24
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.20
-        const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.05
-        const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.07
-        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.02
+        const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.04
+        const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.18
+        const val CIRCULAR_LATERAL_DERIVATIVE_GAIN = 0.05
+        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.06
         const val CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
         const val CIRCULAR_MAX_FORWARD_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
         const val CIRCULAR_MAX_FORWARD_JERK_METERS_PER_SECOND_CUBED = 2.0
@@ -1855,9 +1907,9 @@ internal class TapeTrackingController {
         const val CIRCULAR_CURVATURE_CAP_RISE_METERS_PER_SECOND_SQUARED = 0.25
         const val CURVATURE_MEDIAN_SAMPLE_COUNT = 3
         const val MAX_CURVATURE_CAP_UPDATE_INTERVAL_SECONDS = 0.25
-        const val CIRCULAR_FAST_FULL_SPEED_OFFSET_FRACTION = 0.08
-        const val CIRCULAR_FAST_SLOWDOWN_OFFSET_FRACTION = 0.20
-        const val FAST_TRACKING_RESPONSE_PREVIEW_SECONDS = 0.35
+        const val CIRCULAR_FULL_SPEED_OFFSET_FRACTION = 0.08
+        const val CIRCULAR_FORWARD_STOP_OFFSET_FRACTION = 0.30
+        const val CROSS_TRACK_RESPONSE_PREVIEW_SECONDS = 0.35
         const val MAX_LOOKAHEAD_RATE_PER_SECOND = 2.0
         const val LOOKAHEAD_RATE_FILTER_ALPHA = 0.35
         const val MAX_MEASUREMENT_AGE_COMPENSATION_SECONDS = 0.15
@@ -1870,7 +1922,8 @@ internal class TapeTrackingController {
         const val CURVE_MISALIGNMENT_CONFIRMATION_NANOS = 250_000_000L
         const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
-        const val REACQUISITION_ENTRY_OFFSET_FRACTION = 0.30
+        const val REACQUISITION_ENTRY_OFFSET_FRACTION =
+            CIRCULAR_FORWARD_STOP_OFFSET_FRACTION
         // A lost-path reacquisition must be a substantial route, not a short floor feature.
         // Flight evidence after the detector hardening showed that waiting for a third
         // mutually consistent frame only prolonged a stationary tail reacquisition.

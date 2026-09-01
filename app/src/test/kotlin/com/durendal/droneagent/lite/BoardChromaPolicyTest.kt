@@ -20,6 +20,27 @@ class BoardChromaPolicyTest {
     }
 
     @Test
+    fun `matching sides remain eligible for reference learning when absolute model misses`() {
+        assertTrue(
+            BilateralBoardPolicy.hasCompatibleSides(
+                pairCount = 84,
+                sampleCoverageFraction = 0.97,
+                compatiblePairFraction = 1.0,
+            ),
+        )
+        assertFalse(
+            BilateralBoardPolicy.accepts(
+                pairCount = 84,
+                sampleCoverageFraction = 0.97,
+                compatiblePairFraction = 1.0,
+                leftMatchFraction = 0.0,
+                rightMatchFraction = 0.0,
+                bothSidesMatchFraction = 0.0,
+            ),
+        )
+    }
+
+    @Test
     fun `cardboard on only one side is rejected`() {
         assertFalse(
             BilateralBoardPolicy.accepts(

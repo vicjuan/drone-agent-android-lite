@@ -86,16 +86,29 @@ internal data class TapeWidthRangePixels(
  */
 private val DEFAULT_TAPE_WIDTH_RANGE_PIXELS = TapeWidthRangePixels(minimum = 6.0, maximum = 160.0)
 
+internal interface CenterlineMask {
+    val width: Int
+    val height: Int
+    val tapePixelCount: Int
+
+    fun hasTapeInRectangle(
+        left: Int,
+        top: Int,
+        rightExclusive: Int,
+        bottomExclusive: Int,
+    ): Boolean
+}
+
 /**
  * Binary tape candidate mask, row-major, same dimensions as the source frame.
  * `true` marks a pixel classified as tape. The array is caller-owned and never
  * copied, so a detector can hand its per-frame scratch mask straight in.
  */
 internal class SegmentationMask(
-    val width: Int,
-    val height: Int,
+    override val width: Int,
+    override val height: Int,
     val tape: BooleanArray,
-) {
+) : CenterlineMask {
     init {
         require(width > 0 && height > 0) { "mask dimensions must be positive" }
         require(tape.size == width * height) {
@@ -104,13 +117,13 @@ internal class SegmentationMask(
     }
 
     /** Eager because every consumer gates on emptiness before touching pixels. */
-    val tapePixelCount: Int = tape.count { it }
+    override val tapePixelCount: Int = tape.count { it }
 
     /** Fraction of the frame classified as tape, in 0.0..1.0. */
     val tapeFraction: Double get() = tapePixelCount.toDouble() / (width * height)
 
     /** Returns whether a non-empty full-resolution rectangle contains tape. */
-    internal fun hasTapeInRectangle(
+    override fun hasTapeInRectangle(
         left: Int,
         top: Int,
         rightExclusive: Int,
@@ -130,6 +143,43 @@ internal class SegmentationMask(
     companion object {
         fun empty(width: Int, height: Int): SegmentationMask =
             SegmentationMask(width, height, BooleanArray(width * height))
+    }
+}
+
+/**
+ * OpenCV binary mask adapter. Non-zero bytes are tape pixels, including signed
+ * 0xFF values; the detector's reusable Mat buffer can therefore feed the
+ * extractor without a second full-region BooleanArray conversion.
+ */
+internal class ByteSegmentationMask(
+    override val width: Int,
+    override val height: Int,
+    private val tape: ByteArray,
+) : CenterlineMask {
+    init {
+        require(width > 0 && height > 0) { "mask dimensions must be positive" }
+        require(tape.size == width * height) {
+            "mask size ${tape.size} does not match $width x $height"
+        }
+    }
+
+    override val tapePixelCount: Int = tape.count { it != 0.toByte() }
+
+    override fun hasTapeInRectangle(
+        left: Int,
+        top: Int,
+        rightExclusive: Int,
+        bottomExclusive: Int,
+    ): Boolean {
+        for (y in top until bottomExclusive) {
+            var index = y * width + left
+            val end = y * width + rightExclusive
+            while (index < end) {
+                if (tape[index] != 0.toByte()) return true
+                index++
+            }
+        }
+        return false
     }
 }
 
@@ -215,7 +265,7 @@ internal class CenterlineExtractor(
     private var routeClosedLoop = false
 
     fun extract(
-        mask: SegmentationMask,
+        mask: CenterlineMask,
         tapeWidthRangePixels: TapeWidthRangePixels = config.defaultTapeWidthRangePixels,
     ): CenterlineEstimate {
         if (mask.tapePixelCount == 0) return emptyEstimate()
@@ -255,7 +305,8 @@ internal class CenterlineExtractor(
 
         chamferDistance(foreground, paddedWidth, paddedHeight)
         System.arraycopy(foreground, 0, skeleton, 0, workspaceSize)
-        thinZhangSuen(skeleton, paddedWidth, paddedHeight)
+        val activePixelCount = collectForegroundIndices(skeleton, indexBuffer)
+        thinZhangSuen(skeleton, paddedWidth, paddedHeight, indexBuffer, activePixelCount)
         var skeletonCount = 0
         for (py in 1 until paddedHeight - 1) {
             for (px in 1 until paddedWidth - 1) {
@@ -528,7 +579,24 @@ internal class CenterlineExtractor(
         }
     }
 
-    private fun thinZhangSuen(pixels: BooleanArray, width: Int, height: Int) {
+    private fun collectForegroundIndices(
+        pixels: BooleanArray,
+        indices: IntArray,
+    ): Int {
+        var count = 0
+        for (index in pixels.indices) {
+            if (pixels[index]) indices[count++] = index
+        }
+        return count
+    }
+
+    private fun thinZhangSuen(
+        pixels: BooleanArray,
+        width: Int,
+        height: Int,
+        activeIndices: IntArray,
+        activeCount: Int,
+    ) {
         var changed: Boolean
         var iteration = 0
         // A full pass removes at least one boundary layer when it changes.
@@ -539,15 +607,17 @@ internal class CenterlineExtractor(
             changed = thinningPass(
                 pixels,
                 width,
-                height,
                 firstPass = true,
+                activeIndices = activeIndices,
+                activeCount = activeCount,
                 remove = removalBuffer,
             )
             changed = thinningPass(
                 pixels,
                 width,
-                height,
                 firstPass = false,
+                activeIndices = activeIndices,
+                activeCount = activeCount,
                 remove = removalBuffer,
             ) || changed
             iteration++
@@ -557,52 +627,52 @@ internal class CenterlineExtractor(
     private fun thinningPass(
         pixels: BooleanArray,
         width: Int,
-        height: Int,
         firstPass: Boolean,
+        activeIndices: IntArray,
+        activeCount: Int,
         remove: IntArray,
     ): Boolean {
         var removeCount = 0
-        for (y in 1 until height - 1) {
-            for (x in 1 until width - 1) {
-                val i = y * width + x
-                if (!pixels[i]) continue
-                val p2 = pixels[i - width]
-                val p3 = pixels[i - width + 1]
-                val p4 = pixels[i + 1]
-                val p5 = pixels[i + width + 1]
-                val p6 = pixels[i + width]
-                val p7 = pixels[i + width - 1]
-                val p8 = pixels[i - 1]
-                val p9 = pixels[i - width - 1]
-                val neighborCount =
-                    (if (p2) 1 else 0) +
-                        (if (p3) 1 else 0) +
-                        (if (p4) 1 else 0) +
-                        (if (p5) 1 else 0) +
-                        (if (p6) 1 else 0) +
-                        (if (p7) 1 else 0) +
-                        (if (p8) 1 else 0) +
-                        (if (p9) 1 else 0)
-                if (neighborCount !in 2..6) continue
-                val transitions =
-                    (if (!p2 && p3) 1 else 0) +
-                        (if (!p3 && p4) 1 else 0) +
-                        (if (!p4 && p5) 1 else 0) +
-                        (if (!p5 && p6) 1 else 0) +
-                        (if (!p6 && p7) 1 else 0) +
-                        (if (!p7 && p8) 1 else 0) +
-                        (if (!p8 && p9) 1 else 0) +
-                        (if (!p9 && p2) 1 else 0)
-                if (transitions != 1) continue
-                val keepForTriples = if (firstPass) {
+        for (position in 0 until activeCount) {
+            val i = activeIndices[position]
+            if (!pixels[i]) continue
+            val p2 = pixels[i - width]
+            val p3 = pixels[i - width + 1]
+            val p4 = pixels[i + 1]
+            val p5 = pixels[i + width + 1]
+            val p6 = pixels[i + width]
+            val p7 = pixels[i + width - 1]
+            val p8 = pixels[i - 1]
+            val p9 = pixels[i - width - 1]
+            val neighborCount =
+                (if (p2) 1 else 0) +
+                    (if (p3) 1 else 0) +
+                    (if (p4) 1 else 0) +
+                    (if (p5) 1 else 0) +
+                    (if (p6) 1 else 0) +
+                    (if (p7) 1 else 0) +
+                    (if (p8) 1 else 0) +
+                    (if (p9) 1 else 0)
+            if (neighborCount !in 2..6) continue
+            val transitions =
+                (if (!p2 && p3) 1 else 0) +
+                    (if (!p3 && p4) 1 else 0) +
+                    (if (!p4 && p5) 1 else 0) +
+                    (if (!p5 && p6) 1 else 0) +
+                    (if (!p6 && p7) 1 else 0) +
+                    (if (!p7 && p8) 1 else 0) +
+                    (if (!p8 && p9) 1 else 0) +
+                    (if (!p9 && p2) 1 else 0)
+            if (transitions != 1) continue
+            val keepForTriples =
+                if (firstPass) {
                     !(p2 && p4 && p6) && !(p4 && p6 && p8)
                 } else {
                     !(p2 && p4 && p8) && !(p2 && p6 && p8)
                 }
-                if (keepForTriples) remove[removeCount++] = i
-            }
+            if (keepForTriples) remove[removeCount++] = i
         }
-        for (n in 0 until removeCount) pixels[remove[n]] = false
+        for (index in 0 until removeCount) pixels[remove[index]] = false
         return removeCount > 0
     }
 

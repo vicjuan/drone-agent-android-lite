@@ -1,7 +1,6 @@
 package com.durendal.droneagent.lite
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class HeadingTurnTest {
@@ -44,49 +43,127 @@ class HeadingTurnTest {
     }
 
     @Test
-    fun `yaw rate maps proportionally to bounded heading lead`() {
+    fun `angle heading follows directed path bearing at bounded rate`() {
+        val controller = AngleHeadingController()
+
         assertEquals(
-            -170.0,
+            161.0,
             checkNotNull(
-                headingTargetForYawRate(
+                controller.update(
                     currentHeadingDegrees = 160.0,
-                    yawRateDegreesPerSecond = 25.0,
-                    maximumYawRateDegreesPerSecond = 50.0,
-                    maximumHeadingLeadDegrees = 60.0,
+                    relativePathBearingDegrees = 40.0,
+                    pathTracking = true,
+                    nowNanos = 1_000_000_000L,
                 ),
             ),
             0.0,
         )
         assertEquals(
-            130.0,
+            162.0,
             checkNotNull(
-                headingTargetForYawRate(
-                    currentHeadingDegrees = 160.0,
-                    yawRateDegreesPerSecond = -25.0,
-                    maximumYawRateDegreesPerSecond = 50.0,
-                    maximumHeadingLeadDegrees = 60.0,
+                controller.update(
+                    currentHeadingDegrees = 160.5,
+                    relativePathBearingDegrees = 39.5,
+                    pathTracking = true,
+                    nowNanos = 1_100_000_000L,
+                ),
+            ),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `angle heading crosses signed heading seam without jumping`() {
+        val controller = AngleHeadingController()
+
+        assertEquals(
+            180.0,
+            checkNotNull(
+                controller.update(
+                    currentHeadingDegrees = 179.0,
+                    relativePathBearingDegrees = 20.0,
+                    pathTracking = true,
+                    nowNanos = 1_000_000_000L,
                 ),
             ),
             0.0,
         )
         assertEquals(
-            -140.0,
+            -179.0,
             checkNotNull(
-                headingTargetForYawRate(
-                    currentHeadingDegrees = 160.0,
-                    yawRateDegreesPerSecond = 100.0,
-                    maximumYawRateDegreesPerSecond = 50.0,
-                    maximumHeadingLeadDegrees = 60.0,
+                controller.update(
+                    currentHeadingDegrees = 179.5,
+                    relativePathBearingDegrees = 19.5,
+                    pathTracking = true,
+                    nowNanos = 1_100_000_000L,
+                ),
+            ),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `angle heading cannot outrun aircraft by more than five degrees`() {
+        val controller = AngleHeadingController()
+        var command = 0.0
+
+        repeat(20) { index ->
+            command =
+                checkNotNull(
+                    controller.update(
+                        currentHeadingDegrees = 0.0,
+                        relativePathBearingDegrees = 90.0,
+                        pathTracking = true,
+                        nowNanos = 1_000_000_000L + index * 100_000_000L,
+                    ),
+                )
+        }
+
+        assertEquals(5.0, command, 0.0)
+    }
+
+    @Test
+    fun `angle heading stops at current heading when path is unavailable`() {
+        val controller = AngleHeadingController()
+        controller.update(0.0, 45.0, pathTracking = true, nowNanos = 1_000_000_000L)
+
+        assertEquals(
+            0.4,
+            checkNotNull(
+                controller.update(
+                    currentHeadingDegrees = 0.4,
+                    relativePathBearingDegrees = null,
+                    pathTracking = false,
+                    nowNanos = 1_100_000_000L,
                 ),
             ),
             0.0,
         )
-        assertNull(
-            headingTargetForYawRate(
+        assertEquals(
+            1.4,
+            checkNotNull(
+                controller.update(
+                    currentHeadingDegrees = 0.4,
+                    relativePathBearingDegrees = 45.0,
+                    pathTracking = true,
+                    nowNanos = 1_200_000_000L,
+                ),
+            ),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `angle heading rejects invalid aircraft heading`() {
+        val controller = AngleHeadingController()
+
+        assertEquals(
+            null,
+            controller.update(
                 currentHeadingDegrees = Double.NaN,
-                yawRateDegreesPerSecond = 25.0,
-                maximumYawRateDegreesPerSecond = 50.0,
-                maximumHeadingLeadDegrees = 60.0,
+                relativePathBearingDegrees = 10.0,
+                pathTracking = true,
+                nowNanos = 1_000_000_000L,
             ),
         )
     }

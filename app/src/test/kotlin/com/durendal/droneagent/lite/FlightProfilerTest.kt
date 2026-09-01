@@ -36,6 +36,40 @@ class FlightProfilerTest {
     }
 
     @Test
+    fun `lazy record builds details before close returns`() {
+        val file = File.createTempFile("flight-profile-lazy", ".tsv")
+        val profiler = FlightProfiler(file) { 1_000_000_000L }
+        var detailsBuilt = false
+
+        profiler.recordLazy(event = "vision") {
+            detailsBuilt = true
+            "sequence=42"
+        }
+        profiler.close()
+
+        assertTrue(detailsBuilt)
+        assertTrue(file.readText().contains("\tvision\t0\t0\tsequence=42"))
+        assertTrue(file.delete())
+    }
+
+    @Test
+    fun `lazy record after close does not build details`() {
+        val file = File.createTempFile("flight-profile-closed", ".tsv")
+        val profiler = FlightProfiler(file) { 1_000_000_000L }
+        var detailsBuilt = false
+        profiler.close()
+
+        profiler.recordLazy(event = "vision") {
+            detailsBuilt = true
+            "must-not-be-written"
+        }
+
+        assertEquals(false, detailsBuilt)
+        assertEquals(1, file.readLines().size)
+        assertTrue(file.delete())
+    }
+
+    @Test
     fun `profile details retain field names for offline analysis`() {
         assertEquals(
             "forward=0.5 phase=TRACKING missing=null",

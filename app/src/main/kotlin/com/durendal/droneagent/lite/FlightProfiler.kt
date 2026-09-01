@@ -40,9 +40,39 @@ internal class FlightProfiler(
         details: String = "",
     ) {
         if (closed) return
+        val line = formatLine(event, atNanos, frameNanos, durationNanos, details)
+        writerExecutor.execute { writeLine(line) }
+    }
+
+    /**
+     * Defers diagnostic string construction to the writer thread. High-rate
+     * detector callbacks only publish immutable timing data and return; they do
+     * not make flight control wait for Double formatting and detail assembly.
+     */
+    @Synchronized
+    fun recordLazy(
+        event: String,
+        atNanos: Long = clock(),
+        frameNanos: Long = 0L,
+        durationNanos: Long = 0L,
+        details: () -> String,
+    ) {
+        if (closed) return
+        writerExecutor.execute {
+            writeLine(formatLine(event, atNanos, frameNanos, durationNanos, details()))
+        }
+    }
+
+    private fun formatLine(
+        event: String,
+        atNanos: Long,
+        frameNanos: Long,
+        durationNanos: Long,
+        details: String,
+    ): String {
         val elapsedMillis = (atNanos - startedAtNanos).coerceAtLeast(0L) / NANOS_PER_MILLISECOND
         val durationMillis = durationNanos.coerceAtLeast(0L) / NANOS_PER_MILLISECOND
-        val line = buildString(192) {
+        return buildString(192) {
             append(elapsedMillis)
             append('\t').append(atNanos)
             append('\t').append(sanitize(event))
@@ -51,13 +81,14 @@ internal class FlightProfiler(
             append('\t').append(sanitize(details))
             append('\n')
         }
-        writerExecutor.execute {
-            writer.write(line)
-            val nowNanos = System.nanoTime()
-            if (nowNanos - lastFlushedAtNanos >= FLUSH_INTERVAL_NANOS) {
-                writer.flush()
-                lastFlushedAtNanos = nowNanos
-            }
+    }
+
+    private fun writeLine(line: String) {
+        writer.write(line)
+        val nowNanos = System.nanoTime()
+        if (nowNanos - lastFlushedAtNanos >= FLUSH_INTERVAL_NANOS) {
+            writer.flush()
+            lastFlushedAtNanos = nowNanos
         }
     }
 

@@ -76,14 +76,13 @@ class FixedHeadingLapControllerTest {
             ),
             heightMeters = 1.0,
             travelDirectionDegrees = 0.0,
-            lookaheadMeters = FixedHeadingLapController.FAST_LOOKAHEAD_METERS,
+            lookaheadMeters = FixedHeadingLapController.LOOKAHEAD_METERS,
         )
 
         val tracked = checkNotNull(measurement)
         assertTrue(tracked.lookaheadDistanceMeters >= 0.15)
         assertTrue(
-            tracked.lookaheadDistanceMeters <
-                FixedHeadingLapController.FAST_LOOKAHEAD_METERS,
+            tracked.lookaheadDistanceMeters < FixedHeadingLapController.LOOKAHEAD_METERS,
         )
     }
 
@@ -123,7 +122,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.50f, 0.50f, 0.50f, 0.50f, 0.50f, 0.50f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.25f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(20) { index ->
             val now = 100_000_001L + index * 100_000_000L
@@ -137,7 +136,7 @@ class FixedHeadingLapControllerTest {
 
         assertEquals(FixedHeadingLapPhase.TRACKING, decision.phase)
         assertTrue(speed > FixedHeadingLapController.DEGRADED_SPEED_METERS_PER_SECOND)
-        assertTrue(speed < 0.5)
+        assertTrue(speed < FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND)
     }
 
     @Test
@@ -147,7 +146,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         controller.observe(centerline, 1.0, 0.9, 1L)
 
         val decision = controller.tick(100_000_001L)
@@ -162,7 +161,7 @@ class FixedHeadingLapControllerTest {
     @Test
     fun `fixed heading steers directly toward the measured lookahead`() {
         val controller = FixedHeadingLapController()
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         controller.observe(
             centerline = curvedPath(tangentDegrees = 0.0),
             heightMeters = 1.2,
@@ -179,41 +178,110 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
-    fun `slow fixed heading profile caps body velocity at point two meters per second`() {
-        val controller = FixedHeadingLapController()
-        val centerline = path(
-            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
-            ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.10f),
-        )
-        controller.start(1L, FixedHeadingTrackingSpeed.SLOW)
-        for (now in listOf(1L, 200_000_001L, 400_000_001L)) {
-            controller.observe(centerline, 1.0, 0.9, now)
+    fun `fourteen degree phase lead follows turn direction without changing virtual heading`() {
+        fun trackingDecision(
+            phaseLead: FixedHeadingActuationPhaseLead,
+            mirrored: Boolean,
+        ): FixedHeadingLapDecision {
+            val controller = FixedHeadingLapController()
+            val centeredPath = path(
+                xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+                ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
+            )
+            val turnPath = curvedPath(tangentDegrees = 0.0).let { curve ->
+                if (!mirrored) {
+                    curve
+                } else {
+                    path(
+                        xs = FloatArray(curve.pointCount) { index ->
+                            1.0f - curve.xFractions[index]
+                        },
+                        ys = curve.yFractions,
+                    )
+                }
+            }
+            controller.start(1L, phaseLead)
+            controller.observe(centeredPath, 1.2, 0.9, 1L)
+            controller.tick(100_000_001L)
+            controller.observe(turnPath, 1.2, 0.9, 200_000_001L)
+            return controller.tick(200_000_001L)
         }
 
-        var decision = controller.tick(500_000_001L)
-        for (now in listOf(700_000_001L, 900_000_001L, 1_100_000_001L)) {
-            controller.observe(centerline, 1.0, 0.9, now)
-            decision = controller.tick(now)
-        }
+        val zeroPositive = trackingDecision(FixedHeadingActuationPhaseLead.DEGREES_0, false)
+        val leadPositive = trackingDecision(FixedHeadingActuationPhaseLead.DEGREES_14, false)
+        val zeroNegative = trackingDecision(FixedHeadingActuationPhaseLead.DEGREES_0, true)
+        val leadNegative = trackingDecision(FixedHeadingActuationPhaseLead.DEGREES_14, true)
+        fun velocityHeading(decision: FixedHeadingLapDecision): Double =
+            Math.toDegrees(
+                kotlin.math.atan2(
+                    decision.rightMetersPerSecond,
+                    decision.forwardMetersPerSecond,
+                ),
+            )
+        fun speed(decision: FixedHeadingLapDecision): Double =
+            kotlin.math.hypot(
+                decision.forwardMetersPerSecond,
+                decision.rightMetersPerSecond,
+            )
 
-        val speed = kotlin.math.hypot(
-            decision.forwardMetersPerSecond,
-            decision.rightMetersPerSecond,
+        assertEquals(zeroPositive.virtualHeadingDegrees, leadPositive.virtualHeadingDegrees, 1e-9)
+        assertEquals(zeroNegative.virtualHeadingDegrees, leadNegative.virtualHeadingDegrees, 1e-9)
+        assertEquals(speed(zeroPositive), speed(leadPositive), 1e-9)
+        assertEquals(speed(zeroNegative), speed(leadNegative), 1e-9)
+        assertTrue(speed(leadPositive) <= FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND)
+        assertTrue(speed(leadNegative) <= FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND)
+        assertEquals(zeroPositive.virtualHeadingDegrees, wrapDegrees(velocityHeading(zeroPositive)), 1e-9)
+        assertEquals(zeroNegative.virtualHeadingDegrees, wrapDegrees(velocityHeading(zeroNegative)), 1e-9)
+        assertEquals(
+            14.0,
+            shortestAngularDelta(velocityHeading(zeroPositive), velocityHeading(leadPositive)),
+            1e-9,
         )
-        assertTrue(speed <= FixedHeadingTrackingSpeed.SLOW.targetMetersPerSecond)
-        assertTrue(speed > 0.19)
-        assertEquals(0.0, decision.virtualHeadingDegrees, 1e-6)
+        assertEquals(
+            -14.0,
+            shortestAngularDelta(velocityHeading(zeroNegative), velocityHeading(leadNegative)),
+            1e-9,
+        )
     }
 
     @Test
-    fun `boost fixed heading profile reaches one point two five meters per second on a centered route`() {
-        val controller = FixedHeadingLapController()
+    fun `fourteen degree phase lead is absent at zero speed and after stopping`() {
+        val zeroSpeedController = FixedHeadingLapController()
+        val displacedPath = path(
+            xs = floatArrayOf(0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f),
+            ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
+        )
+        zeroSpeedController.start(1L, FixedHeadingActuationPhaseLead.DEGREES_14)
+        zeroSpeedController.observe(displacedPath, 1.0, 0.9, 1L)
+        val zeroSpeedDecision = zeroSpeedController.tick(100_000_001L)
+
+        assertEquals(FixedHeadingLapPhase.TRACKING, zeroSpeedDecision.phase)
+        assertEquals(0.0, zeroSpeedDecision.forwardMetersPerSecond, 1e-9)
+        assertEquals(
+            FixedHeadingLapController.MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
+            zeroSpeedDecision.rightMetersPerSecond,
+            1e-9,
+        )
+
+        val stoppedController = FixedHeadingLapController()
+        stoppedController.start(1L, FixedHeadingActuationPhaseLead.DEGREES_14)
+        val stoppedDecision =
+            stoppedController.tick(1L + FixedHeadingLapController.ACQUISITION_TIMEOUT_NANOS)
+
+        assertEquals(FixedHeadingLapPhase.STOPPED, stoppedDecision.phase)
+        assertEquals(0.0, stoppedDecision.forwardMetersPerSecond, 1e-9)
+        assertEquals(0.0, stoppedDecision.rightMetersPerSecond, 1e-9)
+        assertTrue(stoppedDecision.stopRequested)
+    }
+
+    @Test
+    fun `fixed heading reaches its 1 point 25 meter per second target on a centered route`() {
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
         )
-        controller.start(1L, FixedHeadingTrackingSpeed.BOOST)
-
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(50) { index ->
             val now = (index + 1L) * 100_000_000L + 1L
@@ -225,51 +293,48 @@ class FixedHeadingLapControllerTest {
             decision.forwardMetersPerSecond,
             decision.rightMetersPerSecond,
         )
-        assertTrue(speed > FixedHeadingTrackingSpeed.FAST.targetMetersPerSecond)
-        assertEquals(FixedHeadingTrackingSpeed.BOOST.targetMetersPerSecond, speed, 0.001)
-        assertTrue(
-            FixedHeadingTrackingSpeed.BOOST.targetMetersPerSecond <=
-                VirtualStickSession.AUTONOMOUS_MAX_HORIZONTAL_MPS,
-        )
+        assertEquals(1.25, FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND, 0.001)
+        assertEquals(FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND, speed, 0.001)
+        assertTrue(speed <= VirtualStickSession.AUTONOMOUS_MAX_HORIZONTAL_MPS)
+        assertEquals(0.0, decision.virtualHeadingDegrees, 1e-6)
     }
 
     @Test
-    fun `boost keeps full authority through a moderate centered correction`() {
+    fun `sixteen degree profile reaches its 1 point 35 meter per second target`() {
         val centerline = path(
-            xs = floatArrayOf(0.55f, 0.55f, 0.55f, 0.55f, 0.55f, 0.55f),
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
         )
-        fun settledSpeed(trackingSpeed: FixedHeadingTrackingSpeed): Double {
-            val controller = FixedHeadingLapController()
-            controller.start(1L, trackingSpeed)
-            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
-            repeat(50) { index ->
-                val now = (index + 1L) * 100_000_000L + 1L
-                controller.observe(centerline, 1.2, 0.9, now)
-                decision = controller.tick(now)
-            }
-            return kotlin.math.hypot(
-                decision.forwardMetersPerSecond,
-                decision.rightMetersPerSecond,
-            )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_16)
+        var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        repeat(50) { index ->
+            val now = (index + 1L) * 100_000_000L + 1L
+            controller.observe(centerline, 1.2, 0.9, now)
+            decision = controller.tick(now)
         }
 
-        val fastSpeed = settledSpeed(FixedHeadingTrackingSpeed.FAST)
-        val boostSpeed = settledSpeed(FixedHeadingTrackingSpeed.BOOST)
-
-        assertTrue(fastSpeed < FixedHeadingTrackingSpeed.FAST.targetMetersPerSecond)
-        assertTrue(boostSpeed > 1.10)
-        assertTrue(boostSpeed > fastSpeed * 1.5)
+        val speed = kotlin.math.hypot(
+            decision.forwardMetersPerSecond,
+            decision.rightMetersPerSecond,
+        )
+        assertEquals(
+            FixedHeadingLapController.FASTER_TARGET_SPEED_METERS_PER_SECOND,
+            speed,
+            0.001,
+        )
+        assertTrue(speed <= VirtualStickSession.AUTONOMOUS_MAX_HORIZONTAL_MPS)
     }
 
+
     @Test
-    fun `committed boost bridges one detector period before braking`() {
+    fun `committed fixed heading bridges one detector period before braking`() {
         val controller = FixedHeadingLapController()
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
         )
-        controller.start(1L, FixedHeadingTrackingSpeed.BOOST)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var tracking = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(50) { index ->
             val now = (index + 1L) * 100_000_000L + 1L
@@ -305,7 +370,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         controller.observe(displacedPath, 1.0, 0.9, 1L)
 
         val decision = controller.tick(100_000_001L)
@@ -327,7 +392,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.10f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var cruising = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(20) { index ->
             val now = 100_000_001L + index * 100_000_000L
@@ -350,7 +415,7 @@ class FixedHeadingLapControllerTest {
         assertTrue(speedReduction > 0.0)
         assertTrue(
             speedReduction <=
-                FixedHeadingLapController.MAX_JERK_METERS_PER_SECOND_CUBED *
+                FixedHeadingLapController.HIGH_SPEED_MAX_JERK_METERS_PER_SECOND_CUBED *
                 CONTROL_STEP_SECONDS * CONTROL_STEP_SECONDS,
         )
         assertTrue(slowingSpeed > FixedHeadingLapController.DEGRADED_SPEED_METERS_PER_SECOND)
@@ -363,7 +428,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var tracking = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(20) { index ->
             val now = 100_000_001L + index * 100_000_000L
@@ -379,7 +444,7 @@ class FixedHeadingLapControllerTest {
         val held = controller.tick(2_100_000_001L)
         val braking = controller.tick(2_250_000_001L)
         val waiting = controller.tick(2_500_000_001L)
-        val stale = controller.tick(3_300_000_001L)
+        val stale = controller.tick(6_300_000_001L)
         val heldSpeed = kotlin.math.hypot(
             held.forwardMetersPerSecond,
             held.rightMetersPerSecond,
@@ -412,7 +477,7 @@ class FixedHeadingLapControllerTest {
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var tracking = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(20) { index ->
             val now = 100_000_001L + index * 100_000_000L
@@ -446,23 +511,23 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
-    fun `fixed heading resumes after a half second reflection gap`() {
+    fun `fixed heading resumes after a two second reflection gap`() {
         val controller = FixedHeadingLapController()
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         repeat(20) { index ->
             val now = 100_000_001L + index * 100_000_000L
             controller.observe(centerline, 1.0, 0.9, now)
             controller.tick(now)
         }
         controller.observe(null, 1.0, 0.0, 2_050_000_001L)
-        val waiting = controller.tick(2_500_000_001L)
+        val waiting = controller.tick(4_000_000_001L)
 
-        controller.observe(centerline, 1.0, 0.9, 2_550_000_001L)
-        val resumed = controller.tick(2_600_000_001L)
+        controller.observe(centerline, 1.0, 0.9, 4_150_000_001L)
+        val resumed = controller.tick(4_200_000_001L)
 
         assertEquals(FixedHeadingLapPhase.COASTING, waiting.phase)
         assertFalse(waiting.stopRequested)
@@ -515,7 +580,7 @@ class FixedHeadingLapControllerTest {
                 previousMeasurement = shiftedMeasurement,
             ),
         )
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         controller.observe(initialPath, 1.0, 0.9, 100_000_001L)
         controller.tick(100_000_001L)
 
@@ -539,9 +604,9 @@ class FixedHeadingLapControllerTest {
         var elapsedSeconds = 0.0
         while (distance < targetDistanceMeters) {
             speed = minOf(
-                FixedHeadingTrackingSpeed.FAST.targetMetersPerSecond,
+                FixedHeadingLapController.TARGET_SPEED_METERS_PER_SECOND,
                 speed +
-                    FixedHeadingLapController.MAX_ACCELERATION_METERS_PER_SECOND_SQUARED *
+                    FixedHeadingLapController.HIGH_SPEED_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED *
                     CONTROL_STEP_SECONDS,
             )
             distance += speed * CONTROL_STEP_SECONDS
@@ -554,7 +619,7 @@ class FixedHeadingLapControllerTest {
     @Test
     fun `fixed heading continues tracking after a full virtual turn`() {
         val controller = FixedHeadingLapController()
-        controller.start(1L)
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
         var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         var accumulatedTurnDegrees = 0.0
 
@@ -599,6 +664,63 @@ class FixedHeadingLapControllerTest {
         assertNotNull(event)
         assertEquals(1, checkNotNull(event).index)
         assertTrue(checkNotNull(event).turnDegrees >= 360.0)
+    }
+
+    @Test
+    fun `frame stream recovery hovers beyond ordinary path timeout and resumes after two observations`() {
+        val controller = FixedHeadingLapController()
+        val centerline = path(
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+            ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
+        )
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_16)
+        repeat(20) { index ->
+            val now = 100_000_001L + index * 100_000_000L
+            controller.observe(centerline, 1.0, 0.9, now)
+            controller.tick(now)
+        }
+        val staleAtNanos = 4_000_000_001L
+        controller.beginFrameStreamRecovery(staleAtNanos)
+
+        val waiting = controller.tick(staleAtNanos + 3_500_000_000L)
+        controller.observe(centerline, 1.0, 0.9, staleAtNanos + 3_600_000_000L)
+        val firstObservation = controller.tick(staleAtNanos + 3_600_000_000L)
+        controller.observe(centerline, 1.0, 0.9, staleAtNanos + 3_700_000_000L)
+        val resumed = controller.tick(staleAtNanos + 3_800_000_000L)
+
+        assertEquals(FixedHeadingLapPhase.RECOVERING_FRAME_STREAM, waiting.phase)
+        assertEquals(0.0, waiting.forwardMetersPerSecond, 0.0)
+        assertEquals(0.0, waiting.rightMetersPerSecond, 0.0)
+        assertFalse(waiting.stopRequested)
+        assertEquals(FixedHeadingLapPhase.RECOVERING_FRAME_STREAM, firstObservation.phase)
+        assertEquals(0.0, firstObservation.forwardMetersPerSecond, 0.0)
+        assertEquals(FixedHeadingLapPhase.TRACKING, resumed.phase)
+        assertTrue(resumed.forwardMetersPerSecond > 0.0)
+        assertFalse(resumed.stopRequested)
+    }
+
+    @Test
+    fun `frame stream recovery stops after bounded hover timeout`() {
+        val controller = FixedHeadingLapController()
+        val centerline = path(
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+            ys = floatArrayOf(0.96f, 0.82f, 0.68f, 0.54f, 0.40f, 0.20f),
+        )
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_0)
+        controller.observe(centerline, 1.0, 0.9, 100_000_001L)
+        controller.tick(100_000_001L)
+        val staleAtNanos = 200_000_001L
+        controller.beginFrameStreamRecovery(staleAtNanos)
+
+        val stopped =
+            controller.tick(
+                staleAtNanos + FixedHeadingLapController.FRAME_STREAM_RECOVERY_TIMEOUT_NANOS,
+            )
+
+        assertEquals(FixedHeadingLapPhase.STOPPED, stopped.phase)
+        assertEquals(0.0, stopped.forwardMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.rightMetersPerSecond, 0.0)
+        assertTrue(stopped.stopRequested)
     }
 
     @Test

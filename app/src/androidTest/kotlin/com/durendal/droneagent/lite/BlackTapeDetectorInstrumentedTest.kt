@@ -145,6 +145,87 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun sameDesaturatedCardboardOnBothSidesEstablishesTrackingReference() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 173, green = 160, blue = 129)
+        fillCurvedRibbon(frame, width, height, direction = 1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(frame, frame, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession(requireConsistentCurve = true)
+                },
+            )
+
+        assertEquals(diagnostics.joinToString("\n"), listOf(null, null), detections.take(2))
+        assertTrue(diagnostics.last(), detections.last() != null)
+    }
+
+    @Test
+    fun stableOffAxisPreviewLockIsPromotedIntoTrackingSession() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(
+            frame,
+            width,
+            height,
+            direction = -1.0,
+            value = 20,
+            baseXFraction = 0.75,
+        )
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                List(13) { frame },
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 12) detector.beginTrackingSession(requireConsistentCurve = true)
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections.take(12).count { it != null } >= 3)
+        assertTrue(diagnostics.joinToString("\n"), detections.last() != null)
+    }
+
+
+
+    @Test
+    fun trackingReferenceCannotBeLearnedFromGreenFloor() {
+        val width = 640
+        val height = 360
+        val frame = rgbaFrame(width, height, red = 70, green = 145, blue = 65)
+        fillCurvedRibbon(frame, width, height, direction = -1.0, value = 20)
+
+        val diagnostics = mutableListOf<String>()
+        val detections =
+            detectSequence(
+                listOf(frame, frame, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession(requireConsistentCurve = true)
+                },
+            )
+
+        assertTrue(diagnostics.joinToString("\n"), detections.all { it == null })
+        assertTrue(
+            diagnostics.joinToString("\n"),
+            diagnostics.all(BOARD_COLOR_REJECTION::containsMatchIn),
+        )
+    }
+
+    @Test
     fun tapeShapedMarkOnGreenFloorIsNotCardboardTape() {
         val width = 640
         val height = 360
@@ -567,6 +648,7 @@ class BlackTapeDetectorInstrumentedTest {
             assertEquals(diagnostics[index + 2], PathQuality.FULL_PATH, detection?.quality)
         }
     }
+
     @Test
     fun oneSidedDeskEdgeCannotProvideEndpointEvidenceBeforeTapeAppears() {
         val width = 1920
@@ -1285,7 +1367,17 @@ class BlackTapeDetectorInstrumentedTest {
         frameHeight: Int,
         direction: Double,
         value: Int,
-    ) = fillCurvedRibbonRgb(frame, frameWidth, frameHeight, direction, value, value, value)
+        baseXFraction: Double = 0.5,
+    ) = fillCurvedRibbonRgb(
+        frame,
+        frameWidth,
+        frameHeight,
+        direction,
+        value,
+        value,
+        value,
+        baseXFraction,
+    )
 
     private fun fillCurvedRibbonRgb(
         frame: ByteArray,
@@ -1295,11 +1387,13 @@ class BlackTapeDetectorInstrumentedTest {
         red: Int,
         green: Int,
         blue: Int,
+        baseXFraction: Double = 0.5,
     ) {
         for (y in 0 until frameHeight) {
             val forwardFraction = (frameHeight - 1 - y) / (frameHeight - 1.0)
             val center =
-                frameWidth / 2.0 + direction * CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+                frameWidth * baseXFraction +
+                    direction * CURVE_DISPLACEMENT * forwardFraction * forwardFraction
             val left = (center - TAPE_HALF_WIDTH).toInt().coerceAtLeast(0)
             val right = (center + TAPE_HALF_WIDTH).toInt().coerceAtMost(frameWidth)
             fillRectRgb(frame, frameWidth, left, y, right, y + 1, red, green, blue)

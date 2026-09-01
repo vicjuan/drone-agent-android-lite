@@ -11,6 +11,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -35,6 +36,28 @@ class TapeCaptureReplayInstrumentedTest {
     @After
     fun tearDown() {
         root.deleteRecursively()
+    }
+
+    @Test
+    fun externalFlightCaptureCorpusReplaysDeterministically() {
+        val corpusPath =
+            InstrumentationRegistry.getArguments().getString("captureCorpusPath").orEmpty()
+        assumeTrue("captureCorpusPath instrumentation argument was not supplied", corpusPath.isNotEmpty())
+        val captureDirectories =
+            File(corpusPath).listFiles()
+                ?.filter { File(it, "capture.txt").isFile }
+                ?.sortedBy(File::getName)
+                .orEmpty()
+        assertTrue("no captures found in $corpusPath", captureDirectories.isNotEmpty())
+
+        captureDirectories.forEach { directory ->
+            val capture = TapeCaptureCodec.read(directory)
+            val mode = TapeDetectionMode.valueOf(capture.metadata.getValue("detector.mode"))
+            val first = replay(capture, mode)
+            val second = replay(capture, mode)
+            assertEquals("${directory.name} acceptance", first != null, second != null)
+            if (first != null && second != null) assertSameDetection(first, second)
+        }
     }
 
     @Test
@@ -156,6 +179,7 @@ class TapeCaptureReplayInstrumentedTest {
         assertArrayEquals(firstFrame, captures[0].frame.pixels)
         assertArrayEquals(secondFrame, captures[1].frame.pixels)
     }
+
 
     private fun assertSameDetection(expected: TapeDetection, actual: TapeDetection) {
         assertEquals(expected.confidence, actual.confidence, 0.0)
