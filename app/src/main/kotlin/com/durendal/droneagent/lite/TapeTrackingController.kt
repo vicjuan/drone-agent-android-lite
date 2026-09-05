@@ -1,9 +1,11 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.sign
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -37,7 +39,7 @@ internal enum class CircularTrackingSpeed(
 ) {
     ANGLE(0.10, latencyCompensatedLookahead = true),
     SLOW(0.50, latencyCompensatedLookahead = false),
-    FAST(0.85, latencyCompensatedLookahead = true),
+    FAST(0.70, latencyCompensatedLookahead = true),
 }
 
 
@@ -70,6 +72,7 @@ internal data class TapeTrackingObservation(
     val confidence: Double = 0.0,
     val centerline: TapeCenterlinePath? = null,
     val actualTravelDirectionDegrees: Double? = null,
+    val actualGroundSpeedMetersPerSecond: Double? = null,
 ) {
     init {
         require(angleFromVerticalDegrees in -90.0..90.0)
@@ -84,6 +87,11 @@ internal data class TapeTrackingObservation(
         require(heightAboveGroundMeters == null || (
             heightAboveGroundMeters.isFinite() && heightAboveGroundMeters > 0.0
         ))
+        require(
+            actualGroundSpeedMetersPerSecond == null ||
+                actualGroundSpeedMetersPerSecond.isFinite() &&
+                actualGroundSpeedMetersPerSecond >= 0.0
+        )
     }
 }
 
@@ -100,6 +108,8 @@ internal data class TapeTrackingDecision(
     val controlledOffsetFraction: Double? = null,
     val offsetRatePerSecond: Double = 0.0,
     val purePursuitYawRateDegreesPerSecond: Double = 0.0,
+    val circularFeedforwardYawRateDegreesPerSecond: Double = 0.0,
+    val circularTurnDirection: Double = 0.0,
     val pathBearingDegrees: Double? = null,
     val rawCurvaturePerMeter: Double? = null,
     val predictedCurvaturePerMeter: Double? = null,
@@ -108,6 +118,9 @@ internal data class TapeTrackingDecision(
     val trustedCurvatureSpeedCapMetersPerSecond: Double? = null,
     val profileForwardSpeedMetersPerSecond: Double = 0.0,
     val accelerationLimitedForwardSpeedMetersPerSecond: Double = 0.0,
+    val measuredAlongTrackSpeedMetersPerSecond: Double? = null,
+    val speedFeedbackBoostMetersPerSecond: Double = 0.0,
+    val commandTargetSpeedMetersPerSecond: Double = 0.0,
     val pathQuality: PathQuality = PathQuality.LOST,
 )
 private data class PredictedLookahead(
@@ -172,11 +185,20 @@ internal class TapeTrackingController {
     private var lateralCorrectionActive = false
     private var curveAlignmentSinceNanos = 0L
     private var curveMisalignmentSinceNanos = 0L
+    private var directedHeadingEnabled = false
+    private var currentAircraftHeadingDegrees: Double? = null
+    private var directedPathHeadingDegrees: Double? = null
+    private var circularDirectionConfirmed = false
+    private var circularTurnDirection = 0.0
+    private var circularCenterlineMeasurement: OmniCenterlineMeasurement? = null
     private var lastAcceptedCircularObservation: TapeTrackingObservation? = null
     private var circularDetectionGap = false
+    private var circularDetectionGapStartedAtNanos = 0L
+    private var retainedCircularCenterlineForReacquisition: OmniCenterlineMeasurement? = null
+    private var retainCircularDirectionUntilNanos = 0L
     // One candidate sequence is shared by three mutually exclusive contexts:
     // post-turn recovery, REACQUIRING_PATH, and a TRACKING gap. Context transitions
-    // reset it; full reacquisition alone may retain it across a brief detector flicker.
+    // reset it; the latter two retain it across a bounded detector flicker.
     private var circularReacquisitionCandidate: TapeTrackingObservation? = null
     private var circularReacquisitionCandidateAtNanos = 0L
     private var circularCandidateSequenceSinceNanos = 0L
@@ -252,6 +274,12 @@ internal class TapeTrackingController {
     }
 
 
+    fun updateAircraftHeading(headingDegrees: Double?) {
+        val validHeading = headingDegrees?.takeIf(Double::isFinite)
+        if (validHeading != null) directedHeadingEnabled = true
+        currentAircraftHeadingDegrees = validHeading?.let(::wrapToSignedHeading)
+    }
+
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
         if (mode == TapeTrackingMode.FIXED_HEADING) {
@@ -261,6 +289,8 @@ internal class TapeTrackingController {
                 confidence = observation?.confidence ?: 0.0,
                 nowNanos = nowNanos,
                 capturedAtNanos = observation?.capturedAtNanos ?: 0L,
+                actualTravelDirectionDegrees = observation?.actualTravelDirectionDegrees,
+                actualGroundSpeedMetersPerSecond = observation?.actualGroundSpeedMetersPerSecond,
             )
             return
         }
@@ -420,6 +450,12 @@ internal class TapeTrackingController {
                             ) * it,
                         )
                     } ?: 0.0,
+                measuredAlongTrackSpeedMetersPerSecond =
+                    fixedDecision.measuredAlongTrackSpeedMetersPerSecond,
+                speedFeedbackBoostMetersPerSecond =
+                    fixedDecision.speedFeedbackBoostMetersPerSecond,
+                commandTargetSpeedMetersPerSecond =
+                    fixedDecision.commandTargetSpeedMetersPerSecond,
                 pathQuality =
                     if (fixedDecision.tangentDegrees == null) PathQuality.LOST else PathQuality.FULL_PATH,
             )
@@ -535,8 +571,46 @@ internal class TapeTrackingController {
             )
         }
         if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
+            val alignmentTurnDirection = trustedCurveAlignmentTurnDirection()
+            val tangentErrorDegrees = controlledAngleDegrees
+            if (
+                alignmentTurnDirection != null &&
+                tangentErrorDegrees != null &&
+                isCurveAlignmentTranslationSafe()
+            ) {
+                circularTurnDirection = alignmentTurnDirection
+                val travelSpeed = CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND
+                val tangentErrorRadians = Math.toRadians(tangentErrorDegrees)
+                val targetForwardSpeed = travelSpeed * cos(tangentErrorRadians)
+                val targetRightSpeed = travelSpeed * sin(tangentErrorRadians)
+                val feedforwardYawRate =
+                    alignmentTurnDirection *
+                        Math.toDegrees(
+                            travelSpeed * SCHEME_C_PLANNED_CURVATURE_PER_METER,
+                        )
+                val targetYawRate = visualCurvatureYawRate(feedforwardYawRate)
+                profileForwardSpeedMetersPerSecond = travelSpeed
+                accelerationLimitedForwardSpeedMetersPerSecond = travelSpeed
+                applyMovingCurveAlignmentOutputLimits(
+                    targetYawRate = targetYawRate,
+                    targetForwardSpeed = targetForwardSpeed,
+                    targetRightSpeed = targetRightSpeed,
+                    nowNanos = nowNanos,
+                )
+                return decision(
+                    phase = phase,
+                    yawRateDegreesPerSecond = appliedYawRateDegreesPerSecond,
+                    forwardSpeedMetersPerSecond = appliedForwardSpeedMetersPerSecond,
+                    rightSpeedMetersPerSecond = appliedRightSpeedMetersPerSecond,
+                    circularFeedforwardYawRateDegreesPerSecond = feedforwardYawRate,
+                    pathBearingDegrees = tangentErrorDegrees,
+                )
+            }
             appliedForwardSpeedMetersPerSecond = 0.0
             appliedForwardAccelerationMetersPerSecondSquared = 0.0
+            accelerationLimitedForwardSpeedMetersPerSecond = 0.0
+            profileForwardSpeedMetersPerSecond = 0.0
+            appliedRightSpeedMetersPerSecond = 0.0
             val targetYawRate = desiredCurveAlignmentYawRate()
             val (yawRate, _) = applyOutputLimits(
                 targetYawRate,
@@ -546,6 +620,7 @@ internal class TapeTrackingController {
             return decision(
                 phase = phase,
                 yawRateDegreesPerSecond = yawRate,
+                pathBearingDegrees = directedPathHeadingErrorDegrees(),
             )
         }
 
@@ -553,7 +628,16 @@ internal class TapeTrackingController {
         // displaced rail translates first instead of spending the frame spinning.
         val targetRightSpeed = desiredRightSpeed()
         profileForwardSpeedMetersPerSecond = desiredForwardSpeed(nowNanos)
-        val pathBearingDegrees = desiredLookaheadBearingDegrees(nowNanos)
+        val pathBearingDegrees =
+            if (
+                mode == TapeTrackingMode.CIRCULAR &&
+                directedHeadingEnabled &&
+                !circularDirectionConfirmed
+            ) {
+                directedPathHeadingErrorDegrees()
+            } else {
+                desiredLookaheadBearingDegrees(nowNanos)
+            }
         val purePursuitCurvature = desiredPurePursuitCurvaturePerMeter(nowNanos)
         val yawLimitedTargetSpeed =
             if (mode == TapeTrackingMode.CIRCULAR && purePursuitCurvature != null) {
@@ -566,9 +650,25 @@ internal class TapeTrackingController {
             applyForwardAccelerationLimit(ordinaryTargetSpeed, nowNanos)
         val forwardSpeed =
             applyEmergencyCurvatureSpeedCap(accelerationLimitedForwardSpeedMetersPerSecond)
+        val usesVisualCurvatureControl = usesVisualCurvatureControl()
         val purePursuitYawRate =
-            desiredPurePursuitYawRate(forwardSpeed, purePursuitCurvature)
-        val targetYawRate = desiredYawRate(purePursuitYawRate)
+            if (usesVisualCurvatureControl) {
+                null
+            } else {
+                desiredPurePursuitYawRate(forwardSpeed, purePursuitCurvature)
+            }
+        val circularFeedforwardYawRate =
+            if (usesVisualCurvatureControl) {
+                circularFeedforwardYawRate(forwardSpeed)
+            } else {
+                0.0
+            }
+        val targetYawRate =
+            if (usesVisualCurvatureControl) {
+                desiredCircularYawRate(circularFeedforwardYawRate)
+            } else {
+                desiredYawRate(purePursuitYawRate)
+            }
         val (yawRate, rightSpeed) = applyOutputLimits(
             targetYawRate,
             targetRightSpeed,
@@ -580,6 +680,7 @@ internal class TapeTrackingController {
             forwardSpeedMetersPerSecond = forwardSpeed,
             rightSpeedMetersPerSecond = rightSpeed,
             purePursuitYawRateDegreesPerSecond = purePursuitYawRate ?: 0.0,
+            circularFeedforwardYawRateDegreesPerSecond = circularFeedforwardYawRate,
             pathBearingDegrees = pathBearingDegrees,
         )
     }
@@ -607,12 +708,18 @@ internal class TapeTrackingController {
         }
         if (observation == null) {
             curveMisalignmentSinceNanos = 0L
+            if (!circularDetectionGap) {
+                circularDetectionGapStartedAtNanos = nowNanos
+            }
             circularDetectionGap = true
             disableCircularLateralCorrection()
             if (!reliableCircularPathEstablished) {
                 reliableCircularPathSinceNanos = 0L
             }
-            if (phase == TapeTrackingPhase.REACQUIRING_PATH) {
+            if (
+                phase == TapeTrackingPhase.REACQUIRING_PATH ||
+                phase == TapeTrackingPhase.TRACKING
+            ) {
                 expireCircularReacquisitionCandidateIfStale(nowNanos)
             } else {
                 resetCircularReacquisitionCandidate()
@@ -658,6 +765,13 @@ internal class TapeTrackingController {
             return
         }
         if (circularDetectionGap && previousObservation != null) {
+            if (
+                mayCoastThroughCircularDetectionGap(nowNanos) &&
+                isSafeCircularCoastCandidate(observation)
+            ) {
+                observeCircularCoastCandidate(observation, nowNanos)
+                return
+            }
             if (!isPlausibleCircularContinuation(observation, previousObservation)) {
                 if (
                     reliableCircularPathEstablished &&
@@ -666,7 +780,7 @@ internal class TapeTrackingController {
                     beginCircularEndpointVerification(nowNanos)
                     registerEndpointMiss(nowNanos)
                 } else {
-                    beginCircularReacquisition()
+                    beginCircularReacquisition(preserveConfirmedDirection = true)
                     observeCircularReacquisitionCandidate(observation, nowNanos)
                 }
             } else {
@@ -783,10 +897,40 @@ internal class TapeTrackingController {
         updateCircularTrackingPhase(nowNanos)
     }
 
+    private fun observeCircularCoastCandidate(
+        observation: TapeTrackingObservation,
+        nowNanos: Long,
+    ) {
+        val consistentDurationNanos =
+            recordConsistentCircularCandidate(observation, nowNanos)
+        if (consistentDurationNanos < CIRCULAR_GAP_CONTINUATION_CONFIRMATION_NANOS) {
+            return
+        }
+        resetCircularReacquisitionCandidate()
+        acceptCircularObservation(observation, nowNanos)
+        updateCircularTrackingPhase(nowNanos)
+    }
+
+    private fun mayCoastThroughCircularDetectionGap(nowNanos: Long): Boolean =
+        mode == TapeTrackingMode.CIRCULAR &&
+            circularTrackingSpeed == CircularTrackingSpeed.FAST &&
+            phase == TapeTrackingPhase.TRACKING &&
+            circularDetectionGapStartedAtNanos != 0L &&
+            nowNanos - circularDetectionGapStartedAtNanos <=
+            CIRCULAR_BLIND_COAST_DURATION_NANOS
+
+    private fun isSafeCircularCoastCandidate(
+        observation: TapeTrackingObservation,
+    ): Boolean =
+        isCredibleCircularReacquisitionPath(observation) &&
+            abs(observation.nearFieldOffsetFraction) <=
+            CIRCULAR_BLIND_COAST_MAX_OFFSET_FRACTION
+
     private fun observeCircularReacquisitionCandidate(
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ) {
+        expireRetainedCircularDirectionIfStale(nowNanos)
         expireCircularReacquisitionCandidateIfStale(nowNanos)
         if (!isCredibleCircularReacquisitionPath(observation)) {
             return
@@ -799,9 +943,32 @@ internal class TapeTrackingController {
         }
     }
 
-    private fun beginCircularReacquisition() {
+    private fun beginCircularReacquisition(
+        preserveConfirmedDirection: Boolean = false,
+    ) {
+        val retainConfirmedDirection =
+            preserveConfirmedDirection &&
+                usesVisualCurvatureControl() &&
+                circularDirectionConfirmed &&
+                circularTurnDirection != 0.0 &&
+                circularCenterlineMeasurement != null &&
+                circularDetectionGapStartedAtNanos != 0L
+        retainedCircularCenterlineForReacquisition =
+            circularCenterlineMeasurement.takeIf { retainConfirmedDirection }
+        retainCircularDirectionUntilNanos =
+            if (retainConfirmedDirection) {
+                circularDetectionGapStartedAtNanos +
+                    CIRCULAR_DIRECTION_RETENTION_AFTER_GAP_NANOS
+            } else {
+                0L
+            }
+        circularDetectionGapStartedAtNanos = 0L
         phase = TapeTrackingPhase.REACQUIRING_PATH
         curveAlignmentSinceNanos = 0L
+        if (!retainConfirmedDirection) {
+            circularDirectionConfirmed = false
+            directedPathHeadingDegrees = null
+        }
         reliableCircularPathSinceNanos = 0L
         reliableCircularPathEstablished = false
         consecutiveEndpointMisses = 0
@@ -819,8 +986,44 @@ internal class TapeTrackingController {
         phase = TapeTrackingPhase.TRACKING
         resetCircularReacquisitionCandidate()
         acceptCircularObservation(observation, nowNanos)
+        if (!canResumeRetainedCircularDirection(nowNanos)) {
+            circularDirectionConfirmed = false
+            directedPathHeadingDegrees = null
+            updateDirectedPathHeading()
+        }
+        resetCircularReacquisitionReference()
         resetAppliedCommands()
         updateCircularTrackingPhase(nowNanos)
+    }
+
+    private fun canResumeRetainedCircularDirection(nowNanos: Long): Boolean {
+        val angle = controlledAngleDegrees ?: return false
+        val offset = controlledHorizontalOffsetFraction ?: return false
+        val curvature = circularCenterlineMeasurement?.curvaturePerMeter ?: return false
+        return retainCircularDirectionUntilNanos != 0L &&
+            nowNanos <= retainCircularDirectionUntilNanos &&
+            circularDirectionConfirmed &&
+            abs(shortestAngularDelta(0.0, angle)) < CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES &&
+            abs(offset) <= CIRCULAR_BLIND_COAST_MAX_OFFSET_FRACTION &&
+            abs(curvature) >= CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER &&
+            sign(curvature) == circularTurnDirection
+    }
+
+    private fun expireRetainedCircularDirectionIfStale(nowNanos: Long) {
+        if (
+            retainCircularDirectionUntilNanos == 0L ||
+            nowNanos <= retainCircularDirectionUntilNanos
+        ) {
+            return
+        }
+        resetCircularReacquisitionReference()
+        circularDirectionConfirmed = false
+        directedPathHeadingDegrees = null
+    }
+
+    private fun resetCircularReacquisitionReference() {
+        retainedCircularCenterlineForReacquisition = null
+        retainCircularDirectionUntilNanos = 0L
     }
 
     private fun acceptCircularObservation(
@@ -830,6 +1033,7 @@ internal class TapeTrackingController {
         updateControlMeasurements(observation, nowNanos)
         lastDetectionAtNanos = nowNanos
         lastAcceptedCircularObservation = observation
+        circularDetectionGapStartedAtNanos = 0L
         circularDetectionGap = false
         consecutiveEndpointMisses = 0
         endpointMissSinceNanos = 0L
@@ -859,12 +1063,32 @@ internal class TapeTrackingController {
     }
 
     private fun updateCircularTrackingPhase(nowNanos: Long) {
-        val angle = controlledAngleDegrees ?: return
+        val aligningToDirectedTangent =
+            mode == TapeTrackingMode.CIRCULAR &&
+                directedHeadingEnabled &&
+                !circularDirectionConfirmed
+        val angle =
+            if (aligningToDirectedTangent) {
+                directedPathHeadingErrorDegrees() ?: return
+            } else {
+                controlledAngleDegrees ?: return
+            }
+        if (aligningToDirectedTangent && phase != TapeTrackingPhase.ALIGNING_CURVE) {
+            phase = TapeTrackingPhase.ALIGNING_CURVE
+            curveAlignmentSinceNanos = 0L
+            curveMisalignmentSinceNanos = 0L
+            disableCircularLateralCorrection()
+            resetAppliedCommands()
+            return
+        }
         when (phase) {
             TapeTrackingPhase.TRACKING -> {
                 val requiresInPlaceAlignment =
                     abs(angle) >= CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES &&
-                        !hasUsablePurePursuitTarget(nowNanos)
+                        (
+                            usesVisualCurvatureControl() ||
+                                !hasUsablePurePursuitTarget(nowNanos)
+                            )
                 if (!requiresInPlaceAlignment) {
                     curveMisalignmentSinceNanos = 0L
                 } else if (curveMisalignmentSinceNanos == 0L) {
@@ -876,24 +1100,50 @@ internal class TapeTrackingController {
                     phase = TapeTrackingPhase.ALIGNING_CURVE
                     curveMisalignmentSinceNanos = 0L
                     curveAlignmentSinceNanos = 0L
+                    if (mode == TapeTrackingMode.CIRCULAR && directedHeadingEnabled) {
+                        circularDirectionConfirmed = false
+                        directedPathHeadingDegrees = null
+                    }
                     disableCircularLateralCorrection()
                     resetAppliedCommands()
                 }
             }
 
             TapeTrackingPhase.ALIGNING_CURVE -> {
-                if (abs(angle) <= CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES) {
+                val alignmentTurnDirection = trustedCurveAlignmentTurnDirection()
+                val movingAlignmentAngle =
+                    if (
+                        alignmentTurnDirection != null &&
+                        isCurveAlignmentTranslationSafe()
+                    ) {
+                        circularTurnDirection = alignmentTurnDirection
+                        controlledAngleDegrees
+                    } else {
+                        null
+                    }
+                val exitAngle =
+                    if (movingAlignmentAngle != null || aligningToDirectedTangent) {
+                        DIRECTED_PATH_ALIGNMENT_EXIT_ANGLE_DEGREES
+                    } else {
+                        CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES
+                    }
+                val alignmentError = movingAlignmentAngle ?: angle
+                if (abs(alignmentError) <= exitAngle) {
                     if (curveAlignmentSinceNanos == 0L) {
                         curveAlignmentSinceNanos = nowNanos
                     }
                     if (
                         nowNanos - curveAlignmentSinceNanos >=
-                        CURVE_ALIGNMENT_CONFIRMATION_NANOS
+                        CURVE_ALIGNMENT_CONFIRMATION_NANOS &&
+                        confirmCircularTurnDirectionIfNeeded()
                     ) {
                         phase = TapeTrackingPhase.TRACKING
+                        circularDirectionConfirmed = true
                         curveAlignmentSinceNanos = 0L
                         disableCircularLateralCorrection()
-                        resetAppliedCommands()
+                        if (movingAlignmentAngle == null) {
+                            resetAppliedCommands()
+                        }
                     }
                 } else {
                     curveAlignmentSinceNanos = 0L
@@ -941,6 +1191,7 @@ internal class TapeTrackingController {
         observation: TapeTrackingObservation,
         nowNanos: Long,
     ): Long {
+        expireCircularReacquisitionCandidateIfStale(nowNanos)
         val previousCandidate = circularReacquisitionCandidate
         if (
             previousCandidate == null ||
@@ -1040,10 +1291,37 @@ internal class TapeTrackingController {
         val sampleAtNanos = observation.capturedAtNanos.takeIf { it > 0L } ?: nowNanos
         val elapsedNanos = sampleAtNanos - measurementCapturedAtNanos
         val elapsedSeconds = elapsedNanos / NANOS_PER_SECOND
+        val visualMeasurement =
+            if (usesVisualCurvatureControl()) {
+                val centerline = observation.centerline
+                val heightMeters = observation.heightAboveGroundMeters
+                if (centerline != null && heightMeters != null) {
+                    OmniCenterline.measure(
+                        path = centerline,
+                        heightMeters = heightMeters,
+                        travelDirectionDegrees =
+                            observation.actualTravelDirectionDegrees
+                                ?: observation.angleFromVerticalDegrees,
+                        previousMeasurement =
+                            circularCenterlineMeasurement
+                                ?.takeIf { circularDirectionConfirmed }
+                                ?: retainedCircularCenterlineForReacquisition,
+                    )
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        if (usesVisualCurvatureControl()) {
+            circularCenterlineMeasurement = visualMeasurement
+        }
+        val measuredTangentDegrees =
+            visualMeasurement?.tangentDegrees ?: observation.angleFromVerticalDegrees
         val previousOffset = controlledHorizontalOffsetFraction
         val nextAngle = controlledAngleDegrees?.let {
-            axialExponentialAverage(it, observation.angleFromVerticalDegrees, STABILIZED_FILTER_ALPHA)
-        } ?: observation.angleFromVerticalDegrees
+            axialExponentialAverage(it, measuredTangentDegrees, STABILIZED_FILTER_ALPHA)
+        } ?: measuredTangentDegrees
         val nextOffset = previousOffset?.let {
             exponentialAverage(it, observation.nearFieldOffsetFraction, STABILIZED_FILTER_ALPHA)
         } ?: observation.nearFieldOffsetFraction
@@ -1127,15 +1405,27 @@ internal class TapeTrackingController {
         controlledHorizontalOffsetFraction = nextOffset
         measurementCapturedAtNanos = sampleAtNanos
         lastControlObservationAtNanos = nowNanos
-        rawCurvaturePerMeter = lookahead?.let {
-            curvaturePerMeter(
-                xFraction = it.xFraction,
-                yFraction = it.yFraction,
-                aspectRatio = checkNotNull(lookaheadFrameAspectRatio),
-                heightMeters = heightAboveGroundMeters,
-            )
-        }
-        predictedCurvaturePerMeter = desiredPurePursuitCurvaturePerMeter(nowNanos)
+        updateDirectedPathHeading()
+        val visualCurvaturePerMeter = visualMeasurement?.curvaturePerMeter
+        rawCurvaturePerMeter =
+            if (usesVisualCurvatureControl()) {
+                visualCurvaturePerMeter
+            } else {
+                lookahead?.let {
+                    curvaturePerMeter(
+                        xFraction = it.xFraction,
+                        yFraction = it.yFraction,
+                        aspectRatio = checkNotNull(lookaheadFrameAspectRatio),
+                        heightMeters = heightAboveGroundMeters,
+                    )
+                }
+            }
+        predictedCurvaturePerMeter =
+            if (usesVisualCurvatureControl()) {
+                visualCurvaturePerMeter
+            } else {
+                desiredPurePursuitCurvaturePerMeter(nowNanos)
+            }
         instantaneousCurvatureSpeedCapMetersPerSecond =
             if (mode == TapeTrackingMode.CIRCULAR) {
                 predictedCurvaturePerMeter?.let(::curvatureSpeedCapMetersPerSecond)
@@ -1186,6 +1476,7 @@ internal class TapeTrackingController {
         offsetRatePerSecond = 0.0
         rawCurvaturePerMeter = null
         predictedCurvaturePerMeter = null
+        circularCenterlineMeasurement = null
         resetTrustedCurvatureState()
         lastControlObservationAtNanos = 0L
         disableCircularLateralCorrection()
@@ -1205,9 +1496,16 @@ internal class TapeTrackingController {
     private fun resetControlState() {
         curveAlignmentSinceNanos = 0L
         curveMisalignmentSinceNanos = 0L
+        directedHeadingEnabled = false
+        currentAircraftHeadingDegrees = null
+        directedPathHeadingDegrees = null
+        circularDirectionConfirmed = false
+        circularTurnDirection = 0.0
         lastAcceptedCircularObservation = null
         circularDetectionGap = false
+        circularDetectionGapStartedAtNanos = 0L
         resetCircularReacquisitionCandidate()
+        resetCircularReacquisitionReference()
         reliableCircularPathSinceNanos = 0L
         reliableCircularPathEstablished = false
         clearControlMeasurements()
@@ -1253,14 +1551,64 @@ internal class TapeTrackingController {
         return (purePursuitYawRate ?: angleFeedback)
             .coerceIn(-maximumYawRate, maximumYawRate)
     }
+    private fun usesVisualCurvatureControl(): Boolean =
+        mode == TapeTrackingMode.CIRCULAR &&
+            circularTrackingSpeed == CircularTrackingSpeed.FAST &&
+            directedHeadingEnabled
+
+    private fun confirmCircularTurnDirectionIfNeeded(): Boolean {
+        if (!usesVisualCurvatureControl()) return true
+        if (circularTurnDirection != 0.0) return true
+        val curvature = trustedCurvaturePerMeter ?: predictedCurvaturePerMeter ?: return false
+        if (abs(curvature) < CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER) return false
+        circularTurnDirection = sign(curvature)
+        return true
+    }
+
+    private fun circularFeedforwardYawRate(forwardSpeedMetersPerSecond: Double): Double {
+        if (!circularDirectionConfirmed || circularTurnDirection == 0.0) return 0.0
+        if (trustedCurvaturePerMeter == null && predictedCurvaturePerMeter == null) return 0.0
+        return circularTurnDirection *
+            Math.toDegrees(
+                forwardSpeedMetersPerSecond * SCHEME_C_PLANNED_CURVATURE_PER_METER,
+            )
+    }
+
+    private fun desiredCircularYawRate(feedforwardYawRateDegreesPerSecond: Double): Double {
+        if (!circularDirectionConfirmed || circularTurnDirection == 0.0) return 0.0
+        return visualCurvatureYawRate(feedforwardYawRateDegreesPerSecond)
+    }
+
+    private fun visualCurvatureYawRate(feedforwardYawRateDegreesPerSecond: Double): Double {
+        val angle = controlledAngleDegrees ?: return 0.0
+        val angleFeedback =
+            if (abs(angle) <= CIRCULAR_YAW_DEAD_ZONE_DEGREES) {
+                0.0
+            } else {
+                (angle * VISUAL_CURVATURE_ANGLE_FEEDBACK_GAIN).coerceIn(
+                    -VISUAL_CURVATURE_MAX_ANGLE_FEEDBACK_DEGREES_PER_SECOND,
+                    VISUAL_CURVATURE_MAX_ANGLE_FEEDBACK_DEGREES_PER_SECOND,
+                )
+            }
+        return (feedforwardYawRateDegreesPerSecond + angleFeedback)
+            .coerceIn(
+                -CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND,
+                CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND,
+            )
+    }
 
     private fun desiredCurveAlignmentYawRate(): Double {
-        val angle = controlledAngleDegrees ?: return 0.0
+        val angle =
+            if (mode == TapeTrackingMode.CIRCULAR && directedHeadingEnabled) {
+                directedPathHeadingErrorDegrees() ?: return 0.0
+            } else {
+                controlledAngleDegrees ?: return 0.0
+            }
         val maximumYawRate = when {
             pathQuality == PathQuality.NEAR_FIELD_ONLY ->
                 NEAR_FIELD_MAX_YAW_RATE_DEGREES_PER_SECOND
-            mode == TapeTrackingMode.CIRCULAR ->
-                CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND
+            mode == TapeTrackingMode.CIRCULAR && directedHeadingEnabled ->
+                DIRECTED_PATH_ALIGNMENT_MAX_YAW_RATE_DEGREES_PER_SECOND
             else ->
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
         }
@@ -1268,6 +1616,43 @@ internal class TapeTrackingController {
             -maximumYawRate,
             maximumYawRate,
         )
+    }
+
+    private fun trustedCurveAlignmentTurnDirection(): Double? {
+        if (!usesVisualCurvatureControl() || pathQuality != PathQuality.FULL_PATH) return null
+        if (circularCenterlineMeasurement == null) return null
+        val curvature = trustedCurvaturePerMeter ?: return null
+        if (abs(curvature) < CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER) return null
+        val trustedDirection = sign(curvature)
+        return trustedDirection.takeIf {
+            circularTurnDirection == 0.0 || circularTurnDirection == trustedDirection
+        }
+    }
+
+    private fun isCurveAlignmentTranslationSafe(): Boolean {
+        val offset = controlledHorizontalOffsetFraction ?: return false
+        return projectedCrossTrackMagnitude(offset) <
+            CIRCULAR_FORWARD_STOP_OFFSET_FRACTION
+    }
+
+    private fun updateDirectedPathHeading() {
+        if (
+            mode != TapeTrackingMode.CIRCULAR ||
+            circularDirectionConfirmed ||
+            directedPathHeadingDegrees != null
+        ) {
+            return
+        }
+        val currentHeading = currentAircraftHeadingDegrees ?: return
+        val localTangentError = controlledAngleDegrees ?: return
+        directedPathHeadingDegrees =
+            wrapToSignedHeading(currentHeading + localTangentError)
+    }
+
+    private fun directedPathHeadingErrorDegrees(): Double? {
+        val currentHeading = currentAircraftHeadingDegrees ?: return null
+        val targetHeading = directedPathHeadingDegrees ?: return null
+        return shortestAngularDelta(currentHeading, targetHeading)
     }
 
     private fun predictedLookahead(nowNanos: Long): PredictedLookahead? {
@@ -1420,20 +1805,27 @@ internal class TapeTrackingController {
         trustedCurvaturePerMeter = median
         val trustedTargetCap = curvatureSpeedCapMetersPerSecond(median)
         trustedCurvatureSpeedCapMetersPerSecond =
-            if (trustedTargetCap <= trustedCurvatureSpeedCapMetersPerSecond) {
-                trustedTargetCap
-            } else {
-                moveToward(
-                    trustedCurvatureSpeedCapMetersPerSecond,
-                    trustedTargetCap,
-                    CIRCULAR_CURVATURE_CAP_RISE_METERS_PER_SECOND_SQUARED * elapsedSeconds,
-                )
+            when {
+                usesVisualCurvatureControl() -> trustedTargetCap
+                trustedTargetCap <= trustedCurvatureSpeedCapMetersPerSecond ->
+                    trustedTargetCap
+                else ->
+                    moveToward(
+                        trustedCurvatureSpeedCapMetersPerSecond,
+                        trustedTargetCap,
+                        CIRCULAR_CURVATURE_CAP_RISE_METERS_PER_SECOND_SQUARED * elapsedSeconds,
+                    )
             }
     }
 
     private fun curvatureSpeedCapMetersPerSecond(curvaturePerMeter: Double): Double {
         val targetSpeed = circularTrackingSpeed.targetMetersPerSecond
-        val magnitude = abs(curvaturePerMeter)
+        val magnitude =
+            if (usesVisualCurvatureControl()) {
+                SCHEME_C_PLANNED_CURVATURE_PER_METER
+            } else {
+                abs(curvaturePerMeter)
+            }
         if (magnitude <= PURE_PURSUIT_STRAIGHT_CURVATURE_PER_METER) return targetSpeed
         return minOf(
             targetSpeed,
@@ -1519,11 +1911,14 @@ internal class TapeTrackingController {
             -CIRCULAR_MAX_FORWARD_DECELERATION_METERS_PER_SECOND_SQUARED,
             CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED,
         )
-        appliedForwardAccelerationMetersPerSecondSquared = moveToward(
+        val jerkLimitedAcceleration = moveToward(
             appliedForwardAccelerationMetersPerSecondSquared,
             desiredAcceleration,
             CIRCULAR_MAX_FORWARD_JERK_METERS_PER_SECOND_CUBED * elapsedSeconds,
         )
+        // A newly reduced safety target must never inherit positive acceleration.
+        appliedForwardAccelerationMetersPerSecondSquared =
+            if (speedError < 0.0) minOf(jerkLimitedAcceleration, 0.0) else jerkLimitedAcceleration
         val nextSpeed = (
             appliedForwardSpeedMetersPerSecond +
                 appliedForwardAccelerationMetersPerSecondSquared * elapsedSeconds
@@ -1600,6 +1995,7 @@ internal class TapeTrackingController {
         // nothing about what is ahead. Aligning in place is safe; advancing is
         // advancing into unmeasured space.
         if (pathQuality != PathQuality.FULL_PATH && phase == TapeTrackingPhase.TRACKING) return 0.0
+        if (usesVisualCurvatureControl() && circularCenterlineMeasurement == null) return 0.0
         if (phase == TapeTrackingPhase.RECOVERING_AFTER_TURN) {
             return if (nowNanos < postTurnRecoveryUntilNanos) {
                 postTurnRecoverySpeedMetersPerSecond()
@@ -1639,7 +2035,16 @@ internal class TapeTrackingController {
             }
             val trackingSpeed =
                 if (mode == TapeTrackingMode.CIRCULAR) {
-                    circularTrackingSpeed.targetMetersPerSecond
+                    val requestedSpeed = circularTrackingSpeed.targetMetersPerSecond
+                    when {
+                        !circularDetectionGap -> requestedSpeed
+                        mayCoastThroughCircularDetectionGap(nowNanos) ->
+                            minOf(
+                                requestedSpeed,
+                                CIRCULAR_BLIND_COAST_SPEED_METERS_PER_SECOND,
+                            )
+                        else -> 0.0
+                    }
                 } else {
                     CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND
                 }
@@ -1701,6 +2106,7 @@ internal class TapeTrackingController {
             offsetRatePerSecond * CROSS_TRACK_RESPONSE_PREVIEW_SECONDS
         return maxOf(
             abs(offsetFraction),
+            abs(rawHorizontalOffsetFraction ?: offsetFraction),
             abs(projectedDelta),
             abs(offsetFraction + projectedDelta),
         )
@@ -1726,10 +2132,16 @@ internal class TapeTrackingController {
         nowNanos: Long,
     ): Pair<Double, Double> {
         val elapsedSeconds = outputIntervalSeconds(nowNanos)
+        val maximumYawAcceleration =
+            if (mode == TapeTrackingMode.CIRCULAR) {
+                CIRCULAR_FAST_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED
+            } else {
+                MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED
+            }
         appliedYawRateDegreesPerSecond = moveToward(
             appliedYawRateDegreesPerSecond,
             targetYawRate,
-            MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED * elapsedSeconds,
+            maximumYawAcceleration * elapsedSeconds,
         )
         appliedRightSpeedMetersPerSecond = moveToward(
             appliedRightSpeedMetersPerSecond,
@@ -1740,6 +2152,36 @@ internal class TapeTrackingController {
         return appliedYawRateDegreesPerSecond to appliedRightSpeedMetersPerSecond
     }
 
+    private fun applyMovingCurveAlignmentOutputLimits(
+        targetYawRate: Double,
+        targetForwardSpeed: Double,
+        targetRightSpeed: Double,
+        nowNanos: Long,
+    ) {
+        val elapsedSeconds = outputIntervalSeconds(nowNanos)
+        appliedYawRateDegreesPerSecond = moveToward(
+            appliedYawRateDegreesPerSecond,
+            targetYawRate,
+            CIRCULAR_FAST_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED * elapsedSeconds,
+        )
+
+        val forwardDelta = targetForwardSpeed - appliedForwardSpeedMetersPerSecond
+        val rightDelta = targetRightSpeed - appliedRightSpeedMetersPerSecond
+        val requestedVelocityDelta = hypot(forwardDelta, rightDelta)
+        val maximumVelocityDelta =
+            CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds
+        val appliedFraction =
+            if (requestedVelocityDelta <= maximumVelocityDelta) {
+                1.0
+            } else {
+                maximumVelocityDelta / requestedVelocityDelta
+            }
+        appliedForwardSpeedMetersPerSecond += forwardDelta * appliedFraction
+        appliedRightSpeedMetersPerSecond += rightDelta * appliedFraction
+        appliedForwardAccelerationMetersPerSecondSquared = 0.0
+        lastCommandAtNanos = nowNanos
+    }
+
     private fun outputIntervalSeconds(nowNanos: Long): Double =
         boundedControlIntervalSeconds(
             nowNanos = nowNanos,
@@ -1747,9 +2189,6 @@ internal class TapeTrackingController {
             initialSeconds = INITIAL_COMMAND_INTERVAL_SECONDS,
             maximumSeconds = MAX_COMMAND_INTERVAL_SECONDS,
         )
-
-
-
 
     private fun decision(
         phase: TapeTrackingPhase,
@@ -1759,6 +2198,7 @@ internal class TapeTrackingController {
         endpointReached: Boolean = false,
         stopRequested: Boolean = false,
         purePursuitYawRateDegreesPerSecond: Double = 0.0,
+        circularFeedforwardYawRateDegreesPerSecond: Double = 0.0,
         pathBearingDegrees: Double? = null,
     ): TapeTrackingDecision {
         check(!endpointReached || phase == TapeTrackingPhase.TURNING) {
@@ -1777,6 +2217,9 @@ internal class TapeTrackingController {
             controlledOffsetFraction = controlledHorizontalOffsetFraction,
             offsetRatePerSecond = offsetRatePerSecond,
             purePursuitYawRateDegreesPerSecond = purePursuitYawRateDegreesPerSecond,
+            circularFeedforwardYawRateDegreesPerSecond =
+                circularFeedforwardYawRateDegreesPerSecond,
+            circularTurnDirection = circularTurnDirection,
             pathBearingDegrees = pathBearingDegrees,
             rawCurvaturePerMeter = rawCurvaturePerMeter,
             predictedCurvaturePerMeter = predictedCurvaturePerMeter,
@@ -1812,6 +2255,7 @@ internal class TapeTrackingController {
         while (averaged < -90.0) averaged += 180.0
         return averaged
     }
+
     private fun axialAngleDifferenceDegrees(first: Double, second: Double): Double {
         var difference = abs(first - second)
         if (difference > 90.0) difference = 180.0 - difference
@@ -1888,8 +2332,8 @@ internal class TapeTrackingController {
         const val CIRCULAR_YAW_PROPORTIONAL_GAIN = 0.70
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 30.0
         const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 2.0
-        const val CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND = 50.0
-        const val CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 5.0
+        const val CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND = 65.0
+        const val CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 6.0
         const val CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND =
             CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND -
                 CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
@@ -1900,6 +2344,7 @@ internal class TapeTrackingController {
         const val CIRCULAR_LATERAL_DERIVATIVE_GAIN = 0.05
         const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.06
         const val CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
+        const val CIRCULAR_FAST_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED = 50.0
         const val CIRCULAR_MAX_FORWARD_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
         const val CIRCULAR_MAX_FORWARD_JERK_METERS_PER_SECOND_CUBED = 2.0
         const val CIRCULAR_SPEED_ERROR_RESPONSE_PER_SECOND = 3.0
@@ -1919,7 +2364,16 @@ internal class TapeTrackingController {
         const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
         const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0
         const val CURVE_ALIGNMENT_CONFIRMATION_NANOS = 500_000_000L
+        const val CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND = 0.20
         const val CURVE_MISALIGNMENT_CONFIRMATION_NANOS = 250_000_000L
+        const val DIRECTED_PATH_ALIGNMENT_EXIT_ANGLE_DEGREES = 8.0
+        const val DIRECTED_PATH_ALIGNMENT_MAX_YAW_RATE_DEGREES_PER_SECOND = 12.0
+        const val VISUAL_CURVATURE_LOOKAHEAD_METERS = 0.45
+        const val SCHEME_C_PLANNED_CURVATURE_PER_METER =
+            2.0 / MathematicalCircleController.DIAMETER_METERS
+        const val CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER = 0.20
+        const val VISUAL_CURVATURE_ANGLE_FEEDBACK_GAIN = 0.25
+        const val VISUAL_CURVATURE_MAX_ANGLE_FEEDBACK_DEGREES_PER_SECOND = 6.0
         const val REACQUISITION_MAX_OFFSET_JUMP_FRACTION = 0.25
         const val REACQUISITION_MAX_ANGLE_JUMP_DEGREES = 45.0
         const val REACQUISITION_ENTRY_OFFSET_FRACTION =
@@ -1934,8 +2388,16 @@ internal class TapeTrackingController {
         // Detector flicker on wrinkled tape may insert null or short-fragment frames.
         const val REACQUISITION_CANDIDATE_MAX_GAP_NANOS = 500_000_000L
         const val CIRCULAR_GAP_CONTINUATION_CONFIRMATION_NANOS = 250_000_000L
+        // Keep the already-confirmed turn direction only long enough to bridge the
+        // measured sub-second detector discontinuity. The retained centerline is
+        // used solely to disambiguate the new path; missing vision still commands zero.
+        const val CIRCULAR_DIRECTION_RETENTION_AFTER_GAP_NANOS = 1_000_000_000L
+        // Scheme C may bridge one detector flicker using only the last trusted curve.
+        // The low speed and short clock bound blind commanded translation to at most 0.15 m.
+        const val CIRCULAR_BLIND_COAST_SPEED_METERS_PER_SECOND = 0.30
+        const val CIRCULAR_BLIND_COAST_DURATION_NANOS = 500_000_000L
+        const val CIRCULAR_BLIND_COAST_MAX_OFFSET_FRACTION = 0.22
         // In out-and-back mode the operational endpoint signal is not a visible tape tip:
-        // the latest flights end where tape passes under the mat, so no trustworthy
         // in-frame terminus exists. Establish a route from several full, near-aircraft
         // observations, then let sustained disappearance enter the existing low-speed
         // probe. A brief gap cannot arm this state, and a returning full path cancels it.

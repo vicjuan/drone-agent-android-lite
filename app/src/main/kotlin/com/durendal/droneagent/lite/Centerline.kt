@@ -227,6 +227,18 @@ internal data class CenterlineExtractorConfig(
     }
 }
 
+/** Per-extraction timings aggregated by the detector's frame profile. */
+internal data class CenterlineStageProfile(
+    val downsampleNanos: Long,
+    val gapFillNanos: Long,
+    val distanceNanos: Long,
+    val thinningNanos: Long,
+    val routeNanos: Long,
+    val qualityNanos: Long,
+    val topologyNanos: Long,
+)
+
+
 /**
  * Direction-independent centerline extraction.
  *
@@ -237,6 +249,7 @@ internal data class CenterlineExtractorConfig(
  */
 internal class CenterlineExtractor(
     private val config: CenterlineExtractorConfig = CenterlineExtractorConfig(),
+    private val onProfile: (CenterlineStageProfile) -> Unit = {},
 ) {
     /** Analyzer gate; exposed so the stage machine does not duplicate config. */
     val minPointCount: Int get() = config.minPointCount
@@ -251,8 +264,10 @@ internal class CenterlineExtractor(
     private var indexBuffer = IntArray(0)
     private var distances = IntArray(0)
     private var removalBuffer = IntArray(0)
+    private var thinningCandidates = BooleanArray(0)
     private var routeCost = IntArray(0)
     private var routeLength = IntArray(0)
+    private var routeStrength = IntArray(0)
     private var predecessor = IntArray(0)
     private var heapNodes = IntArray(0)
     private var heapCosts = IntArray(0)
@@ -267,18 +282,39 @@ internal class CenterlineExtractor(
     fun extract(
         mask: CenterlineMask,
         tapeWidthRangePixels: TapeWidthRangePixels = config.defaultTapeWidthRangePixels,
+        fillEnclosedGaps: Boolean = true,
     ): CenterlineEstimate {
-        if (mask.tapePixelCount == 0) return emptyEstimate()
+        var downsampleNanos = 0L
+        var gapFillNanos = 0L
+        var distanceNanos = 0L
+        var thinningNanos = 0L
+        var routeNanos = 0L
+        var qualityNanos = 0L
+        var topologyNanos = 0L
+        fun profiled(estimate: CenterlineEstimate): CenterlineEstimate {
+            onProfile(
+                CenterlineStageProfile(
+                    downsampleNanos = downsampleNanos,
+                    gapFillNanos = gapFillNanos,
+                    distanceNanos = distanceNanos,
+                    thinningNanos = thinningNanos,
+                    routeNanos = routeNanos,
+                    qualityNanos = qualityNanos,
+                    topologyNanos = topologyNanos,
+                ),
+            )
+            return estimate
+        }
 
+        if (mask.tapePixelCount == 0) return profiled(emptyEstimate())
+
+        var stageStartedAtNanos = System.nanoTime()
         val factor = max(1, ceil(mask.height.toDouble() / TARGET_WORKING_HEIGHT).toInt())
         val workingWidth = (mask.width + factor - 1) / factor
         val workingHeight = (mask.height + factor - 1) / factor
         val paddedWidth = workingWidth + 2
         val paddedHeight = workingHeight + 2
         ensureWorkspace(paddedWidth * paddedHeight)
-        // Keep a safety envelope for non-tape blobs, but do not apply the
-        // component-wide maximum literally to each skeleton point. Near-field
-        // perspective and curved joins need bounded local-width headroom.
         val minimumLocalWidth =
             tapeWidthRangePixels.minimum * MINIMUM_WIDTH_TOLERANCE
         val maximumLocalWidth = max(
@@ -300,13 +336,22 @@ internal class CenterlineExtractor(
                 }
             }
         }
-        if (foregroundCount == 0) return emptyEstimate()
-        fillEnclosedGaps(foreground, paddedWidth, paddedHeight, factor)
+        downsampleNanos = System.nanoTime() - stageStartedAtNanos
+        if (foregroundCount == 0) return profiled(emptyEstimate())
 
+        stageStartedAtNanos = System.nanoTime()
+        if (fillEnclosedGaps) {
+            fillEnclosedGaps(foreground, paddedWidth, paddedHeight, factor)
+        }
+        gapFillNanos = System.nanoTime() - stageStartedAtNanos
+
+        stageStartedAtNanos = System.nanoTime()
         chamferDistance(foreground, paddedWidth, paddedHeight)
+        distanceNanos = System.nanoTime() - stageStartedAtNanos
+
+        stageStartedAtNanos = System.nanoTime()
         System.arraycopy(foreground, 0, skeleton, 0, workspaceSize)
-        val activePixelCount = collectForegroundIndices(skeleton, indexBuffer)
-        thinZhangSuen(skeleton, paddedWidth, paddedHeight, indexBuffer, activePixelCount)
+        thinZhangSuen(skeleton, paddedWidth, paddedHeight, indexBuffer)
         var skeletonCount = 0
         for (py in 1 until paddedHeight - 1) {
             for (px in 1 until paddedWidth - 1) {
@@ -320,13 +365,24 @@ internal class CenterlineExtractor(
                 }
             }
         }
-        if (skeletonCount == 0) return emptyEstimate()
+        thinningNanos = System.nanoTime() - stageStartedAtNanos
+        if (skeletonCount == 0) return profiled(emptyEstimate())
 
-        var selectedCount = longestPathFromBottom(skeleton, distances, paddedWidth, paddedHeight)
-        if (selectedCount == 0) return emptyEstimate()
-        // Mark the whole pre-trim route before the gap rule shifts the chain:
-        // branch analysis must treat a trimmed route remainder as route,
-        // never as a divergence from it.
+        stageStartedAtNanos = System.nanoTime()
+        val minimumRouteHalfWidthDistance = ceil(
+            tapeWidthRangePixels.minimum * ORTHOGONAL_COST / (2.0 * factor),
+        ).toInt().coerceAtLeast(1)
+        var selectedCount = longestPathFromBottom(
+            skeleton = skeleton,
+            widthDistances = distances,
+            width = paddedWidth,
+            height = paddedHeight,
+            minimumRouteHalfWidthDistance = minimumRouteHalfWidthDistance,
+        )
+        if (selectedCount == 0) {
+            routeNanos = System.nanoTime() - stageStartedAtNanos
+            return profiled(emptyEstimate())
+        }
         Arrays.fill(visited, false)
         for (position in 0 until selectedCount) visited[indexBuffer[position]] = true
         selectedCount = retainLongestContinuousSegment(
@@ -350,7 +406,9 @@ internal class CenterlineExtractor(
                 ),
             )
         }
+        routeNanos = System.nanoTime() - stageStartedAtNanos
 
+        stageStartedAtNanos = System.nanoTime()
         val support = computeSupport(
             indexBuffer,
             selectedCount,
@@ -374,6 +432,9 @@ internal class CenterlineExtractor(
             fitResidual = fitResidual,
             aggregate = aggregate,
         )
+        qualityNanos = System.nanoTime() - stageStartedAtNanos
+
+        stageStartedAtNanos = System.nanoTime()
         val topology = computeTopology(
             points = points,
             selectedCount = selectedCount,
@@ -382,11 +443,14 @@ internal class CenterlineExtractor(
             frameWidth = mask.width,
             frameHeight = mask.height,
         )
-        return CenterlineEstimate(
-            points = points,
-            confidence = aggregate,
-            components = components,
-            topology = topology,
+        topologyNanos = System.nanoTime() - stageStartedAtNanos
+        return profiled(
+            CenterlineEstimate(
+                points = points,
+                confidence = aggregate,
+                components = components,
+                topology = topology,
+            ),
         )
     }
 
@@ -467,8 +531,10 @@ internal class CenterlineExtractor(
         indexBuffer = IntArray(size)
         distances = IntArray(size)
         removalBuffer = IntArray(size)
+        thinningCandidates = BooleanArray(size)
         routeCost = IntArray(size)
         routeLength = IntArray(size)
+        routeStrength = IntArray(size)
         predecessor = IntArray(size)
         heapNodes = IntArray(size)
         heapCosts = IntArray(size)
@@ -579,13 +645,32 @@ internal class CenterlineExtractor(
         }
     }
 
-    private fun collectForegroundIndices(
+    private fun collectBoundaryIndices(
         pixels: BooleanArray,
+        width: Int,
+        height: Int,
         indices: IntArray,
     ): Int {
+        Arrays.fill(thinningCandidates, false)
         var count = 0
-        for (index in pixels.indices) {
-            if (pixels[index]) indices[count++] = index
+        for (y in 1 until height - 1) {
+            for (x in 1 until width - 1) {
+                val index = y * width + x
+                if (!pixels[index]) continue
+                if (
+                    !pixels[index - width] ||
+                    !pixels[index - width + 1] ||
+                    !pixels[index + 1] ||
+                    !pixels[index + width + 1] ||
+                    !pixels[index + width] ||
+                    !pixels[index + width - 1] ||
+                    !pixels[index - 1] ||
+                    !pixels[index - width - 1]
+                ) {
+                    indices[count++] = index
+                    thinningCandidates[index] = true
+                }
+            }
         }
         return count
     }
@@ -595,31 +680,46 @@ internal class CenterlineExtractor(
         width: Int,
         height: Int,
         activeIndices: IntArray,
-        activeCount: Int,
     ) {
+        var activeCount = collectBoundaryIndices(pixels, width, height, activeIndices)
         var changed: Boolean
         var iteration = 0
-        // A full pass removes at least one boundary layer when it changes.
-        // max(width, height) therefore exceeds the convergence depth of any
-        // bounded component while still imposing a hard real-time ceiling.
         val iterationLimit = max(width, height)
         do {
-            changed = thinningPass(
-                pixels,
-                width,
+            val firstRemoveCount = thinningPass(
+                pixels = pixels,
+                width = width,
                 firstPass = true,
                 activeIndices = activeIndices,
                 activeCount = activeCount,
                 remove = removalBuffer,
             )
-            changed = thinningPass(
+            activeCount = applyThinningRemovals(
                 pixels,
                 width,
+                activeIndices,
+                activeCount,
+                removalBuffer,
+                firstRemoveCount,
+            )
+            val secondRemoveCount = thinningPass(
+                pixels = pixels,
+                width = width,
                 firstPass = false,
                 activeIndices = activeIndices,
                 activeCount = activeCount,
                 remove = removalBuffer,
-            ) || changed
+            )
+            activeCount = applyThinningRemovals(
+                pixels,
+                width,
+                activeIndices,
+                activeCount,
+                removalBuffer,
+                secondRemoveCount,
+            )
+            activeCount = compactThinningCandidates(pixels, activeIndices, activeCount)
+            changed = firstRemoveCount > 0 || secondRemoveCount > 0
             iteration++
         } while (changed && iteration < iterationLimit)
     }
@@ -631,7 +731,7 @@ internal class CenterlineExtractor(
         activeIndices: IntArray,
         activeCount: Int,
         remove: IntArray,
-    ): Boolean {
+    ): Int {
         var removeCount = 0
         for (position in 0 until activeCount) {
             val i = activeIndices[position]
@@ -672,24 +772,69 @@ internal class CenterlineExtractor(
                 }
             if (keepForTriples) remove[removeCount++] = i
         }
-        for (index in 0 until removeCount) pixels[remove[index]] = false
-        return removeCount > 0
+        return removeCount
+    }
+
+    private fun applyThinningRemovals(
+        pixels: BooleanArray,
+        width: Int,
+        activeIndices: IntArray,
+        activeCount: Int,
+        remove: IntArray,
+        removeCount: Int,
+    ): Int {
+        for (position in 0 until removeCount) pixels[remove[position]] = false
+        var nextCount = activeCount
+        for (position in 0 until removeCount) {
+            val removed = remove[position]
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    val neighbor = removed + dy * width + dx
+                    if (pixels[neighbor] && !thinningCandidates[neighbor]) {
+                        thinningCandidates[neighbor] = true
+                        activeIndices[nextCount++] = neighbor
+                    }
+                }
+            }
+        }
+        return nextCount
+    }
+
+    private fun compactThinningCandidates(
+        pixels: BooleanArray,
+        activeIndices: IntArray,
+        activeCount: Int,
+    ): Int {
+        var retainedCount = 0
+        for (position in 0 until activeCount) {
+            val index = activeIndices[position]
+            if (pixels[index]) {
+                activeIndices[retainedCount++] = index
+            } else {
+                thinningCandidates[index] = false
+            }
+        }
+        return retainedCount
     }
 
     /**
-     * Returns the route with the greatest geometric length from the endpoint
-     * nearest the image bottom. Width-weighted Dijkstra cost chooses the safer
-     * continuation when paths rejoin, but endpoint ranking uses a separate
-     * geometric distance so a narrow spur cannot win merely because it is
-     * expensive. Starting at an endpoint preserves both sides of a U-shaped or
-     * bowed tape; a closed loop alone falls back to its lowest skeleton point,
-     * a fact recorded in [routeClosedLoop].
+     * Returns the strongest route from the endpoint nearest the image bottom.
+     * Strength is geometric length weighted by width only until the projected
+     * minimum tape width. Equal-width and wider paths therefore retain the old
+     * longest-path ordering, while a narrow board seam is penalized instead of
+     * winning merely because it reaches farther across the frame. Dijkstra also
+     * chooses the wider continuation when paths rejoin. Starting at an endpoint
+     * preserves both sides of a U-shaped or bowed tape; a closed loop alone
+     * falls back to its lowest skeleton point, a fact recorded in
+     * [routeClosedLoop].
      */
     private fun longestPathFromBottom(
         skeleton: BooleanArray,
         widthDistances: IntArray,
         width: Int,
         height: Int,
+        minimumRouteHalfWidthDistance: Int,
     ): Int {
         var lowestPoint = -1
         var lowestEndpoint = -1
@@ -722,6 +867,7 @@ internal class CenterlineExtractor(
         var farthest = start
         routeCost[start] = 0
         routeLength[start] = 0
+        routeStrength[start] = 0
         heapNodes[0] = start
         heapCosts[0] = 0
         heapPositions[start] = 0
@@ -754,7 +900,7 @@ internal class CenterlineExtractor(
                 }
             }
             heapPositions[current] = HEAP_FINALIZED
-            if (routeLength[current] > routeLength[farthest]) farthest = current
+            if (hasStrongerRoute(current, farthest)) farthest = current
 
             val currentX = current % width
             val currentY = current / width
@@ -772,6 +918,9 @@ internal class CenterlineExtractor(
                     if (routeCost[next] >= 0 && candidateCost >= routeCost[next]) continue
                     routeCost[next] = candidateCost
                     routeLength[next] = routeLength[current] + geometricCost
+                    routeStrength[next] =
+                        routeStrength[current] +
+                            geometricCost * min(localHalfWidth, minimumRouteHalfWidthDistance)
                     predecessor[next] = current
 
                     var position = heapPositions[next]
@@ -817,6 +966,16 @@ internal class CenterlineExtractor(
             right--
         }
         return pathCount
+    }
+
+    private fun hasStrongerRoute(candidate: Int, selected: Int): Boolean {
+        val candidateStrength = routeStrength[candidate]
+        val selectedStrength = routeStrength[selected]
+        return candidateStrength > selectedStrength ||
+            (
+                candidateStrength == selectedStrength &&
+                    routeLength[candidate] > routeLength[selected]
+                )
     }
 
     /**

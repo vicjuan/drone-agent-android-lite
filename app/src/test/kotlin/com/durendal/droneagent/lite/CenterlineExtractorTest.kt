@@ -107,6 +107,36 @@ class CenterlineExtractorTest {
     }
 
     @Test
+    fun `wide tape wins over a longer narrow board seam at a crossing`() {
+        val width = 240
+        val height = 220
+        val tapePath = listOf(
+            Point(110.0, 215.0),
+            Point(145.0, 165.0),
+            Point(140.0, 110.0),
+            Point(105.0, 65.0),
+            Point(55.0, 10.0),
+        )
+        val boardSeam = listOf(Point(5.0, 105.0), Point(235.0, 105.0))
+        val tapeMask = maskAlongPath(width, height, tapePath, halfWidth = { 7.0 })
+        val seamMask = maskAlongPath(width, height, boardSeam, halfWidth = { 2.0 })
+        val combined = BooleanArray(width * height) { index ->
+            tapeMask.tape[index] || seamMask.tape[index]
+        }
+
+        val estimate = extractor.extract(
+            SegmentationMask(width, height, combined),
+            TapeWidthRangePixels(minimum = 10.0, maximum = 20.0),
+        )
+        val tapeCorridorFraction = estimate.points.count { point ->
+            distanceToPath(Point(point.x, point.y), tapePath) <= 5.0
+        }.toDouble() / estimate.points.size
+
+        assertTrue("path ended on the board seam: ${estimate.points.last()}", estimate.points.last().y < 30.0)
+        assertTrue("only $tapeCorridorFraction of the route followed tape", tapeCorridorFraction >= 0.90)
+    }
+
+    @Test
     fun `branch selection compares physical path length instead of pixel step count`() {
         val width = 100
         val tape = BooleanArray(width * 100)

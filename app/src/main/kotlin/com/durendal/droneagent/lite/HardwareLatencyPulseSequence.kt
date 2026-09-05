@@ -1,5 +1,18 @@
 package com.durendal.droneagent.lite
 
+internal interface HorizontalPulseStep {
+    val phaseName: String
+    val forwardMetersPerSecond: Double
+    val rightMetersPerSecond: Double
+    val markerWhite: Boolean
+    val complete: Boolean
+}
+
+internal interface HorizontalPulseSequence {
+    fun start(nowNanos: Long): HorizontalPulseStep
+    fun advance(nowNanos: Long): HorizontalPulseStep?
+}
+
 internal enum class HardwareLatencyPulsePhase {
     BASELINE,
     FORWARD,
@@ -12,9 +25,16 @@ internal enum class HardwareLatencyPulsePhase {
 internal data class HardwareLatencyPulseStep(
     val phase: HardwareLatencyPulsePhase,
     val cycle: Int,
-    val forwardMetersPerSecond: Double,
-    val markerWhite: Boolean,
-)
+    override val forwardMetersPerSecond: Double,
+    override val markerWhite: Boolean,
+) : HorizontalPulseStep {
+    override val phaseName: String
+        get() = phase.name
+    override val rightMetersPerSecond: Double
+        get() = 0.0
+    override val complete: Boolean
+        get() = phase == HardwareLatencyPulsePhase.COMPLETE
+}
 
 /**
  * Deterministic forward/backward steps for measuring command-to-motion latency.
@@ -29,7 +49,7 @@ internal class HardwareLatencyPulseSequence(
     private val baselineNanos: Long = DEFAULT_BASELINE_NANOS,
     private val pulseNanos: Long = DEFAULT_PULSE_NANOS,
     private val settleNanos: Long = DEFAULT_SETTLE_NANOS,
-) {
+) : HorizontalPulseSequence {
     private var started = false
     private var currentPhase = HardwareLatencyPulsePhase.BASELINE
     private var currentCycle = 0
@@ -41,7 +61,7 @@ internal class HardwareLatencyPulseSequence(
         require(baselineNanos > 0L && pulseNanos > 0L && settleNanos > 0L)
     }
 
-    fun start(nowNanos: Long): HardwareLatencyPulseStep {
+    override fun start(nowNanos: Long): HardwareLatencyPulseStep {
         check(!started) { "hardware latency pulse sequence already started" }
         require(nowNanos >= 0L)
         started = true
@@ -51,7 +71,7 @@ internal class HardwareLatencyPulseSequence(
         return currentStep()
     }
 
-    fun advance(nowNanos: Long): HardwareLatencyPulseStep? {
+    override fun advance(nowNanos: Long): HardwareLatencyPulseStep? {
         check(started) { "hardware latency pulse sequence has not started" }
         require(nowNanos >= 0L)
         if (currentPhase == HardwareLatencyPulsePhase.COMPLETE || nowNanos < nextTransitionAtNanos) {

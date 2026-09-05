@@ -20,6 +20,44 @@ class BoardChromaPolicyTest {
     }
 
     @Test
+    fun `tracked board tolerates a join masking one third of side samples`() {
+        assertFalse(
+            BilateralBoardPolicy.accepts(
+                pairCount = 46,
+                sampleCoverageFraction = 0.68,
+                compatiblePairFraction = 0.98,
+                leftMatchFraction = 1.0,
+                rightMatchFraction = 0.96,
+                bothSidesMatchFraction = 0.96,
+            ),
+        )
+        assertTrue(
+            BilateralBoardPolicy.acceptsTrackedReference(
+                pairCount = 46,
+                sampleCoverageFraction = 0.68,
+                compatiblePairFraction = 0.98,
+                leftMatchFraction = 1.0,
+                rightMatchFraction = 0.96,
+                bothSidesMatchFraction = 0.96,
+            ),
+        )
+    }
+
+    @Test
+    fun `tracked reference still rejects mostly obstructed side samples`() {
+        assertFalse(
+            BilateralBoardPolicy.acceptsTrackedReference(
+                pairCount = 40,
+                sampleCoverageFraction = 0.60,
+                compatiblePairFraction = 0.98,
+                leftMatchFraction = 1.0,
+                rightMatchFraction = 0.96,
+                bothSidesMatchFraction = 0.96,
+            ),
+        )
+    }
+
+    @Test
     fun `matching sides remain eligible for reference learning when absolute model misses`() {
         assertTrue(
             BilateralBoardPolicy.hasCompatibleSides(

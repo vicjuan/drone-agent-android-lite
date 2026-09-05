@@ -300,7 +300,7 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
-    fun `sixteen degree profile reaches its 1 point 35 meter per second target`() {
+    fun `sixteen degree profile reaches its 1 point 60 meter per second target`() {
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
@@ -324,6 +324,162 @@ class FixedHeadingLapControllerTest {
             0.001,
         )
         assertTrue(speed <= VirtualStickSession.AUTONOMOUS_MAX_HORIZONTAL_MPS)
+    }
+
+    @Test
+    fun `b2 ramps linearly to target in one second and ramps down without a step`() {
+        val centerline = path(
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+
+        val rampSpeeds = (1..10).map { step ->
+            val now = step * 100_000_000L + 1L
+            controller.observe(centerline, 1.2, 0.9, now)
+            val decision = controller.tick(now)
+            kotlin.math.hypot(
+                decision.forwardMetersPerSecond,
+                decision.rightMetersPerSecond,
+            )
+        }
+
+        assertEquals(0.16, rampSpeeds.first(), 0.001)
+        assertEquals(0.80, rampSpeeds[4], 0.001)
+        assertEquals(1.60, rampSpeeds.last(), 0.001)
+
+        val slowingAt = 1_100_000_001L
+        controller.observe(centerline, 1.2, 0.0, slowingAt)
+        val slowing = controller.tick(slowingAt)
+        val slowingSpeed = kotlin.math.hypot(
+            slowing.forwardMetersPerSecond,
+            slowing.rightMetersPerSecond,
+        )
+        assertEquals(1.44, slowingSpeed, 0.001)
+    }
+    @Test
+    fun `B2 and B3 cap the final horizontal command after lateral correction`() {
+        val offCenterPath = path(
+            xs = FloatArray(6) { 0.55f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val profiles =
+            listOf(
+                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 to 1.90,
+                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST to 2.00,
+            )
+
+        profiles.forEach { (profile, expectedMaximumSpeed) ->
+            val controller = FixedHeadingLapController()
+            controller.start(1L, profile)
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(20) { index ->
+                val now = (index + 1L) * 100_000_000L + 1L
+                controller.observe(
+                    centerline = offCenterPath,
+                    heightMeters = 1.2,
+                    confidence = 0.9,
+                    nowNanos = now,
+                    actualTravelDirectionDegrees = 0.0,
+                    actualGroundSpeedMetersPerSecond = 0.0,
+                )
+                decision = controller.tick(now)
+            }
+
+            assertEquals(
+                expectedMaximumSpeed,
+                kotlin.math.hypot(
+                    decision.forwardMetersPerSecond,
+                    decision.rightMetersPerSecond,
+                ),
+                0.001,
+            )
+        }
+    }
+
+    @Test
+    fun `B3 cruises at 1 point 90 meters per second without feedback boost`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST)
+        var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        repeat(20) { index ->
+            val now = (index + 1L) * 100_000_000L + 1L
+            controller.observe(
+                centerline = centerline,
+                heightMeters = 1.2,
+                confidence = 0.9,
+                nowNanos = now,
+                actualTravelDirectionDegrees = 0.0,
+                actualGroundSpeedMetersPerSecond = 0.70,
+            )
+            decision = controller.tick(now)
+        }
+
+        assertEquals(
+            1.90,
+            kotlin.math.hypot(
+                decision.forwardMetersPerSecond,
+                decision.rightMetersPerSecond,
+            ),
+            0.001,
+        )
+    }
+
+    @Test
+    fun `sixteen degree profile adds bounded feedback only from aligned travel`() {
+        val centerline = path(
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.DEGREES_16)
+
+        controller.observe(
+            centerline = centerline,
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 100_000_001L,
+            actualTravelDirectionDegrees = 0.0,
+            actualGroundSpeedMetersPerSecond = 0.60,
+        )
+        val aligned = controller.tick(100_000_001L)
+
+        assertEquals(0.60, checkNotNull(aligned.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.10, aligned.speedFeedbackBoostMetersPerSecond, 1e-9)
+        assertEquals(1.70, aligned.commandTargetSpeedMetersPerSecond, 1e-9)
+
+        controller.observe(
+            centerline = centerline,
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 200_000_001L,
+            actualTravelDirectionDegrees = 0.0,
+            actualGroundSpeedMetersPerSecond = 0.10,
+        )
+        val maximumBoost = controller.tick(200_000_001L)
+
+        assertEquals(0.20, maximumBoost.speedFeedbackBoostMetersPerSecond, 1e-9)
+        assertEquals(1.80, maximumBoost.commandTargetSpeedMetersPerSecond, 1e-9)
+
+        controller.observe(
+            centerline = centerline,
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 300_000_001L,
+            actualTravelDirectionDegrees = 90.0,
+            actualGroundSpeedMetersPerSecond = 0.60,
+        )
+        val sideways = controller.tick(300_000_001L)
+
+        assertNull(sideways.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, sideways.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.60, sideways.commandTargetSpeedMetersPerSecond, 1e-9)
     }
 
 
@@ -757,6 +913,152 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
+    fun `curvature feedforward profile corrects lateral offset while moving`() {
+        fun settledDecision(
+            xFraction: Float,
+            profile: FixedHeadingActuationPhaseLead,
+        ): FixedHeadingLapDecision {
+            val centerline = path(
+                xs = FloatArray(6) { xFraction },
+                ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+            )
+            val controller = FixedHeadingLapController()
+            controller.start(1L, profile)
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(20) { index ->
+                val now = (index + 1L) * 100_000_000L + 1L
+                controller.observe(
+                    centerline = centerline,
+                    heightMeters = 1.2,
+                    confidence = 0.9,
+                    nowNanos = now,
+                    actualTravelDirectionDegrees = 0.0,
+                    actualGroundSpeedMetersPerSecond = 0.70,
+                )
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+
+        val rightOffset = settledDecision(
+            0.60f,
+            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16,
+        )
+        val leftOffset = settledDecision(
+            0.40f,
+            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16,
+        )
+        val legacy = settledDecision(0.60f, FixedHeadingActuationPhaseLead.DEGREES_16)
+
+        assertTrue(rightOffset.lateralCorrectionMetersPerSecond > 0.0)
+        assertTrue(leftOffset.lateralCorrectionMetersPerSecond < 0.0)
+        assertTrue(
+            kotlin.math.abs(rightOffset.lateralCorrectionMetersPerSecond) <=
+                FixedHeadingLapController.MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
+        )
+        assertEquals(0.0, legacy.lateralCorrectionMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `B2 lateral feedback responds to thirty five percent of a new offset`() {
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16)
+        val centeredAt = 100_000_001L
+        controller.observe(
+            centerline =
+                path(
+                    xs = FloatArray(6) { 0.50f },
+                    ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+                ),
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = centeredAt,
+            actualTravelDirectionDegrees = 0.0,
+            actualGroundSpeedMetersPerSecond = 0.70,
+        )
+        controller.tick(centeredAt)
+        val observedAt = 200_000_001L
+        controller.observe(
+            centerline =
+                path(
+                    xs = FloatArray(6) { 0.60f },
+                    ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+                ),
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = observedAt,
+            actualTravelDirectionDegrees = 0.0,
+            actualGroundSpeedMetersPerSecond = 0.70,
+        )
+
+        val decision = controller.tick(observedAt)
+        val measuredOffset = checkNotNull(decision.lateralOffsetMeters)
+        val expectedCorrection =
+            FixedHeadingLapController.LATERAL_FEEDBACK_GAIN_PER_SECOND *
+                FixedHeadingLapController.LATERAL_OFFSET_FILTER_ALPHA *
+                measuredOffset
+
+        assertEquals(
+            expectedCorrection,
+            decision.lateralCorrectionMetersPerSecond,
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `curvature feedforward turns virtual velocity toward measured curve`() {
+        fun firstDecision(curvaturePerMeter: Double): FixedHeadingLapDecision {
+            val controller = FixedHeadingLapController()
+            controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16)
+            controller.observe(
+                centerline = curvedPath(0.0, curvaturePerMeter),
+                heightMeters = 1.2,
+                confidence = 0.9,
+                nowNanos = 1L,
+                actualTravelDirectionDegrees = 0.0,
+                actualGroundSpeedMetersPerSecond = 0.70,
+            )
+            return controller.tick(100_000_001L)
+        }
+
+        val rightCurve = firstDecision(1.0)
+        val leftCurve = firstDecision(-1.0)
+        val straight = firstDecision(0.0)
+        val missingVelocityController = FixedHeadingLapController()
+        missingVelocityController.start(
+            1L,
+            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16,
+        )
+        missingVelocityController.observe(
+            centerline = curvedPath(0.0, 1.0),
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 1L,
+        )
+        val missingVelocity = missingVelocityController.tick(100_000_001L)
+        val legacyController = FixedHeadingLapController()
+        legacyController.start(1L, FixedHeadingActuationPhaseLead.DEGREES_16)
+        legacyController.observe(
+            centerline = curvedPath(0.0, 1.0),
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 1L,
+        )
+        val legacyWithoutVelocity = legacyController.tick(100_000_001L)
+
+        assertTrue(checkNotNull(rightCurve.curvaturePerMeter) > 0.0)
+        assertTrue(rightCurve.virtualHeadingDegrees > 0.0)
+        assertTrue(checkNotNull(leftCurve.curvaturePerMeter) < 0.0)
+        assertTrue(leftCurve.virtualHeadingDegrees > 180.0)
+        assertEquals(0.0, straight.virtualHeadingDegrees, 1e-6)
+        assertEquals(
+            legacyWithoutVelocity.virtualHeadingDegrees,
+            missingVelocity.virtualHeadingDegrees,
+            1e-6,
+        )
+    }
+
+    @Test
     fun `fixed heading hold corrects drift across the heading seam`() {
         assertEquals(1.6, fixedHeadingHoldYawRate(179.0, -179.0), 1e-6)
         assertEquals(-1.6, fixedHeadingHoldYawRate(-179.0, 179.0), 1e-6)
@@ -764,7 +1066,10 @@ class FixedHeadingLapControllerTest {
         assertEquals(-10.0, fixedHeadingHoldYawRate(0.0, -90.0), 1e-6)
     }
 
-    private fun curvedPath(tangentDegrees: Double): TapeCenterlinePath {
+    private fun curvedPath(
+        tangentDegrees: Double,
+        curvaturePerMeter: Double = 1.0,
+    ): TapeCenterlinePath {
         val sourceWidth = 640
         val sourceHeight = 360
         val heightMeters = 1.2
@@ -779,7 +1084,7 @@ class FixedHeadingLapControllerTest {
         val xs = FloatArray(samplesMeters.size)
         val ys = FloatArray(samplesMeters.size)
         samplesMeters.forEachIndexed { index, distanceMeters ->
-            val normalMeters = 0.5 * distanceMeters * distanceMeters
+            val normalMeters = 0.5 * curvaturePerMeter * distanceMeters * distanceMeters
             val rightMeters =
                 kotlin.math.sin(tangentRadians) * distanceMeters +
                     kotlin.math.cos(tangentRadians) * normalMeters

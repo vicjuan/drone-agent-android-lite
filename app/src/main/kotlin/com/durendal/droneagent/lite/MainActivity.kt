@@ -37,7 +37,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
 
-internal fun feedbackCircleArmedLogMessage(
+internal fun mathematicalCircleArmedLogMessage(
     mode: String,
     diameterMeters: Double,
     secondsPerLap: Double,
@@ -47,7 +47,7 @@ internal fun feedbackCircleArmedLogMessage(
     headingDegrees: Double,
 ): String =
     (
-        "feedback circle armed mode=$mode diameter=%.2f secondsPerLap=%.1f " +
+        "mathematical circle armed mode=$mode diameter=%.2f secondsPerLap=%.1f " +
             "laps=%d speed=%.3f angularRate=%.1f heading=%.1f"
     ).format(
         diameterMeters,
@@ -84,6 +84,12 @@ internal fun feedbackCircleArmedLogMessage(
  * borrowed; the control path stays this app's single flown one.
  */
 class MainActivity : Activity() {
+    private enum class HorizontalPulseExperiment {
+        HARDWARE_LATENCY,
+        DIRECTIONAL_VELOCITY,
+        FIXED_DIRECTION_SPEED,
+    }
+
 
     private lateinit var preview: CameraPreview
     private lateinit var tapeOverlay: TapeOverlayView
@@ -107,13 +113,16 @@ class MainActivity : Activity() {
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var angleCircularTapeTrackingButton: PillButton
-    private lateinit var fixedHeadingZeroPhaseLeadButton: PillButton
     private lateinit var fixedHeadingFourteenPhaseLeadButton: PillButton
     private lateinit var fixedHeadingFasterPhaseLeadButton: PillButton
+    private lateinit var fixedHeadingCurvatureFeedforwardButton: PillButton
+    private lateinit var fixedHeadingFastCruiseButton: PillButton
     private lateinit var yawLapTestButton: PillButton
     private lateinit var hardwareLatencyButton: PillButton
-    private lateinit var feedbackSkatingCircleButton: PillButton
-    private lateinit var feedbackRacingCircleButton: PillButton
+    private lateinit var directionalVelocityPulseButton: PillButton
+    private lateinit var fixedDirectionSpeedButton: PillButton
+    private lateinit var mathematicalSkatingCircleButton: PillButton
+    private lateinit var mathematicalRacingCircleButton: PillButton
     private lateinit var virtualStickFrameRateButton: PillButton
     private lateinit var leftPad: StickPadView
     private lateinit var rightPad: StickPadView
@@ -218,30 +227,26 @@ class MainActivity : Activity() {
     private var quarterArcAuthoritySeen = false
     private var quarterArcLastRenderedAtNanos = 0L
 
-    /** Camera-visible forward/backward pulses for the hardware-latency experiment. */
-    private var hardwareLatencyPulseSequence: HardwareLatencyPulseSequence? = null
+    /** Camera-visible velocity experiments; only one may own these shared controls. */
+    private var hardwareLatencyPulseSequence: HorizontalPulseSequence? = null
     private var hardwareLatencyStartPending = false
     private var hardwareLatencyAuthoritySeen = false
     private var hardwareLatencyArmedAtNanos = 0L
     private var hardwareLatencyStartedAtNanos = 0L
+    private var horizontalPulseExperiment: HorizontalPulseExperiment? = null
+    private var nextDirectionalPulseDirection = DirectionalVelocityPulseDirection.FORWARD
 
-    /** Camera-independent circle closed around integrated earth-frame velocity. */
-    @Volatile private var feedbackCircleController: FeedbackCircleController? = null
-    @Volatile private var feedbackCircleStartPending = false
-    @Volatile private var feedbackCircleAuthoritySeen = false
-    @Volatile private var feedbackCircleMode = FeedbackCircleMode.SKATING
-    private var feedbackCircleArmedAtNanos = 0L
-    private var feedbackCircleStartedAtNanos = 0L
-    private var feedbackCircleInitialHeadingDegrees = 0.0
-    private var feedbackCircleLastLap = 0
-    private var feedbackCircleLastRenderedAtNanos = 0L
-    private var feedbackCircleLastTickAtNanos = 0L
-    private val feedbackVelocityReadState =
-        FeedbackVelocityReadState(
-            pollIntervalNanos = FEEDBACK_CIRCLE_VELOCITY_POLL_INTERVAL_NANOS,
-            timeoutNanos = FEEDBACK_CIRCLE_VELOCITY_TIMEOUT_NANOS,
-        )
-    @Volatile private var feedbackCircleVelocityReadGeneration = 0L
+    /** Camera- and position-independent circle generated solely from elapsed time. */
+    @Volatile private var mathematicalCircleController: MathematicalCircleController? = null
+    @Volatile private var mathematicalCircleStartPending = false
+    @Volatile private var mathematicalCircleAuthoritySeen = false
+    @Volatile private var mathematicalCircleMode = MathematicalCircleMode.SKATING
+    private var mathematicalCircleArmedAtNanos = 0L
+    private var mathematicalCircleStartedAtNanos = 0L
+    private var mathematicalCircleInitialHeadingDegrees = 0.0
+    private var mathematicalCircleLastLap = 0
+    private var mathematicalCircleLastRenderedAtNanos = 0L
+    private var mathematicalCircleLastTickAtNanos = 0L
 
 
     /** Camera gimbal is independent of the aircraft's virtual-stick authority. */
@@ -267,9 +272,12 @@ class MainActivity : Activity() {
         render("鏡頭角度控制逾時，已解除鎖定，可再試一次")
     }
     private enum class CircularYawControlMode { RATE, HEADING }
-    private enum class FeedbackCircleMode(val displayName: String) {
-        SKATING("滑冰"),
-        RACING("賽車"),
+    private enum class MathematicalCircleMode(
+        val displayName: String,
+        val secondsPerLap: Double,
+    ) {
+        SKATING("滑冰", MathematicalCircleController.SECONDS_PER_LAP),
+        RACING("賽車", MathematicalCircleController.RACING_SECONDS_PER_LAP),
     }
     private enum class TapeControlTrigger { PERIODIC, FRESH_VISION }
     private var activeTapeControlTrigger = TapeControlTrigger.PERIODIC
@@ -368,14 +376,17 @@ class MainActivity : Activity() {
             status.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER &&
             hardwareLatencyAuthoritySeen
         ) {
-            stopHardwareLatencyTest("實體遙控器已接管，硬體延遲脈衝已停止", release = false)
+            stopHardwareLatencyTest(
+                "實體遙控器已接管，${activeHorizontalPulseName()}已停止",
+                release = false,
+            )
         }
         if (
-            feedbackCircleController != null &&
+            mathematicalCircleController != null &&
             status.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER &&
-            feedbackCircleAuthoritySeen
+            mathematicalCircleAuthoritySeen
         ) {
-            stopFeedbackCircle("實體遙控器已接管，回授圓周已停止", release = false)
+            stopMathematicalCircle("實體遙控器已接管，數學圓周已停止", release = false)
         }
         render("控制權=${status.authority}")
     }
@@ -416,6 +427,7 @@ class MainActivity : Activity() {
                 "visionHz" to 20,
                 "controlHz" to (1_000L / TAPE_TRACKING_TICK_MS),
                 "stickHz" to virtualStick.frameRate().hertz,
+                "imageResizeInterpolation" to TAPE_IMAGE_RESIZE_INTERPOLATION,
             ),
         )
         captureRecorder = runCatching {
@@ -454,8 +466,8 @@ class MainActivity : Activity() {
         // would deliver key updates to a dead view hierarchy. The stick link is
         // released too, so a killed UI can never leave a live control link.
         activityDestroying = true
-        stopHardwareLatencyTest("App 關閉，硬體延遲脈衝已停止", release = false)
-        stopFeedbackCircle("App 關閉，回授圓周已停止", release = false)
+        stopHardwareLatencyTest("App 關閉，${activeHorizontalPulseName()}已停止", release = false)
+        stopMathematicalCircle("App 關閉，數學圓周已停止", release = false)
         mainHandler.removeCallbacksAndMessages(null)
         tapeTracking.stop()
         tapeTrackingStartPending = false
@@ -580,6 +592,12 @@ class MainActivity : Activity() {
             )
             latestDetectionUiFrameNanos = detection?.capturedAtNanos ?: latestProfiledFrameNanos
             latestDetectionUiAtNanos = now
+        tapeTracking.updateAircraftHeading(
+            aircraftHeadingDegrees?.takeIf {
+                aircraftHeadingAtNanos != 0L &&
+                    now - aircraftHeadingAtNanos <= MAX_MOVING_HEADING_AGE_NANOS
+            },
+        )
         if (tapeTracking.enabled) {
             tapeTracking.observe(
                 detection?.let {
@@ -601,6 +619,7 @@ class MainActivity : Activity() {
                         confidence = it.confidence,
                         centerline = it.centerline,
                         actualTravelDirectionDegrees = usableBodyTravelDirectionDegrees(now),
+                        actualGroundSpeedMetersPerSecond = groundSpeedMetersPerSecond,
                     )
                 },
                 now,
@@ -664,6 +683,22 @@ class MainActivity : Activity() {
                 "floorContextMs" to profile.floorContextNanos / 1_000_000.0,
                 "morphologyContoursMs" to profile.morphologyAndContoursNanos / 1_000_000.0,
                 "candidateMs" to profile.candidateScoringNanos / 1_000_000.0,
+                "candidateMaskMs" to profile.candidateMaskNanos / 1_000_000.0,
+                "candidateCenterlineMs" to profile.candidateCenterlineNanos / 1_000_000.0,
+                "candidateAppearanceMs" to profile.candidateAppearanceNanos / 1_000_000.0,
+                "candidateTemporalMs" to profile.candidateTemporalNanos / 1_000_000.0,
+                "centerlineDownsampleMs" to profile.centerlineDownsampleNanos / 1_000_000.0,
+                "centerlineGapFillMs" to profile.centerlineGapFillNanos / 1_000_000.0,
+                "centerlineDistanceMs" to profile.centerlineDistanceNanos / 1_000_000.0,
+                "centerlineThinningMs" to profile.centerlineThinningNanos / 1_000_000.0,
+                "centerlineRouteMs" to profile.centerlineRouteNanos / 1_000_000.0,
+                "centerlineQualityMs" to profile.centerlineQualityNanos / 1_000_000.0,
+                "centerlineTopologyMs" to profile.centerlineTopologyNanos / 1_000_000.0,
+                "candidateMeasurementMs" to profile.candidateMeasurementNanos / 1_000_000.0,
+                "contours" to profile.contourCount,
+                "fullCenterlines" to profile.fullCenterlineExtractions,
+                "temporalAttempts" to profile.temporalCenterlineAttempts,
+                "temporalAccepts" to profile.temporalCenterlineAccepts,
                 "cleanupMs" to profile.cleanupNanos / 1_000_000.0,
                 "otherMs" to
                     (
@@ -684,7 +719,7 @@ class MainActivity : Activity() {
     }
 
     private fun recordVirtualStickFrame(profile: VirtualStickFrameProfile) {
-        driveFeedbackCircle(profile.sentAtNanos)
+        driveMathematicalCircle(profile.sentAtNanos)
         flightProfiler.record(
             event = "virtual_stick",
             atNanos = profile.sentAtNanos,
@@ -819,32 +854,48 @@ class MainActivity : Activity() {
                         toggleVirtualStickFrameRate()
                     }
                 circularTapeTrackingButton =
-                    PillButton("方案 C：切線循跡", StickPadView.CYAN) {
+                    PillButton("方案 C：Ø1.5m 定曲率＋視覺修正・0.70 m/s", StickPadView.CYAN) {
                         toggleCircularTapeTracking()
                     }
                 angleCircularTapeTrackingButton =
                     PillButton("ANGLE 前視點・0.10 m/s", StickPadView.RED) {
                         toggleAngleCircularTapeTracking()
                     }
-                fixedHeadingZeroPhaseLeadButton =
-                    PillButton("方案 B：定向滑行・相位超前 0°", StickPadView.GREEN) {
-                        toggleFixedHeadingLap(FixedHeadingActuationPhaseLead.DEGREES_0)
-                    }
                 fixedHeadingFourteenPhaseLeadButton =
                     PillButton("方案 B：定向滑行・相位超前 14°", StickPadView.GREEN) {
                         toggleFixedHeadingLap(FixedHeadingActuationPhaseLead.DEGREES_14)
                     }
                 fixedHeadingFasterPhaseLeadButton =
-                    PillButton("方案 B：更快・1.35 m/s・超前 16°", StickPadView.AMBER) {
+                    PillButton("方案 B：更快・1.60 m/s・超前 16°", StickPadView.AMBER) {
                         toggleFixedHeadingLap(FixedHeadingActuationPhaseLead.DEGREES_16)
                     }
-                feedbackSkatingCircleButton =
-                    PillButton(feedbackCircleLabel(FeedbackCircleMode.SKATING), StickPadView.GREEN) {
-                        toggleFeedbackCircle(FeedbackCircleMode.SKATING)
+                fixedHeadingCurvatureFeedforwardButton =
+                    PillButton("方案 B2：曲率前饋・巡航 1.60 m/s・最大 1.90 m/s", StickPadView.RED) {
+                        toggleFixedHeadingLap(
+                            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16,
+                        )
                     }
-                feedbackRacingCircleButton =
-                    PillButton(feedbackCircleLabel(FeedbackCircleMode.RACING), StickPadView.AMBER) {
-                        toggleFeedbackCircle(FeedbackCircleMode.RACING)
+                fixedHeadingFastCruiseButton =
+                    PillButton("方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s", StickPadView.RED) {
+                        toggleFixedHeadingLap(
+                            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST,
+                        )
+                    }
+                directionalVelocityPulseButton =
+                    PillButton(directionalVelocityPulseLabel(), StickPadView.RED) {
+                        toggleDirectionalVelocityPulseTest()
+                    }
+                fixedDirectionSpeedButton =
+                    PillButton(fixedDirectionSpeedLabel(), StickPadView.RED) {
+                        toggleFixedDirectionSpeedTest()
+                    }
+                mathematicalSkatingCircleButton =
+                    PillButton(mathematicalCircleLabel(MathematicalCircleMode.SKATING), StickPadView.GREEN) {
+                        toggleMathematicalCircle(MathematicalCircleMode.SKATING)
+                    }
+                mathematicalRacingCircleButton =
+                    PillButton(mathematicalCircleLabel(MathematicalCircleMode.RACING), StickPadView.AMBER) {
+                        toggleMathematicalCircle(MathematicalCircleMode.RACING)
                     }
                 yawLapTestButton =
                     PillButton("航向模式原地旋轉 360°", StickPadView.AMBER) {
@@ -860,12 +911,14 @@ class MainActivity : Activity() {
                     }
                 addView(virtualStickFrameRateButton, actionParams(marginEnd = dp(4)))
                 addView(circularTapeTrackingButton, actionParams(marginEnd = dp(4)))
-                addView(fixedHeadingZeroPhaseLeadButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingFourteenPhaseLeadButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingFasterPhaseLeadButton, actionParams(marginEnd = dp(4)))
-                addView(feedbackSkatingCircleButton, actionParams(marginEnd = dp(4)))
-                addView(feedbackRacingCircleButton, actionParams(marginEnd = dp(4)))
-                addView(angleCircularTapeTrackingButton, actionParams(marginEnd = dp(4)))
+                addView(fixedHeadingCurvatureFeedforwardButton, actionParams(marginEnd = dp(4)))
+                addView(fixedHeadingFastCruiseButton, actionParams(marginEnd = dp(4)))
+                addView(directionalVelocityPulseButton, actionParams(marginEnd = dp(4)))
+                addView(fixedDirectionSpeedButton, actionParams(marginEnd = dp(4)))
+                addView(mathematicalSkatingCircleButton, actionParams(marginEnd = dp(4)))
+                addView(mathematicalRacingCircleButton, actionParams(marginEnd = dp(4)))
                 addView(yawLapTestButton, actionParams(marginEnd = dp(4)))
                 addView(curvedOutAndBackTrackingButton, actionParams(marginEnd = dp(4)))
                 addView(captureButton, actionParams())
@@ -878,6 +931,17 @@ class MainActivity : Activity() {
             if (frameRate == VirtualStickFrameRate.BASELINE_20) "基準" else "提速"
         return "VS 發送：${frameRate.hertz} Hz（$profile）"
     }
+
+    private fun directionalVelocityPulseLabel(): String =
+        "四方向階躍：${nextDirectionalPulseDirection.displayName}・" +
+            "%.2f m/s・0.5 秒".format(
+                DirectionalVelocityPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND,
+            )
+
+    private fun fixedDirectionSpeedLabel(): String =
+        "定向速度：前・漸進至 %.2f m/s".format(
+            FIXED_DIRECTION_SPEED_METERS_PER_SECOND,
+        )
 
     private fun toggleVirtualStickFrameRate() {
         if (
@@ -1245,6 +1309,8 @@ class MainActivity : Activity() {
                 "circularYawControl=$circularYawControlMode " +
                 "fixedHeadingPhaseLeadDegrees=${fixedHeadingActuationPhaseLead.degrees} " +
                 "fixedHeadingTargetSpeed=${fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond} " +
+                "fixedHeadingMaximumCommandSpeed=" +
+                "${fixedHeadingActuationPhaseLead.maximumCommandSpeedMetersPerSecond} " +
                 "stickHz=${virtualStick.frameRate().hertz} " +
                 "registered=$registered connected=$aircraftConnected flying=$flying " +
                 "owned=$stickOwned cameraPitch=" +
@@ -1328,20 +1394,28 @@ class MainActivity : Activity() {
                                     mode == TapeTrackingMode.FIXED_HEADING,
                         )
                         val now = System.nanoTime()
-                        if (mode == TapeTrackingMode.FIXED_HEADING) {
+                        if (
+                            mode == TapeTrackingMode.FIXED_HEADING ||
+                            mode == TapeTrackingMode.CIRCULAR
+                        ) {
                             val heading = aircraftHeadingDegrees
                             if (
                                 heading == null ||
                                 aircraftHeadingAtNanos == 0L ||
                                 now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
                             ) {
+                                val schemeName =
+                                    if (mode == TapeTrackingMode.FIXED_HEADING) "方案 B" else "方案 C"
                                 stopTapeTracking(
-                                    "沒有即時機頭方向，方案 B 未啟動",
+                                    "沒有即時機頭方向，$schemeName 未啟動",
                                     release = true,
                                 )
                                 return@acquireControlLink
                             }
-                            fixedHeadingReferenceDegrees = heading
+                            tapeTracking.updateAircraftHeading(heading)
+                            if (mode == TapeTrackingMode.FIXED_HEADING) {
+                                fixedHeadingReferenceDegrees = heading
+                            }
                         }
                         // The circular experiment uses a physically closed loop. Curved
                         // out-and-back tracking uses the same path detector with its endpoint armed.
@@ -1375,8 +1449,23 @@ class MainActivity : Activity() {
                                 "yawControl" to circularYawControlMode,
                                 "fixedHeadingPhaseLeadDegrees" to
                                     fixedHeadingActuationPhaseLead.degrees,
+                                "fixedHeadingProfile" to fixedHeadingActuationPhaseLead,
                                 "fixedHeadingTargetSpeed" to
                                     fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond,
+                                "fixedHeadingMaximumCommandSpeed" to
+                                    fixedHeadingActuationPhaseLead.maximumCommandSpeedMetersPerSecond,
+                                "schemeCControl" to
+                                    if (mode == TapeTrackingMode.CIRCULAR) {
+                                        "planned_1p5m_curvature_visual_tangent_correction"
+                                    } else {
+                                        null
+                                    },
+                                "schemeCLookaheadMeters" to
+                                    if (mode == TapeTrackingMode.CIRCULAR) {
+                                        TapeTrackingController.VISUAL_CURVATURE_LOOKAHEAD_METERS
+                                    } else {
+                                        null
+                                    },
                                 "stickHz" to virtualStick.frameRate().hertz,
                                 "periodicControlHz" to (1_000L / TAPE_TRACKING_TICK_MS),
                             ),
@@ -1390,20 +1479,24 @@ class MainActivity : Activity() {
                                         angleCircularTapeTrackingButton.text =
                                             "停止 ANGLE 前視點修正版・0.10 m/s"
                                     else ->
-                                        circularTapeTrackingButton.text = "停止方案 C：切線高速循跡"
+                                        circularTapeTrackingButton.text =
+                                            "停止方案 C：Ø1.5m 定曲率＋視覺修正・0.70 m/s"
                                 }
                             }
                             TapeTrackingMode.FIXED_HEADING -> {
                                 val button =
                                     when (fixedHeadingActuationPhaseLead) {
-                                        FixedHeadingActuationPhaseLead.DEGREES_0 ->
-                                            fixedHeadingZeroPhaseLeadButton
+                                        FixedHeadingActuationPhaseLead.DEGREES_0 -> null
                                         FixedHeadingActuationPhaseLead.DEGREES_14 ->
                                             fixedHeadingFourteenPhaseLeadButton
                                         FixedHeadingActuationPhaseLead.DEGREES_16 ->
                                             fixedHeadingFasterPhaseLeadButton
+                                        FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 ->
+                                            fixedHeadingCurvatureFeedforwardButton
+                                        FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST ->
+                                            fixedHeadingFastCruiseButton
                                     }
-                                button.text = "停止$trackingName"
+                                button?.text = "停止$trackingName"
                             }
                             TapeTrackingMode.CURVED_OUT_AND_BACK ->
                                 curvedOutAndBackTrackingButton.text = "停止弧形往返追蹤"
@@ -1416,6 +1509,12 @@ class MainActivity : Activity() {
                                 "${fixedHeadingActuationPhaseLead.degrees} " +
                                 "fixedHeadingTargetSpeed=" +
                                 "${fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond} " +
+                                "schemeCControl=" +
+                                if (mode == TapeTrackingMode.CIRCULAR) {
+                                    "planned_1p5m_curvature_visual_tangent_correction "
+                                } else {
+                                    "none "
+                                } +
                                 "stickHz=${virtualStick.frameRate().hertz} " +
                                 "periodicControlHz=${1_000L / TAPE_TRACKING_TICK_MS} " +
                                 "avoidance=CLOSE endpointTurnEnabled=$endpointTurnEnabled",
@@ -1469,6 +1568,19 @@ class MainActivity : Activity() {
                 } else {
                     null
                 }
+
+            if (activeTapeTrackingMode == TapeTrackingMode.CIRCULAR && ownsAuthority) {
+                val currentHeading = aircraftHeadingDegrees
+                if (
+                    currentHeading == null ||
+                    aircraftHeadingAtNanos == 0L ||
+                    now - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
+                ) {
+                    stopTapeTracking("機頭方向資料停止更新，方案 C 已停止", release = true)
+                    return
+                }
+                tapeTracking.updateAircraftHeading(currentHeading)
+            }
 
             val decisionStartedAtNanos = System.nanoTime()
             val decision = tapeTracking.tick(now)
@@ -1632,8 +1744,14 @@ class MainActivity : Activity() {
                     "rawAngle" to decision.rawAngleDegrees,
                     "controlledAngle" to decision.controlledAngleDegrees,
                     "pathBearing" to decision.pathBearingDegrees,
+                    "circularFeedforwardYawRate" to
+                        decision.circularFeedforwardYawRateDegreesPerSecond,
+                    "circularTurnDirection" to decision.circularTurnDirection,
                     "offset" to decision.controlledOffsetFraction,
                     "groundSpeed" to groundSpeedMetersPerSecond,
+                    "alongTrackSpeed" to decision.measuredAlongTrackSpeedMetersPerSecond,
+                    "speedFeedbackBoost" to decision.speedFeedbackBoostMetersPerSecond,
+                    "commandTargetSpeed" to decision.commandTargetSpeedMetersPerSecond,
                     "heading" to aircraftHeadingDegrees,
                 ),
             )
@@ -1747,13 +1865,20 @@ class MainActivity : Activity() {
                     circularYawControlMode == CircularYawControlMode.HEADING ->
                         "ANGLE 前視點修正版・0.10 m/s"
                     else ->
-                        "方案 C：切線高速循跡"
+                        "方案 C：Ø1.5m 定曲率＋視覺修正・0.70 m/s"
                 }
             TapeTrackingMode.FIXED_HEADING ->
-                "方案 B：定向滑行・%.2f m/s・相位超前 %.0f°".format(
-                    fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond,
-                    fixedHeadingActuationPhaseLead.degrees,
-                )
+                when (fixedHeadingActuationPhaseLead) {
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 ->
+                        "方案 B2：曲率前饋・巡航 1.60 m/s・最大 1.90 m/s"
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST ->
+                        "方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s"
+                    else ->
+                        "方案 B：定向滑行・%.2f m/s・相位超前 %.0f°".format(
+                            fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond,
+                            fixedHeadingActuationPhaseLead.degrees,
+                        )
+                }
             TapeTrackingMode.CURVED_OUT_AND_BACK -> "弧形往返追蹤"
             else -> "直線黑膠帶追蹤"
         }
@@ -1849,20 +1974,26 @@ class MainActivity : Activity() {
         activeFixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_0
         if (::tapeTrackingButton.isInitialized) tapeTrackingButton.text = "直線黑膠帶追蹤"
         if (::circularTapeTrackingButton.isInitialized) {
-            circularTapeTrackingButton.text = "方案 C：切線高速循跡"
+            circularTapeTrackingButton.text =
+                "方案 C：Ø1.5m 定曲率＋視覺修正・0.70 m/s"
         }
         if (::angleCircularTapeTrackingButton.isInitialized) {
             angleCircularTapeTrackingButton.text = "ANGLE 前視點修正版・0.10 m/s"
         }
         diagnosticTurnCycleTimer.reset()
-        if (::fixedHeadingZeroPhaseLeadButton.isInitialized) {
-            fixedHeadingZeroPhaseLeadButton.text = "方案 B：定向滑行・相位超前 0°"
-        }
         if (::fixedHeadingFourteenPhaseLeadButton.isInitialized) {
             fixedHeadingFourteenPhaseLeadButton.text = "方案 B：定向滑行・相位超前 14°"
         }
         if (::fixedHeadingFasterPhaseLeadButton.isInitialized) {
-            fixedHeadingFasterPhaseLeadButton.text = "方案 B：更快・1.35 m/s・超前 16°"
+            fixedHeadingFasterPhaseLeadButton.text = "方案 B：更快・1.60 m/s・超前 16°"
+        }
+        if (::fixedHeadingCurvatureFeedforwardButton.isInitialized) {
+            fixedHeadingCurvatureFeedforwardButton.text =
+                "方案 B2：曲率前饋・巡航 1.60 m/s・最大 1.90 m/s"
+        }
+        if (::fixedHeadingFastCruiseButton.isInitialized) {
+            fixedHeadingFastCruiseButton.text =
+                "方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s"
         }
         if (::curvedOutAndBackTrackingButton.isInitialized) {
             curvedOutAndBackTrackingButton.text = "弧形往返追蹤"
@@ -1922,13 +2053,16 @@ class MainActivity : Activity() {
             isDeflected &&
             (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null)
         ) {
-            stopHardwareLatencyTest("畫面搖桿已接管，硬體延遲脈衝已停止", release = false)
+            stopHardwareLatencyTest(
+                "畫面搖桿已接管，${activeHorizontalPulseName()}已停止",
+                release = false,
+            )
         }
         if (
             isDeflected &&
-            (feedbackCircleStartPending || feedbackCircleController != null)
+            (mathematicalCircleStartPending || mathematicalCircleController != null)
         ) {
-            stopFeedbackCircle("畫面搖桿已接管，回授圓周已停止", release = false)
+            stopMathematicalCircle("畫面搖桿已接管，數學圓周已停止", release = false)
         }
         val horizontalStopReason =
             if (side == StickSide.RIGHT && isDeflected) {
@@ -1990,8 +2124,8 @@ class MainActivity : Activity() {
         if (
             leftStickActive || rightStickActive || holdingHeight || headingTurn != null ||
             quarterArcController != null || tapeTracking.enabled || hardwareLatencyStartPending ||
-            hardwareLatencyPulseSequence != null || feedbackCircleStartPending ||
-            feedbackCircleController != null || !stickOwned
+            hardwareLatencyPulseSequence != null || mathematicalCircleStartPending ||
+            mathematicalCircleController != null || !stickOwned
         ) return@Runnable
         releaseControlLink { error ->
             render(error?.let { "釋放控制權失敗：$it" } ?: "搖桿放手，控制權已交回遙控器")
@@ -2016,8 +2150,8 @@ class MainActivity : Activity() {
         val ready = registered && aircraftConnected
         val hardwareLatencyActive =
             hardwareLatencyStartPending || hardwareLatencyPulseSequence != null
-        val feedbackCircleActive =
-            feedbackCircleStartPending || feedbackCircleController != null
+        val mathematicalCircleActive =
+            mathematicalCircleStartPending || mathematicalCircleController != null
         val (headline, headlineColor) = when {
             lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true) ->
                 "LOCAL FLIGHT • BATTERY CRITICAL" to StickPadView.RED
@@ -2048,10 +2182,10 @@ class MainActivity : Activity() {
         yawLapTestButton.available =
             yawLapTestActive ||
                 (!turning && !quarterArcActive && !holdingHeight && !tapeTracking.enabled &&
-                    !hardwareLatencyActive && !feedbackCircleActive && ready && flying)
+                    !hardwareLatencyActive && !mathematicalCircleActive && ready && flying)
         val heightButtonAvailable =
             ready && flying && !holdingHeight && !turning && !quarterArcActive &&
-                !tapeTracking.enabled && !hardwareLatencyActive && !feedbackCircleActive
+                !tapeTracking.enabled && !hardwareLatencyActive && !mathematicalCircleActive
         holdButton.available = heightButtonAvailable
         oneMeterHoldButton.available = heightButtonAvailable
         captureButton.available = captureRecorder != null
@@ -2059,17 +2193,26 @@ class MainActivity : Activity() {
             !stickOwned && !stickTransitionPending && !stickStatus.enabled &&
                 !anotherFlightControlActive()
         hardwareLatencyButton.available =
-            hardwareLatencyActive || (ready && flying && !anotherFlightControlActive())
-        feedbackSkatingCircleButton.available =
-            (feedbackCircleActive && feedbackCircleMode == FeedbackCircleMode.SKATING) ||
-                (!feedbackCircleActive && ready && flying && !anotherFlightControlActive())
-        feedbackRacingCircleButton.available =
-            (feedbackCircleActive && feedbackCircleMode == FeedbackCircleMode.RACING) ||
-                (!feedbackCircleActive && ready && flying && !anotherFlightControlActive())
+            hardwareLatencyActive && horizontalPulseExperiment == HorizontalPulseExperiment.HARDWARE_LATENCY ||
+                ready && flying && !anotherFlightControlActive()
+        directionalVelocityPulseButton.available =
+            hardwareLatencyActive &&
+                horizontalPulseExperiment == HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ||
+                ready && flying && !anotherFlightControlActive()
+        fixedDirectionSpeedButton.available =
+            hardwareLatencyActive &&
+                horizontalPulseExperiment == HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ||
+                ready && flying && !anotherFlightControlActive()
+        mathematicalSkatingCircleButton.available =
+            (mathematicalCircleActive && mathematicalCircleMode == MathematicalCircleMode.SKATING) ||
+                (!mathematicalCircleActive && ready && flying && !anotherFlightControlActive())
+        mathematicalRacingCircleButton.available =
+            (mathematicalCircleActive && mathematicalCircleMode == MathematicalCircleMode.RACING) ||
+                (!mathematicalCircleActive && ready && flying && !anotherFlightControlActive())
         cameraDownButton.available = ready && !cameraPitchCommandPending
         val tapeTrackingCanStart =
             ready && flying && !turning && !quarterArcActive && !holdingHeight &&
-                !hardwareLatencyActive && !feedbackCircleActive
+                !hardwareLatencyActive && !mathematicalCircleActive
         tapeTrackingButton.available =
             (tapeTracking.enabled && activeTapeTrackingMode == TapeTrackingMode.STRAIGHT) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
@@ -2089,14 +2232,6 @@ class MainActivity : Activity() {
                     activeCircularYawControlMode == CircularYawControlMode.HEADING
                 ) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
-        fixedHeadingZeroPhaseLeadButton.available =
-            (
-                tapeTracking.enabled &&
-                    activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
-                    activeFixedHeadingActuationPhaseLead ==
-                    FixedHeadingActuationPhaseLead.DEGREES_0
-                ) ||
-                (!tapeTracking.enabled && tapeTrackingCanStart)
         fixedHeadingFourteenPhaseLeadButton.available =
             (
                 tapeTracking.enabled &&
@@ -2111,6 +2246,22 @@ class MainActivity : Activity() {
                     activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
                     activeFixedHeadingActuationPhaseLead ==
                     FixedHeadingActuationPhaseLead.DEGREES_16
+                ) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        fixedHeadingCurvatureFeedforwardButton.available =
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+                    activeFixedHeadingActuationPhaseLead ==
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16
+                ) ||
+                (!tapeTracking.enabled && tapeTrackingCanStart)
+        fixedHeadingFastCruiseButton.available =
+            (
+                tapeTracking.enabled &&
+                    activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+                    activeFixedHeadingActuationPhaseLead ==
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST
                 ) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         curvedOutAndBackTrackingButton.available =
@@ -2729,12 +2880,12 @@ class MainActivity : Activity() {
         }
         if (hardwareLatencyPulseSequence != null) {
             hardwareLatencyRuntimeFailure(System.nanoTime())?.let { reason ->
-                stopHardwareLatencyTest("硬體延遲脈衝安全停止：$reason")
+                stopHardwareLatencyTest("${activeHorizontalPulseName()}安全停止：$reason")
             }
         }
-        if (feedbackCircleController != null) {
-            feedbackCircleRuntimeFailure(System.nanoTime())?.let { reason ->
-                stopFeedbackCircle("回授圓周安全停止：$reason")
+        if (mathematicalCircleController != null) {
+            mathematicalCircleRuntimeFailure(System.nanoTime())?.let { reason ->
+                stopMathematicalCircle("數學圓周安全停止：$reason")
             }
         }
         if (changed || trigger == "BRAKE read-back") {
@@ -2874,58 +3025,116 @@ class MainActivity : Activity() {
     private fun anotherFlightControlActive(): Boolean =
         headingTurn != null || quarterArcController != null || holdingHeight || tapeTracking.enabled ||
             tapeTrackingStartPending || hardwareLatencyStartPending ||
-            hardwareLatencyPulseSequence != null || feedbackCircleStartPending ||
-            feedbackCircleController != null || leftStickActive || rightStickActive
+            hardwareLatencyPulseSequence != null || mathematicalCircleStartPending ||
+            mathematicalCircleController != null || leftStickActive || rightStickActive
 
     /**
-     * First press arms the complete pulse sequence; a second press is the safety
-     * switch and immediately writes a neutral horizontal command before release.
+     * All horizontal experiments share one authority/safety pipeline. A directional
+     * measurement executes exactly one pulse; the operator must manually recenter
+     * before pressing again for the next direction.
      */
     private fun toggleHardwareLatencyTest() {
+        toggleHorizontalPulseExperiment(HorizontalPulseExperiment.HARDWARE_LATENCY)
+    }
+
+    private fun toggleDirectionalVelocityPulseTest() {
+        toggleHorizontalPulseExperiment(HorizontalPulseExperiment.DIRECTIONAL_VELOCITY)
+    }
+
+    private fun toggleFixedDirectionSpeedTest() {
+        toggleHorizontalPulseExperiment(HorizontalPulseExperiment.FIXED_DIRECTION_SPEED)
+    }
+
+    private fun toggleHorizontalPulseExperiment(requested: HorizontalPulseExperiment) {
         if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
-            stopHardwareLatencyTest("操作者停止硬體延遲脈衝")
+            if (horizontalPulseExperiment == requested) {
+                stopHardwareLatencyTest("操作者停止${horizontalPulseName(requested)}")
+            } else {
+                render("${activeHorizontalPulseName()}正在使用控制權")
+            }
             return
         }
+        startHorizontalPulseExperiment(requested)
+    }
+
+    private fun startHorizontalPulseExperiment(experiment: HorizontalPulseExperiment) {
         hardwareLatencyStartFailure()?.let { reason ->
-            flightLog.write("hardware latency test refused: $reason")
+            flightLog.write("horizontal pulse refused: $reason")
             render(reason)
             return
         }
 
+        horizontalPulseExperiment = experiment
         hardwareLatencyStartPending = true
         hardwareLatencyArmedAtNanos = System.nanoTime()
-        hardwareLatencyButton.text = "停止硬體延遲脈衝"
+        when (experiment) {
+            HorizontalPulseExperiment.HARDWARE_LATENCY ->
+                hardwareLatencyButton.text = "停止硬體延遲脈衝"
+            HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                directionalVelocityPulseButton.text = "停止四方向階躍"
+            HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                fixedDirectionSpeedButton.text = "停止漸進速度實驗"
+        }
         setHardwareLatencyMarker(white = false)
-        render("正在取得控制權；取得後先懸停 3 秒，再執行 10 組前後脈衝…")
+        val experimentName = horizontalPulseName(experiment)
+        render(
+            when (experiment) {
+                HorizontalPulseExperiment.HARDWARE_LATENCY ->
+                    "正在取得控制權；取得後先懸停 3 秒，再執行 10 組前後脈衝…"
+                HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                    "正在取得控制權；取得後懸停 2 秒，再向" +
+                        "${nextDirectionalPulseDirection.displayName}脈衝 0.5 秒…"
+                HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                    "正在取得控制權；取得後懸停 3 秒，再用 1 秒漸進至 1.60 m/s…"
+            },
+        )
         acquireControlLink(
             onFailure = { reason ->
                 hardwareLatencyStartPending = false
-                hardwareLatencyButton.text = "硬體延遲脈衝・0.50 m/s"
-                render("硬體延遲脈衝未啟動：$reason")
+                horizontalPulseExperiment = null
+                resetHorizontalPulseButtonLabels()
+                render("$experimentName 未啟動：$reason")
             },
             shouldContinue = { hardwareLatencyStartPending },
         ) {
             if (!hardwareLatencyStartPending) {
                 if (stickOwned && !activityDestroying) {
                     releaseControlLink { error ->
-                        render(error?.let { "已取消脈衝，但釋放控制權失敗：$it" } ?: "硬體延遲脈衝已取消")
+                        render(error?.let { "已取消脈衝，但釋放控制權失敗：$it" } ?: "速度脈衝已取消")
                     }
                 }
                 return@acquireControlLink
             }
             hardwareLatencyStartPending = false
             hardwareLatencyStartFailure()?.let { reason ->
-                flightLog.write("hardware latency test aborted after acquire: $reason")
+                flightLog.write("horizontal pulse aborted after acquire: $reason")
+                horizontalPulseExperiment = null
+                resetHorizontalPulseButtonLabels()
                 releaseControlLink { error ->
                     render(
-                        error?.let { "硬體延遲脈衝未啟動：$reason（釋放控制權失敗：$it）" }
-                            ?: "硬體延遲脈衝未啟動：$reason",
+                        error?.let { "$experimentName 未啟動：$reason（釋放控制權失敗：$it）" }
+                            ?: "$experimentName 未啟動：$reason",
                     )
                 }
                 return@acquireControlLink
             }
 
-            hardwareLatencyPulseSequence = HardwareLatencyPulseSequence()
+            hardwareLatencyPulseSequence =
+                when (experiment) {
+                    HorizontalPulseExperiment.HARDWARE_LATENCY -> HardwareLatencyPulseSequence()
+                    HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                        DirectionalVelocityPulseSequence(nextDirectionalPulseDirection)
+                    HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                        FixedDirectionSpeedSequence(
+                            direction = DirectionalVelocityPulseDirection.FORWARD,
+                            speedMetersPerSecond = FIXED_DIRECTION_SPEED_METERS_PER_SECOND,
+                            baselineNanos = FIXED_DIRECTION_SPEED_BASELINE_NANOS,
+                            rampUpNanos = FIXED_DIRECTION_SPEED_RAMP_UP_NANOS,
+                            holdNanos = FIXED_DIRECTION_SPEED_HOLD_NANOS,
+                            rampDownNanos = FIXED_DIRECTION_SPEED_RAMP_DOWN_NANOS,
+                            settleNanos = FIXED_DIRECTION_SPEED_SETTLE_NANOS,
+                        )
+                }
             hardwareLatencySyncMarker.visibility = View.VISIBLE
             hardwareLatencyAuthoritySeen = false
             hardwareLatencyArmedAtNanos = System.nanoTime()
@@ -2933,38 +3142,104 @@ class MainActivity : Activity() {
             virtualStick.setHorizontalVelocity(0.0, 0.0)
             virtualStick.setClimbRate(0.0)
             virtualStick.setYawRate(0.0)
+            val direction =
+                when (experiment) {
+                    HorizontalPulseExperiment.HARDWARE_LATENCY -> null
+                    HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                        nextDirectionalPulseDirection.displayName
+                    HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                        DirectionalVelocityPulseDirection.FORWARD.displayName
+                }
+            val speed =
+                when (experiment) {
+                    HorizontalPulseExperiment.HARDWARE_LATENCY ->
+                        HardwareLatencyPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND
+                    HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                        DirectionalVelocityPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND
+                    HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                        FIXED_DIRECTION_SPEED_METERS_PER_SECOND
+                }
+            val pulseNanos =
+                when (experiment) {
+                    HorizontalPulseExperiment.HARDWARE_LATENCY ->
+                        HardwareLatencyPulseSequence.DEFAULT_PULSE_NANOS
+                    HorizontalPulseExperiment.DIRECTIONAL_VELOCITY ->
+                        DirectionalVelocityPulseSequence.DEFAULT_PULSE_NANOS
+                    HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                        FIXED_DIRECTION_SPEED_HOLD_NANOS
+                }
             flightProfiler.record(
-                event = "latency_test_armed",
+                event = horizontalPulseEventName(experiment, "armed"),
                 atNanos = hardwareLatencyArmedAtNanos,
                 details = profileDetails(
-                    "cycles" to HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT,
-                    "speed" to HardwareLatencyPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND,
-                    "pulseMs" to HardwareLatencyPulseSequence.DEFAULT_PULSE_NANOS / 1_000_000L,
-                    "settleMs" to HardwareLatencyPulseSequence.DEFAULT_SETTLE_NANOS / 1_000_000L,
+                    "direction" to direction,
+                    "cycles" to
+                        HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT.takeIf {
+                            experiment == HorizontalPulseExperiment.HARDWARE_LATENCY
+                        },
+                    "speed" to speed,
+                    "pulseMs" to pulseNanos / 1_000_000L,
+                    "rampUpMs" to
+                        FIXED_DIRECTION_SPEED_RAMP_UP_NANOS
+                            .takeIf { experiment == HorizontalPulseExperiment.FIXED_DIRECTION_SPEED }
+                            ?.div(1_000_000L),
+                    "rampDownMs" to
+                        FIXED_DIRECTION_SPEED_RAMP_DOWN_NANOS
+                            .takeIf { experiment == HorizontalPulseExperiment.FIXED_DIRECTION_SPEED }
+                            ?.div(1_000_000L),
                 ),
             )
-            flightLog.write(
-                "hardware latency test armed cycles=${HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT} " +
-                    "speed=${HardwareLatencyPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND}",
-            )
+            flightLog.write("$experimentName armed direction=$direction speed=$speed")
             render("等待 MSDK 控制權；期間只送零速度…")
             mainHandler.post(hardwareLatencyTickRunnable)
+        }
+    }
+
+    private fun horizontalPulseName(experiment: HorizontalPulseExperiment): String =
+        when (experiment) {
+            HorizontalPulseExperiment.HARDWARE_LATENCY -> "硬體延遲脈衝"
+            HorizontalPulseExperiment.DIRECTIONAL_VELOCITY -> "四方向階躍"
+            HorizontalPulseExperiment.FIXED_DIRECTION_SPEED -> "定向速度實驗"
+        }
+
+    private fun activeHorizontalPulseName(): String =
+        horizontalPulseExperiment?.let(::horizontalPulseName) ?: "速度實驗"
+
+    private fun horizontalPulseEventName(
+        experiment: HorizontalPulseExperiment,
+        suffix: String,
+    ): String =
+        when (experiment) {
+            HorizontalPulseExperiment.HARDWARE_LATENCY -> "latency_test_$suffix"
+            HorizontalPulseExperiment.DIRECTIONAL_VELOCITY -> "directional_velocity_test_$suffix"
+            HorizontalPulseExperiment.FIXED_DIRECTION_SPEED -> "fixed_direction_speed_test_$suffix"
+        }
+
+    private fun resetHorizontalPulseButtonLabels() {
+        if (::hardwareLatencyButton.isInitialized) {
+            hardwareLatencyButton.text = "硬體延遲脈衝・0.50 m/s"
+        }
+        if (::directionalVelocityPulseButton.isInitialized) {
+            directionalVelocityPulseButton.text = directionalVelocityPulseLabel()
+        }
+        if (::fixedDirectionSpeedButton.isInitialized) {
+            fixedDirectionSpeedButton.text = fixedDirectionSpeedLabel()
         }
     }
 
     private fun hardwareLatencyStartFailure(nowNanos: Long = System.nanoTime()): String? {
         if (anotherFlightControlActive()) return "請先停止其他飛行控制"
         if (!registered || !aircraftConnected || !flying) {
-            return "飛機未在空中，無法執行硬體延遲脈衝"
+            return "飛機未在空中，無法執行速度脈衝"
         }
         if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
-            return "電量狀態危急，不執行硬體延遲脈衝"
+            return "電量狀態危急，不執行速度脈衝"
         }
         if (!avoidance.brakeConfirmed) {
-            return avoidance.warning ?: "BRAKE 尚未確認，硬體延遲脈衝不啟動"
+            return avoidance.warning ?: "BRAKE 尚未確認，速度脈衝不啟動"
         }
         val height = usableHeightMeters()
-            ?: return "沒有高度資料，硬體延遲脈衝不啟動"
+            ?: return "沒有高度資料，速度脈衝不啟動"
         if (height !in HARDWARE_LATENCY_START_HEIGHT_RANGE_METERS) {
             return "請先將高度調整至 0.5–1.0 m（目前 %.2f m）".format(height)
         }
@@ -2990,16 +3265,19 @@ class MainActivity : Activity() {
             val sequence = hardwareLatencyPulseSequence ?: return
             val nowNanos = System.nanoTime()
             hardwareLatencyRuntimeFailure(nowNanos)?.let { reason ->
-                stopHardwareLatencyTest("硬體延遲脈衝安全停止：$reason")
+                stopHardwareLatencyTest("${activeHorizontalPulseName()}安全停止：$reason")
                 return
             }
             if (stickStatus.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER) {
                 if (hardwareLatencyAuthoritySeen) {
-                    stopHardwareLatencyTest("實體遙控器已接管，硬體延遲脈衝已停止", release = false)
+                    stopHardwareLatencyTest(
+                        "實體遙控器已接管，${activeHorizontalPulseName()}已停止",
+                        release = false,
+                    )
                     return
                 }
                 if (nowNanos - hardwareLatencyArmedAtNanos > AUTHORITY_HANDOVER_TIMEOUT_NANOS) {
-                    stopHardwareLatencyTest("等待 MSDK 控制權逾時，硬體延遲脈衝未啟動")
+                    stopHardwareLatencyTest("等待 MSDK 控制權逾時，${activeHorizontalPulseName()}未啟動")
                     return
                 }
                 mainHandler.postDelayed(this, HARDWARE_LATENCY_TICK_MS)
@@ -3014,50 +3292,107 @@ class MainActivity : Activity() {
                 sequence.advance(nowNanos)
             }
             if (step != null) {
-                if (step.phase == HardwareLatencyPulsePhase.COMPLETE) {
-                    stopHardwareLatencyTest(
-                        "硬體延遲脈衝完成 ${HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT} 組；" +
-                            "已歸零並交回遙控器",
-                        completed = true,
-                    )
+                if (step.complete) {
+                    val experiment = checkNotNull(horizontalPulseExperiment)
+                    val message =
+                        when (experiment) {
+                            HorizontalPulseExperiment.HARDWARE_LATENCY ->
+                                "硬體延遲脈衝完成 " +
+                                    "${HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT} 組；" +
+                                    "已歸零並交回遙控器"
+                            HorizontalPulseExperiment.DIRECTIONAL_VELOCITY -> {
+                                val completedDirection = nextDirectionalPulseDirection
+                                val followingDirection = completedDirection.next()
+                                "${completedDirection.displayName}方向階躍完成；已歸零，" +
+                                    "請手動回中央，再按按鈕測${followingDirection.displayName}方向"
+                            }
+                            HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
+                                "定向速度實驗完成；已歸零並交回遙控器"
+                        }
+                    stopHardwareLatencyTest(message, completed = true)
                     return
                 }
-                applyHardwareLatencyStep(step)
+                applyHorizontalPulseStep(step)
             }
             mainHandler.postDelayed(this, HARDWARE_LATENCY_TICK_MS)
         }
     }
 
-    private fun applyHardwareLatencyStep(step: HardwareLatencyPulseStep) {
+    private fun applyHorizontalPulseStep(step: HorizontalPulseStep) {
         val requestedAtNanos = System.nanoTime()
         setHardwareLatencyMarker(step.markerWhite)
-        virtualStick.setHorizontalVelocity(step.forwardMetersPerSecond, 0.0)
+        virtualStick.setHorizontalVelocity(
+            step.forwardMetersPerSecond,
+            step.rightMetersPerSecond,
+        )
+        val hardwareStep = step as? HardwareLatencyPulseStep
+        val directionalStep = step as? DirectionalVelocityPulseStep
+        val fixedDirectionStep = step as? FixedDirectionSpeedStep
+        val experiment = checkNotNull(horizontalPulseExperiment)
+        val event = horizontalPulseEventName(experiment, "command")
         flightProfiler.record(
-            event = "latency_test_command",
+            event = event,
             atNanos = requestedAtNanos,
             details = profileDetails(
-                "cycle" to step.cycle,
-                "phase" to step.phase,
+                "cycle" to hardwareStep?.cycle,
+                "phase" to step.phaseName,
+                "direction" to
+                    (directionalStep?.direction ?: fixedDirectionStep?.direction)?.displayName,
                 "forward" to step.forwardMetersPerSecond,
+                "right" to step.rightMetersPerSecond,
+                "groundSpeed" to groundSpeedMetersPerSecond,
+                "velocityX" to aircraftVelocityX,
+                "velocityY" to aircraftVelocityY,
+                "heading" to aircraftHeadingDegrees,
                 "marker" to if (step.markerWhite) "white" else "black",
             ),
         )
         flightLog.write(
-            "hardware latency command cycle=${step.cycle} phase=${step.phase} " +
-                "forward=${step.forwardMetersPerSecond} marker=${if (step.markerWhite) "white" else "black"}",
+            "$event phase=${step.phaseName} direction=" +
+                "${(directionalStep?.direction ?: fixedDirectionStep?.direction)?.displayName} " +
+                "forward=${step.forwardMetersPerSecond} right=${step.rightMetersPerSecond}",
         )
-        holdStatus = when (step.phase) {
-            HardwareLatencyPulsePhase.BASELINE -> "硬體延遲脈衝：懸停基線 3 秒"
-            HardwareLatencyPulsePhase.FORWARD ->
-                "硬體延遲脈衝 ${step.cycle}/10：前進 0.50 m/s"
-            HardwareLatencyPulsePhase.SETTLE_AFTER_FORWARD ->
-                "硬體延遲脈衝 ${step.cycle}/10：歸零 2 秒"
-            HardwareLatencyPulsePhase.BACKWARD ->
-                "硬體延遲脈衝 ${step.cycle}/10：後退 0.50 m/s"
-            HardwareLatencyPulsePhase.SETTLE_AFTER_BACKWARD ->
-                "硬體延遲脈衝 ${step.cycle}/10：歸零 2 秒"
-            HardwareLatencyPulsePhase.COMPLETE -> error("complete step is handled before application")
-        }
+        holdStatus =
+            when (step) {
+                is HardwareLatencyPulseStep -> when (step.phase) {
+                    HardwareLatencyPulsePhase.BASELINE -> "硬體延遲脈衝：懸停基線 3 秒"
+                    HardwareLatencyPulsePhase.FORWARD ->
+                        "硬體延遲脈衝 ${step.cycle}/10：前進 0.50 m/s"
+                    HardwareLatencyPulsePhase.SETTLE_AFTER_FORWARD ->
+                        "硬體延遲脈衝 ${step.cycle}/10：歸零 2 秒"
+                    HardwareLatencyPulsePhase.BACKWARD ->
+                        "硬體延遲脈衝 ${step.cycle}/10：後退 0.50 m/s"
+                    HardwareLatencyPulsePhase.SETTLE_AFTER_BACKWARD ->
+                        "硬體延遲脈衝 ${step.cycle}/10：歸零 2 秒"
+                    HardwareLatencyPulsePhase.COMPLETE ->
+                        error("complete step is handled before application")
+                }
+                is DirectionalVelocityPulseStep -> when (step.phase) {
+                    DirectionalVelocityPulsePhase.BASELINE ->
+                        "四方向階躍・${step.direction.displayName}：懸停基線 2 秒"
+                    DirectionalVelocityPulsePhase.PULSE ->
+                        "四方向階躍・${step.direction.displayName}：0.80 m/s，持續 0.5 秒"
+                    DirectionalVelocityPulsePhase.SETTLE ->
+                        "四方向階躍・${step.direction.displayName}：速度歸零 2 秒"
+                    DirectionalVelocityPulsePhase.COMPLETE ->
+                        error("complete step is handled before application")
+                }
+                is FixedDirectionSpeedStep -> when (step.phase) {
+                    FixedDirectionSpeedPhase.BASELINE ->
+                        "定向速度實驗：懸停基線 3 秒"
+                    FixedDirectionSpeedPhase.RAMP_UP ->
+                        "定向速度實驗：漸進加速 %.2f m/s".format(step.forwardMetersPerSecond)
+                    FixedDirectionSpeedPhase.HOLD ->
+                        "定向速度實驗：維持向前 1.60 m/s，持續 2 秒"
+                    FixedDirectionSpeedPhase.RAMP_DOWN ->
+                        "定向速度實驗：漸進減速 %.2f m/s".format(step.forwardMetersPerSecond)
+                    FixedDirectionSpeedPhase.SETTLE ->
+                        "定向速度實驗：速度歸零 2 秒"
+                    FixedDirectionSpeedPhase.COMPLETE ->
+                        error("complete step is handled before application")
+                }
+                else -> error("unsupported horizontal pulse step ${step::class.java.name}")
+            }
         render(holdStatus)
     }
 
@@ -3067,6 +3402,10 @@ class MainActivity : Activity() {
         completed: Boolean = false,
     ) {
         val wasActive = hardwareLatencyStartPending || hardwareLatencyPulseSequence != null
+        val experiment = horizontalPulseExperiment
+        if (completed && experiment == HorizontalPulseExperiment.DIRECTIONAL_VELOCITY) {
+            nextDirectionalPulseDirection = nextDirectionalPulseDirection.next()
+        }
         hardwareLatencyStartPending = false
         hardwareLatencyPulseSequence = null
         hardwareLatencyAuthoritySeen = false
@@ -3076,14 +3415,14 @@ class MainActivity : Activity() {
         if (::hardwareLatencySyncMarker.isInitialized) {
             hardwareLatencySyncMarker.visibility = View.GONE
         }
-        if (::hardwareLatencyButton.isInitialized) {
-            hardwareLatencyButton.text = "硬體延遲脈衝・0.50 m/s"
-        }
+        horizontalPulseExperiment = null
+        resetHorizontalPulseButtonLabels()
         if (!wasActive) return
 
+        val completedExperiment = checkNotNull(experiment)
         val nowNanos = System.nanoTime()
         flightProfiler.record(
-            event = "latency_test_stop",
+            event = horizontalPulseEventName(completedExperiment, "stop"),
             atNanos = nowNanos,
             details = profileDetails(
                 "completed" to completed,
@@ -3094,7 +3433,9 @@ class MainActivity : Activity() {
                 "reason" to message,
             ),
         )
-        flightLog.write("hardware latency test stop completed=$completed reason=$message")
+        flightLog.write(
+            "${horizontalPulseName(completedExperiment)} stop completed=$completed reason=$message",
+        )
         hardwareLatencyStartedAtNanos = 0L
         hardwareLatencyArmedAtNanos = 0L
         holdStatus = message
@@ -3108,100 +3449,54 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun feedbackCircleLabel(mode: FeedbackCircleMode): String =
-        "回授圓・${mode.displayName} Ø2.0m・7.5秒×3"
+    private fun mathematicalCircleLabel(mode: MathematicalCircleMode): String =
+        "數學圓・${mode.displayName} Ø${MathematicalCircleController.DIAMETER_METERS}m・" +
+            "${mode.secondsPerLap}秒×${MathematicalCircleController.LAP_COUNT}"
 
-    private fun requestFeedbackCircleVelocity(
-        generation: Long,
-        whenReady: (() -> Unit)? = null,
-        whenFailed: ((String) -> Unit)? = null,
-    ) {
-        if (generation != feedbackCircleVelocityReadGeneration) return
-        val requestedAtNanos = System.nanoTime()
-        if (!feedbackVelocityReadState.beginRequest(requestedAtNanos)) return
 
-        KeyManager.getInstance().getValue(
-            aircraftVelocityKey,
-            object : CommonCallbacks.CompletionCallbackWithParam<Velocity3D> {
-                override fun onSuccess(velocity: Velocity3D) {
-                    if (generation != feedbackCircleVelocityReadGeneration) return
-                    val receivedAtNanos = System.nanoTime()
-                    if (!publishAircraftVelocity(velocity, receivedAtNanos)) {
-                        feedbackVelocityReadState.recordFailure()
-                        runOnUiThread {
-                            if (generation == feedbackCircleVelocityReadGeneration) {
-                                whenFailed?.invoke("飛控回傳無效的水平速度")
-                            }
-                        }
-                        return
-                    }
-                    feedbackVelocityReadState.recordSuccess(receivedAtNanos)
-                    runOnUiThread {
-                        if (
-                            generation == feedbackCircleVelocityReadGeneration &&
-                            !activityDestroying
-                        ) {
-                            whenReady?.invoke()
-                        }
-                    }
-                }
-
-                override fun onFailure(error: IDJIError) {
-                    if (generation != feedbackCircleVelocityReadGeneration) return
-                    feedbackVelocityReadState.recordFailure()
-                    runOnUiThread {
-                        if (generation == feedbackCircleVelocityReadGeneration) {
-                            whenFailed?.invoke(error.toString())
-                        }
-                    }
-                }
-            },
-        )
-    }
-
-    private fun armFeedbackCircle(mode: FeedbackCircleMode) {
-        if (!feedbackCircleStartPending) return
-        feedbackCircleRuntimeFailure()?.let { reason ->
-            flightLog.write("feedback circle aborted before arm mode=$mode reason=$reason")
-            stopFeedbackCircle("回授圓周未啟動：$reason")
+    private fun armMathematicalCircle(mode: MathematicalCircleMode) {
+        if (!mathematicalCircleStartPending) return
+        mathematicalCircleRuntimeFailure()?.let { reason ->
+            flightLog.write("mathematical circle aborted before arm mode=$mode reason=$reason")
+            stopMathematicalCircle("數學圓周未啟動：$reason")
             return
         }
         val initialHeading = checkNotNull(aircraftHeadingDegrees)
-        val controller = FeedbackCircleController()
-        feedbackCircleInitialHeadingDegrees = initialHeading
-        feedbackCircleAuthoritySeen = false
-        feedbackCircleArmedAtNanos = System.nanoTime()
-        feedbackCircleStartedAtNanos = 0L
-        feedbackCircleLastLap = 0
-        feedbackCircleLastRenderedAtNanos = 0L
-        feedbackCircleLastTickAtNanos = 0L
+        val controller = MathematicalCircleController(secondsPerLap = mode.secondsPerLap)
+        mathematicalCircleInitialHeadingDegrees = initialHeading
+        mathematicalCircleAuthoritySeen = false
+        mathematicalCircleArmedAtNanos = System.nanoTime()
+        mathematicalCircleStartedAtNanos = 0L
+        mathematicalCircleLastLap = 0
+        mathematicalCircleLastRenderedAtNanos = 0L
+        mathematicalCircleLastTickAtNanos = 0L
         virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setClimbRate(0.0)
         virtualStick.setYawRate(0.0)
-        feedbackCircleStartPending = false
-        feedbackCircleController = controller
+        mathematicalCircleStartPending = false
+        mathematicalCircleController = controller
         flightProfiler.record(
-            event = "feedback_circle_armed",
-            atNanos = feedbackCircleArmedAtNanos,
+            event = "mathematical_circle_armed",
+            atNanos = mathematicalCircleArmedAtNanos,
             details =
                 profileDetails(
                     "mode" to mode,
-                    "diameterMeters" to FeedbackCircleController.DIAMETER_METERS,
-                    "secondsPerLap" to FeedbackCircleController.SECONDS_PER_LAP,
-                    "laps" to FeedbackCircleController.LAP_COUNT,
+                    "diameterMeters" to MathematicalCircleController.DIAMETER_METERS,
+                    "secondsPerLap" to controller.secondsPerLap,
+                    "laps" to MathematicalCircleController.LAP_COUNT,
                     "speed" to controller.tangentialSpeedMetersPerSecond,
                     "angularRateDegreesPerSecond" to controller.angularRateDegreesPerSecond,
                     "heading" to initialHeading,
-                    "positionSource" to "activelySampledAircraftVelocity",
+                    "positionSource" to "elapsedTimeSchedule",
                     "visionUsed" to false,
                 ),
         )
         flightLog.write(
-            feedbackCircleArmedLogMessage(
+            mathematicalCircleArmedLogMessage(
                 mode = mode.toString(),
-                diameterMeters = FeedbackCircleController.DIAMETER_METERS,
-                secondsPerLap = FeedbackCircleController.SECONDS_PER_LAP,
-                laps = FeedbackCircleController.LAP_COUNT,
+                diameterMeters = MathematicalCircleController.DIAMETER_METERS,
+                secondsPerLap = controller.secondsPerLap,
+                laps = MathematicalCircleController.LAP_COUNT,
                 speedMetersPerSecond = controller.tangentialSpeedMetersPerSecond,
                 angularRateDegreesPerSecond = controller.angularRateDegreesPerSecond,
                 headingDegrees = initialHeading,
@@ -3211,26 +3506,24 @@ class MainActivity : Activity() {
         render(holdStatus)
     }
 
-    private fun toggleFeedbackCircle(mode: FeedbackCircleMode) {
-        if (feedbackCircleStartPending || feedbackCircleController != null) {
-            stopFeedbackCircle("操作者停止回授圓周")
+    private fun toggleMathematicalCircle(mode: MathematicalCircleMode) {
+        if (mathematicalCircleStartPending || mathematicalCircleController != null) {
+            stopMathematicalCircle("操作者停止數學圓周")
             return
         }
-        feedbackCircleStartFailure()?.let { reason ->
-            flightLog.write("feedback circle refused mode=$mode reason=$reason")
+        mathematicalCircleStartFailure()?.let { reason ->
+            flightLog.write("mathematical circle refused mode=$mode reason=$reason")
             render(reason)
             return
         }
 
-        feedbackCircleMode = mode
-        feedbackCircleStartPending = true
-        feedbackCircleVelocityReadGeneration += 1L
-        feedbackVelocityReadState.reset()
-        val stopLabel = "停止回授圓・${mode.displayName}"
-        if (mode == FeedbackCircleMode.SKATING) {
-            feedbackSkatingCircleButton.text = stopLabel
+        mathematicalCircleMode = mode
+        mathematicalCircleStartPending = true
+        val stopLabel = "停止數學圓・${mode.displayName}"
+        if (mode == MathematicalCircleMode.SKATING) {
+            mathematicalSkatingCircleButton.text = stopLabel
         } else {
-            feedbackRacingCircleButton.text = stopLabel
+            mathematicalRacingCircleButton.text = stopLabel
         }
         render("正在關閉飛機避障；請讓機頭朝向起點切線，圓心位於機身左側…")
         avoidanceCheck.ensureClosed { status ->
@@ -3241,18 +3534,18 @@ class MainActivity : Activity() {
             runOnUiThread {
                 avoidance = status
                 flightLog.write(
-                    "feedback circle avoidance mode=$mode ${status.summary} detail=${status.detail}",
+                    "mathematical circle avoidance mode=$mode ${status.summary} detail=${status.detail}",
                 )
-                if (!feedbackCircleStartPending) {
+                if (!mathematicalCircleStartPending) {
                     if (status.closedConfirmed) avoidanceCheck.ensureBrake {}
                     return@runOnUiThread
                 }
                 if (!status.closedConfirmed) {
-                    feedbackCircleStartPending = false
-                    resetFeedbackCircleButtonLabels()
+                    mathematicalCircleStartPending = false
+                    resetMathematicalCircleButtonLabels()
                     render(
-                        status.detail?.let { "回授圓周未啟動：無法關閉避障：$it" }
-                            ?: "回授圓周未啟動：無法確認飛機避障已關閉",
+                        status.detail?.let { "數學圓周未啟動：無法關閉避障：$it" }
+                            ?: "數學圓周未啟動：無法確認飛機避障已關閉",
                     )
                     readAvoidanceConfiguration()
                     return@runOnUiThread
@@ -3260,70 +3553,60 @@ class MainActivity : Activity() {
                 render("飛機避障已關閉；正在取得控制權…")
                 acquireControlLink(
                     onFailure = { reason ->
-                        stopFeedbackCircle("回授圓周未啟動：$reason")
+                        stopMathematicalCircle("數學圓周未啟動：$reason")
                     },
-                    shouldContinue = { feedbackCircleStartPending },
+                    shouldContinue = { mathematicalCircleStartPending },
                 ) {
-                    if (!feedbackCircleStartPending) {
+                    if (!mathematicalCircleStartPending) {
                         if (stickOwned && !activityDestroying) {
                             releaseControlLink { error ->
                                 render(
-                                    error?.let { "已取消回授圓周，但釋放控制權失敗：$it" }
-                                        ?: "回授圓周已取消",
+                                    error?.let { "已取消數學圓周，但釋放控制權失敗：$it" }
+                                        ?: "數學圓周已取消",
                                 )
                             }
                         }
                         return@acquireControlLink
                     }
-                    feedbackCircleRuntimeFailure()?.let { reason ->
+                    mathematicalCircleRuntimeFailure()?.let { reason ->
                         flightLog.write(
-                            "feedback circle aborted after acquire mode=$mode reason=$reason",
+                            "mathematical circle aborted after acquire mode=$mode reason=$reason",
                         )
-                        stopFeedbackCircle("回授圓周未啟動：$reason")
+                        stopMathematicalCircle("數學圓周未啟動：$reason")
                         return@acquireControlLink
                     }
-                    val generation = feedbackCircleVelocityReadGeneration
-                    render("控制權已取得；正在主動讀取飛控水平速度…")
-                    requestFeedbackCircleVelocity(
-                        generation = generation,
-                        whenReady = { armFeedbackCircle(mode) },
-                        whenFailed = { error ->
-                            flightLog.write(
-                                "feedback circle active velocity read failed mode=$mode error=$error",
-                            )
-                            stopFeedbackCircle("回授圓周未啟動：無法讀取飛控水平速度：$error")
-                        },
-                    )
+                    render("控制權已取得；準備純數學圓周排程…")
+                    armMathematicalCircle(mode)
                 }
             }
         }
     }
 
-    private fun resetFeedbackCircleButtonLabels() {
-        if (::feedbackSkatingCircleButton.isInitialized) {
-            feedbackSkatingCircleButton.text = feedbackCircleLabel(FeedbackCircleMode.SKATING)
+    private fun resetMathematicalCircleButtonLabels() {
+        if (::mathematicalSkatingCircleButton.isInitialized) {
+            mathematicalSkatingCircleButton.text = mathematicalCircleLabel(MathematicalCircleMode.SKATING)
         }
-        if (::feedbackRacingCircleButton.isInitialized) {
-            feedbackRacingCircleButton.text = feedbackCircleLabel(FeedbackCircleMode.RACING)
+        if (::mathematicalRacingCircleButton.isInitialized) {
+            mathematicalRacingCircleButton.text = mathematicalCircleLabel(MathematicalCircleMode.RACING)
         }
     }
 
-    private fun feedbackCircleStartFailure(nowNanos: Long = System.nanoTime()): String? {
+    private fun mathematicalCircleStartFailure(nowNanos: Long = System.nanoTime()): String? {
         if (anotherFlightControlActive()) return "請先停止其他飛行控制"
         if (!registered || !aircraftConnected || !flying) {
-            return "飛機未在空中，無法執行回授圓周"
+            return "飛機未在空中，無法執行數學圓周"
         }
         if (virtualStick.frameRate() != VirtualStickFrameRate.EXPERIMENT_40) {
-            return "請先將 Virtual Stick 切換為 40 Hz，再啟動回授圓周"
+            return "請先將 Virtual Stick 切換為 40 Hz，再啟動數學圓周"
         }
         if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
-            return "電量狀態危急，不執行回授圓周"
+            return "電量狀態危急，不執行數學圓周"
         }
         if (!avoidance.brakeConfirmed) {
-            return avoidance.warning ?: "BRAKE 尚未確認，回授圓周不啟動"
+            return avoidance.warning ?: "BRAKE 尚未確認，數學圓周不啟動"
         }
-        val height = usableHeightMeters() ?: return "沒有高度資料，回授圓周不啟動"
-        if (height !in FEEDBACK_CIRCLE_START_HEIGHT_RANGE_METERS) {
+        val height = usableHeightMeters() ?: return "沒有高度資料，數學圓周不啟動"
+        if (height !in MATHEMATICAL_CIRCLE_START_HEIGHT_RANGE_METERS) {
             return "請先將高度調整至 0.5–1.0 m（目前 %.2f m）".format(height)
         }
         if (
@@ -3331,14 +3614,14 @@ class MainActivity : Activity() {
             aircraftHeadingAtNanos == 0L ||
             nowNanos - aircraftHeadingAtNanos > MAX_MOVING_HEADING_AGE_NANOS
         ) {
-            return "沒有即時機頭方向，回授圓周不啟動"
+            return "沒有即時機頭方向，數學圓周不啟動"
         }
         horizontalActuationStopReason(nowNanos)?.let { return it }
-        feedbackCircleObstacleFailure(nowNanos)?.let { return it }
+        mathematicalCircleObstacleFailure(nowNanos)?.let { return it }
         return null
     }
 
-    private fun feedbackCircleRuntimeFailure(nowNanos: Long = System.nanoTime()): String? {
+    private fun mathematicalCircleRuntimeFailure(nowNanos: Long = System.nanoTime()): String? {
         if (!registered || !aircraftConnected || !flying) return "飛行狀態已結束"
         if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
             return "電量狀態危急"
@@ -3347,7 +3630,7 @@ class MainActivity : Activity() {
             return avoidance.warning ?: "飛機避障關閉狀態失效"
         }
         val height = usableHeightMeters() ?: return "高度資料中斷"
-        if (height !in FEEDBACK_CIRCLE_FLIGHT_HEIGHT_RANGE_METERS) {
+        if (height !in MATHEMATICAL_CIRCLE_FLIGHT_HEIGHT_RANGE_METERS) {
             return "高度超出 0.4–1.1 m 安全範圍（目前 %.2f m）".format(height)
         }
         if (
@@ -3358,10 +3641,10 @@ class MainActivity : Activity() {
             return "機頭方向資料停止更新"
         }
         horizontalActuationStopReason(nowNanos)?.let { return it }
-        return feedbackCircleObstacleFailure(nowNanos)
+        return mathematicalCircleObstacleFailure(nowNanos)
     }
 
-    private fun feedbackCircleObstacleFailure(nowNanos: Long): String? {
+    private fun mathematicalCircleObstacleFailure(nowNanos: Long): String? {
         val nearest = nearestHorizontalObstacleMm ?: return null
         if (!obstacleSampleValid || obstacleSampleAtNanos == 0L) return null
         val ageMs = (nowNanos - obstacleSampleAtNanos) / 1_000_000L
@@ -3374,95 +3657,67 @@ class MainActivity : Activity() {
     }
 
     @Synchronized
-    private fun driveFeedbackCircle(nowNanos: Long) {
-        val controller = feedbackCircleController ?: return
-        feedbackCircleRuntimeFailure(nowNanos)?.let { reason ->
-            stopFeedbackCircle("回授圓周安全停止：$reason")
-            return
-        }
-        val velocityGeneration = feedbackCircleVelocityReadGeneration
-        requestFeedbackCircleVelocity(velocityGeneration)
-        if (feedbackVelocityReadState.hasExpired(nowNanos)) {
-            stopFeedbackCircle("回授圓周安全停止：主動讀取水平速度逾時")
+    private fun driveMathematicalCircle(nowNanos: Long) {
+        val controller = mathematicalCircleController ?: return
+        mathematicalCircleRuntimeFailure(nowNanos)?.let { reason ->
+            stopMathematicalCircle("數學圓周安全停止：$reason")
             return
         }
         if (stickStatus.authority != VirtualStickSession.MSDK_AUTHORITY_OWNER) {
-            if (feedbackCircleAuthoritySeen) {
-                stopFeedbackCircle("實體遙控器已接管，回授圓周已停止", release = false)
+            if (mathematicalCircleAuthoritySeen) {
+                stopMathematicalCircle("實體遙控器已接管，數學圓周已停止", release = false)
                 return
             }
             virtualStick.setHorizontalVelocity(0.0, 0.0)
             virtualStick.setYawRate(0.0)
-            if (nowNanos - feedbackCircleArmedAtNanos > AUTHORITY_HANDOVER_TIMEOUT_NANOS) {
-                stopFeedbackCircle("等待 MSDK 控制權逾時，回授圓周未啟動")
+            if (nowNanos - mathematicalCircleArmedAtNanos > AUTHORITY_HANDOVER_TIMEOUT_NANOS) {
+                stopMathematicalCircle("等待 MSDK 控制權逾時，數學圓周未啟動")
             }
             return
         }
 
-        feedbackCircleAuthoritySeen = true
+        mathematicalCircleAuthoritySeen = true
         if (
-            feedbackCircleLastTickAtNanos > 0L &&
-            nowNanos - feedbackCircleLastTickAtNanos > FEEDBACK_CIRCLE_MAX_TICK_GAP_NANOS
+            mathematicalCircleLastTickAtNanos > 0L &&
+            nowNanos - mathematicalCircleLastTickAtNanos > MATHEMATICAL_CIRCLE_MAX_TICK_GAP_NANOS
         ) {
-            stopFeedbackCircle("40 Hz 控制排程中斷，回授圓周已停止")
+            stopMathematicalCircle("40 Hz 控制排程中斷，數學圓周已停止")
             return
         }
-        feedbackCircleLastTickAtNanos = nowNanos
+        mathematicalCircleLastTickAtNanos = nowNanos
         val currentHeading = checkNotNull(aircraftHeadingDegrees)
         val command =
-            if (feedbackCircleStartedAtNanos == 0L) {
-                feedbackCircleStartedAtNanos = nowNanos
-                feedbackCircleLastLap = 1
-                controller.start(
-                    nowNanos,
-                    currentHeading,
-                    aircraftVelocityX,
-                    aircraftVelocityY,
-                )
+            if (mathematicalCircleStartedAtNanos == 0L) {
+                mathematicalCircleStartedAtNanos = nowNanos
+                mathematicalCircleLastLap = 1
+                controller.start(nowNanos, currentHeading)
             } else {
-                controller.command(
-                    nowNanos,
-                    currentHeading,
-                    aircraftVelocityX,
-                    aircraftVelocityY,
-                )
+                controller.command(nowNanos, currentHeading)
             }
-        if (command.closureTimedOut) {
-            stopFeedbackCircle(
-                "三圈排程完成，但 %.1f 秒內未能閉合起點，已安全停止".format(
-                    FeedbackCircleController.MAX_CLOSURE_SECONDS,
-                ),
-            )
-            return
-        }
         if (command.completed) {
-            stopFeedbackCircle("回授圓周完成 3 圈並閉合起點；已歸零並交回遙控器", completed = true)
+            stopMathematicalCircle("純數學圓周完成 3 圈；已歸零並交回遙控器", completed = true)
             return
         }
 
-        if (command.lap != feedbackCircleLastLap) {
+        if (command.lap != mathematicalCircleLastLap) {
             val completedLap = command.lap - 1
             flightProfiler.record(
-                event = "feedback_circle_lap",
+                event = "mathematical_circle_lap",
                 atNanos = nowNanos,
                 details =
                     profileDetails(
-                        "mode" to feedbackCircleMode,
+                        "mode" to mathematicalCircleMode,
                         "lap" to completedLap,
-                        "scheduledSeconds" to FeedbackCircleController.SECONDS_PER_LAP,
-                        "positionErrorMeters" to command.positionErrorMeters,
+                        "scheduledSeconds" to controller.secondsPerLap,
                     ),
             )
             flightLog.write(
-                (
-                    "feedback circle lap=$completedLap mode=$feedbackCircleMode elapsedSeconds=%.3f " +
-                        "positionError=%.3f"
-                ).format(
-                    (nowNanos - feedbackCircleStartedAtNanos) / 1_000_000_000.0,
-                    command.positionErrorMeters,
-                ),
+                "mathematical circle lap=$completedLap mode=$mathematicalCircleMode " +
+                    "elapsedSeconds=%.3f".format(
+                        (nowNanos - mathematicalCircleStartedAtNanos) / 1_000_000_000.0,
+                    ),
             )
-            feedbackCircleLastLap = command.lap
+            mathematicalCircleLastLap = command.lap
         }
 
         virtualStick.setHorizontalVelocity(
@@ -3470,30 +3725,30 @@ class MainActivity : Activity() {
             command.rightMetersPerSecond,
         )
         virtualStick.setClimbRate(0.0)
-        val yawCommand = when (feedbackCircleMode) {
-            FeedbackCircleMode.SKATING -> {
+        val yawCommand = when (mathematicalCircleMode) {
+            MathematicalCircleMode.SKATING -> {
                 val yawRate =
                     fixedHeadingHoldYawRate(
                         currentHeadingDegrees = currentHeading,
-                        targetHeadingDegrees = feedbackCircleInitialHeadingDegrees,
+                        targetHeadingDegrees = mathematicalCircleInitialHeadingDegrees,
                     )
                 virtualStick.setYawRate(yawRate)
                 yawRate
             }
-            FeedbackCircleMode.RACING -> {
+            MathematicalCircleMode.RACING -> {
                 if (!virtualStick.setYawHeading(command.tangentHeadingDegrees)) {
-                    stopFeedbackCircle("賽車模式產生無效航向，回授圓周已停止")
+                    stopMathematicalCircle("賽車模式產生無效航向，數學圓周已停止")
                     return
                 }
                 command.tangentHeadingDegrees
             }
         }
         flightProfiler.recordLazy(
-            event = "feedback_circle_command",
+            event = "mathematical_circle_command",
             atNanos = nowNanos,
         ) {
             profileDetails(
-                "mode" to feedbackCircleMode,
+                "mode" to mathematicalCircleMode,
                 "lap" to command.lap,
                 "scheduledProgressDegrees" to command.totalProgressDegrees,
                 "forward" to command.forwardMetersPerSecond,
@@ -3501,82 +3756,68 @@ class MainActivity : Activity() {
                 "yawCommand" to yawCommand,
                 "heading" to currentHeading,
                 "groundSpeed" to groundSpeedMetersPerSecond,
-                "estimatedEarthX" to command.estimatedEarthX,
-                "estimatedEarthY" to command.estimatedEarthY,
-                "positionErrorMeters" to command.positionErrorMeters,
-                "closing" to command.closing,
-                "positionSource" to "integratedAircraftVelocity",
+                "positionSource" to "elapsedTimeSchedule",
                 "visionUsed" to false,
             )
         }
         if (
-            nowNanos - feedbackCircleLastRenderedAtNanos >=
-            FEEDBACK_CIRCLE_RENDER_PERIOD_NANOS
+            nowNanos - mathematicalCircleLastRenderedAtNanos >=
+            MATHEMATICAL_CIRCLE_RENDER_PERIOD_NANOS
         ) {
-            feedbackCircleLastRenderedAtNanos = nowNanos
+            mathematicalCircleLastRenderedAtNanos = nowNanos
             holdStatus =
-                if (command.closing) {
-                    "回授圓・${feedbackCircleMode.displayName}：閉合起點，誤差 %.2f m".format(
-                        command.positionErrorMeters,
-                    )
-                } else {
-                    "回授圓・${feedbackCircleMode.displayName} ${command.lap}/3：" +
-                        "排程 %.0f°，位置誤差 %.2f m".format(
-                            command.totalProgressDegrees % 360.0,
-                            command.positionErrorMeters,
-                        )
-                }
+                "數學圓・${mathematicalCircleMode.displayName} ${command.lap}/3：" +
+                    "排程 %.0f°".format(command.totalProgressDegrees % 360.0)
             render(holdStatus)
         }
     }
 
     @Synchronized
-    private fun stopFeedbackCircle(
+    private fun stopMathematicalCircle(
         message: String,
         release: Boolean = true,
         completed: Boolean = false,
     ) {
-        val wasActive = feedbackCircleStartPending || feedbackCircleController != null
-        feedbackCircleStartPending = false
-        feedbackCircleVelocityReadGeneration += 1L
-        feedbackVelocityReadState.reset()
-        feedbackCircleController = null
-        feedbackCircleAuthoritySeen = false
+        val wasActive = mathematicalCircleStartPending || mathematicalCircleController != null
+        mathematicalCircleStartPending = false
+        mathematicalCircleController = null
+        mathematicalCircleAuthoritySeen = false
         virtualStick.setHorizontalVelocity(0.0, 0.0)
         virtualStick.setClimbRate(0.0)
         virtualStick.setYawRate(0.0)
-        runOnUiThread(::resetFeedbackCircleButtonLabels)
+        runOnUiThread(::resetMathematicalCircleButtonLabels)
         if (!wasActive) return
 
         val nowNanos = System.nanoTime()
         flightProfiler.record(
-            event = "feedback_circle_stop",
+            event = "mathematical_circle_stop",
             atNanos = nowNanos,
             details =
                 profileDetails(
-                    "mode" to feedbackCircleMode,
+                    "mode" to mathematicalCircleMode,
                     "completed" to completed,
                     "durationMs" to
-                        feedbackCircleStartedAtNanos
+                        mathematicalCircleStartedAtNanos
                             .takeIf { it > 0L }
                             ?.let { (nowNanos - it).coerceAtLeast(0L) / 1_000_000.0 },
                     "reason" to message,
                 ),
         )
         flightLog.write(
-            "feedback circle stop mode=$feedbackCircleMode completed=$completed reason=$message",
+            "mathematical circle stop mode=$mathematicalCircleMode " +
+                "completed=$completed reason=$message",
         )
-        feedbackCircleArmedAtNanos = 0L
-        feedbackCircleStartedAtNanos = 0L
-        feedbackCircleLastTickAtNanos = 0L
-        feedbackCircleLastLap = 0
-        feedbackCircleLastRenderedAtNanos = 0L
+        mathematicalCircleArmedAtNanos = 0L
+        mathematicalCircleStartedAtNanos = 0L
+        mathematicalCircleLastTickAtNanos = 0L
+        mathematicalCircleLastLap = 0
+        mathematicalCircleLastRenderedAtNanos = 0L
         holdStatus = message
         runOnUiThread {
             restoreBrakeAfterAutonomousControl(
                 message = message,
                 release = release,
-                logContext = "feedback circle",
+                logContext = "mathematical circle",
             )
         }
     }
@@ -4125,10 +4366,13 @@ class MainActivity : Activity() {
             stopTapeTracking("降落操作取消黑膠帶追蹤", release = false)
         }
         if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
-            stopHardwareLatencyTest("降落操作取消硬體延遲脈衝", release = false)
+            stopHardwareLatencyTest(
+                "降落操作取消${activeHorizontalPulseName()}",
+                release = false,
+            )
         }
-        if (feedbackCircleStartPending || feedbackCircleController != null) {
-            stopFeedbackCircle("降落操作取消回授圓周", release = false)
+        if (mathematicalCircleStartPending || mathematicalCircleController != null) {
+            stopMathematicalCircle("降落操作取消數學圓周", release = false)
         }
         holdStatus = ""
         if (!stickOwned) {
@@ -4275,10 +4519,13 @@ class MainActivity : Activity() {
             stopTapeTracking("飛行狀態結束，黑膠帶追蹤已停止", release = false)
         }
         if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
-            stopHardwareLatencyTest("飛行狀態結束，硬體延遲脈衝已停止", release = false)
+            stopHardwareLatencyTest(
+                "飛行狀態結束，${activeHorizontalPulseName()}已停止",
+                release = false,
+            )
         }
-        if (feedbackCircleStartPending || feedbackCircleController != null) {
-            stopFeedbackCircle("飛行狀態結束，回授圓周已停止", release = false)
+        if (mathematicalCircleStartPending || mathematicalCircleController != null) {
+            stopMathematicalCircle("飛行狀態結束，數學圓周已停止", release = false)
         }
         if (!stickOwned || stickTransitionPending) return
         releaseControlLink { error ->
@@ -4298,10 +4545,13 @@ class MainActivity : Activity() {
             finishQuarterArc("控制權釋放，無視覺 1/4 圈已停止", release = false)
         }
         if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
-            stopHardwareLatencyTest("控制權釋放，硬體延遲脈衝已停止", release = false)
+            stopHardwareLatencyTest(
+                "控制權釋放，${activeHorizontalPulseName()}已停止",
+                release = false,
+            )
         }
-        if (feedbackCircleStartPending || feedbackCircleController != null) {
-            stopFeedbackCircle("控制權釋放，回授圓周已停止", release = false)
+        if (mathematicalCircleStartPending || mathematicalCircleController != null) {
+            stopMathematicalCircle("控制權釋放，數學圓周已停止", release = false)
         }
         val generation = beginTransition("release") {
             onDone("釋放控制權無回應")
@@ -4505,11 +4755,11 @@ class MainActivity : Activity() {
             return
         }
         if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
-            render("硬體延遲脈衝進行中，無法同時調整高度")
+            render("${activeHorizontalPulseName()}進行中，無法同時調整高度")
             return
         }
-        if (feedbackCircleStartPending || feedbackCircleController != null) {
-            render("回授圓周進行中，無法同時調整高度")
+        if (mathematicalCircleStartPending || mathematicalCircleController != null) {
+            render("數學圓周進行中，無法同時調整高度")
             return
         }
         if (usableHeightMeters() == null) {
@@ -4753,13 +5003,11 @@ class MainActivity : Activity() {
         val HARDWARE_LATENCY_START_HEIGHT_RANGE_METERS = 0.5..1.0
         val HARDWARE_LATENCY_FLIGHT_HEIGHT_RANGE_METERS = 0.4..1.1
 
-        /** Feedback circle actively samples fused velocity while sending commands at 40 Hz. */
-        val FEEDBACK_CIRCLE_START_HEIGHT_RANGE_METERS = 0.5..1.0
-        val FEEDBACK_CIRCLE_FLIGHT_HEIGHT_RANGE_METERS = 0.4..1.1
-        const val FEEDBACK_CIRCLE_VELOCITY_POLL_INTERVAL_NANOS = 100_000_000L
-        const val FEEDBACK_CIRCLE_VELOCITY_TIMEOUT_NANOS = 750_000_000L
-        const val FEEDBACK_CIRCLE_RENDER_PERIOD_NANOS = 250_000_000L
-        const val FEEDBACK_CIRCLE_MAX_TICK_GAP_NANOS = 150_000_000L
+        /** Elapsed-time circle schedule; velocity feedback and vision never alter its path. */
+        val MATHEMATICAL_CIRCLE_START_HEIGHT_RANGE_METERS = 0.5..1.0
+        val MATHEMATICAL_CIRCLE_FLIGHT_HEIGHT_RANGE_METERS = 0.4..1.1
+        const val MATHEMATICAL_CIRCLE_RENDER_PERIOD_NANOS = 250_000_000L
+        const val MATHEMATICAL_CIRCLE_MAX_TICK_GAP_NANOS = 150_000_000L
 
 
         /** Grace period before centred sticks hand the aircraft back to the RC. */
@@ -4801,6 +5049,14 @@ class MainActivity : Activity() {
 
         /** Live sensor numbers are readable at 4 Hz without redrawing every callback. */
         const val OBSTACLE_TELEMETRY_PERIOD_NANOS = 250_000_000L
+
+        /** Straight-line response test: BODY-forward velocity with one-second ramps. */
+        const val FIXED_DIRECTION_SPEED_METERS_PER_SECOND = 1.60
+        const val FIXED_DIRECTION_SPEED_BASELINE_NANOS = 3_000_000_000L
+        const val FIXED_DIRECTION_SPEED_RAMP_UP_NANOS = 1_000_000_000L
+        const val FIXED_DIRECTION_SPEED_HOLD_NANOS = 2_000_000_000L
+        const val FIXED_DIRECTION_SPEED_RAMP_DOWN_NANOS = 1_000_000_000L
+        const val FIXED_DIRECTION_SPEED_SETTLE_NANOS = 2_000_000_000L
 
         /** Detector state is logged at one hertz; the overlay still updates at frame cadence. */
         const val TAPE_LOG_PERIOD_NANOS = 1_000_000_000L

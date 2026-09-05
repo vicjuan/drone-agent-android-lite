@@ -23,27 +23,327 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `circular decision follows directed lookahead when tangent points the other way`() {
+    fun `scheme C aligns to the local tangent instead of the lookahead chord`() {
         val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
         controller.observe(
             observation(
                 angleDegrees = 40.0,
                 longSideFraction = 0.8,
                 lookahead = TapeLookahead(xFraction = 0.30, yFraction = 0.50),
+                heightAboveGroundMeters = 1.0,
             ),
             seconds(3),
         )
 
         val decision = controller.tick(seconds(3))
 
-        assertTrue(checkNotNull(decision.controlledAngleDegrees) > 0.0)
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertEquals(40.0, checkNotNull(decision.pathBearingDegrees), 1e-9)
+        assertTrue(decision.yawRateDegreesPerSecond > 0.0)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `scheme C stationary start follows the detector directed tangent`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val observedAt = seconds(3)
+        controller.observe(
+            observation(
+                angleDegrees = 60.0,
+                longSideFraction = 0.8,
+                heightAboveGroundMeters = 1.2,
+                centerline = crossingCenterline(),
+            ).copy(capturedAtNanos = observedAt),
+            observedAt,
+        )
+
+        val decision = controller.tick(observedAt)
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertTrue(checkNotNull(decision.pathBearingDegrees) > 0.0)
+        assertTrue(decision.yawRateDegreesPerSecond > 0.0)
+    }
+
+    @Test
+    fun `scheme C reverses yaw after crossing its locked directed tangent`() {
+        val controller = circularTrackingController()
+        val startedAt = seconds(3)
+        controller.updateAircraftHeading(-157.8)
+        controller.observe(
+            observation(
+                angleDegrees = 43.0,
+                longSideFraction = 0.8,
+                lookahead = TapeLookahead(xFraction = 0.70, yFraction = 0.50),
+            ),
+            startedAt,
+        )
+
+        val turningTowardTangent = controller.tick(startedAt)
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, turningTowardTangent.phase)
+        assertEquals(0.0, turningTowardTangent.forwardSpeedMetersPerSecond, 0.0)
+        assertTrue(turningTowardTangent.yawRateDegreesPerSecond > 0.0)
+
+        val afterOvershoot = startedAt + 250_000_000L
+        controller.updateAircraftHeading(-110.0)
+        controller.observe(
+            observation(
+                angleDegrees = -89.0,
+                longSideFraction = 0.8,
+                lookahead = TapeLookahead(xFraction = 0.30, yFraction = 0.50),
+            ),
+            afterOvershoot,
+        )
+        val correctingBack = controller.tick(afterOvershoot)
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, correctingBack.phase)
+        assertEquals(0.0, correctingBack.forwardSpeedMetersPerSecond, 0.0)
+        assertTrue(correctingBack.yawRateDegreesPerSecond < 0.0)
+        assertTrue(checkNotNull(correctingBack.pathBearingDegrees) < 0.0)
+    }
+
+    @Test
+    fun `scheme C moves along a trusted tangent instead of an opposite lookahead chord`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val directedCurve =
+            observation(
+                angleDegrees = -45.0,
+                longSideFraction = 1.2,
+                nearFieldOffsetFraction = 0.05,
+                lookahead = TapeLookahead(xFraction = 0.80, yFraction = 0.50),
+                heightAboveGroundMeters = 1.2,
+                centerline =
+                    metricCurvedPath(
+                        curvaturePerMeter = -1.0,
+                        tangentDegrees = -45.0,
+                    ),
+            )
+        var decision = controller.tick(seconds(2))
+        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
+            controller.observe(directedCurve.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
+        assertTrue(checkNotNull(decision.pathBearingDegrees) < 0.0)
+        assertTrue(decision.circularFeedforwardYawRateDegreesPerSecond < 0.0)
+        assertTrue(decision.yawRateDegreesPerSecond < 0.0)
+        assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
+        assertTrue(decision.rightSpeedMetersPerSecond < 0.0)
+        assertTrue(
+            kotlin.math.hypot(
+                decision.forwardSpeedMetersPerSecond,
+                decision.rightSpeedMetersPerSecond,
+            ) <= TapeTrackingController.CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND,
+        )
+    }
+
+    @Test
+    fun `scheme C does not translate during alignment beyond the offset safety gate`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val displacedCurve =
+            observation(
+                angleDegrees = -45.0,
+                longSideFraction = 1.2,
+                nearFieldOffsetFraction = 0.32,
+                lookahead = TapeLookahead(xFraction = 0.80, yFraction = 0.50),
+                heightAboveGroundMeters = 1.2,
+                centerline =
+                    metricCurvedPath(
+                        curvaturePerMeter = -1.0,
+                        tangentDegrees = -45.0,
+                    ),
+            )
+        var decision = controller.tick(seconds(2))
+        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
+            controller.observe(displacedCurve.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `scheme C stops moving alignment when trusted curvature reverses direction`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        fun directedCurve(curvaturePerMeter: Double) =
+            observation(
+                angleDegrees = -45.0,
+                longSideFraction = 1.2,
+                nearFieldOffsetFraction = 0.05,
+                heightAboveGroundMeters = 1.2,
+                centerline =
+                    metricCurvedPath(
+                        curvaturePerMeter = curvaturePerMeter,
+                        tangentDegrees = -45.0,
+                    ),
+            )
+
+        var decision = controller.tick(seconds(2))
+        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
+            controller.observe(directedCurve(-1.0).copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
+        assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
+
+        listOf(3_750_000_000L, 4_000_000_000L, 4_250_000_000L).forEach { now ->
+            controller.observe(directedCurve(1.0).copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `scheme C locks one turn direction when later visual curvature reverses`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val rightCurve =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookahead = TapeLookahead(xFraction = 0.70, yFraction = 0.50),
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(curvaturePerMeter = 1.0),
+            )
+        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L, 3_750_000_000L)
+            .forEach { now ->
+                controller.observe(rightCurve.copy(capturedAtNanos = now), now)
+                controller.tick(now)
+            }
+
+        val started = controller.tick(3_750_000_000L)
+        assertEquals(TapeTrackingPhase.TRACKING, started.phase)
+        assertEquals(1.0, started.circularTurnDirection, 0.0)
+        assertTrue(started.circularFeedforwardYawRateDegreesPerSecond > 0.0)
+
+        val oppositeCurve =
+            rightCurve.copy(
+                centerline = metricCurvedPath(curvaturePerMeter = -1.0),
+                capturedAtNanos = 4_000_000_000L,
+            )
+        controller.observe(oppositeCurve, 4_000_000_000L)
+        val continued = controller.tick(4_000_000_000L)
+
+        assertEquals(1.0, continued.circularTurnDirection, 0.0)
+        assertTrue(continued.circularFeedforwardYawRateDegreesPerSecond >= 0.0)
+        assertTrue(continued.yawRateDegreesPerSecond >= 0.0)
+    }
+
+    @Test
+    fun `scheme C visual tangent overrides a contradictory detector axial angle`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val rightCurve =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                lookahead = TapeLookahead(xFraction = 0.70, yFraction = 0.50),
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(curvaturePerMeter = 1.0),
+            )
+        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L, 3_750_000_000L)
+            .forEach { now ->
+                controller.observe(rightCurve.copy(capturedAtNanos = now), now)
+                controller.tick(now)
+            }
+
+        val correctionAt = 4_000_000_000L
+        controller.observe(
+            rightCurve.copy(
+                angleFromVerticalDegrees = -80.0,
+                capturedAtNanos = correctionAt,
+            ),
+            correctionAt,
+        )
+        val corrected = controller.tick(correctionAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, corrected.phase)
+        assertTrue(kotlin.math.abs(checkNotNull(corrected.controlledAngleDegrees)) < 10.0)
+        assertTrue(corrected.circularFeedforwardYawRateDegreesPerSecond > 0.0)
+        assertTrue(corrected.yawRateDegreesPerSecond > 0.0)
+    }
+    @Test
+    fun `scheme C uses planned circle curvature despite visual magnitude error`() {
+        fun settledDecision(curvaturePerMeter: Double): TapeTrackingDecision {
+            val controller = circularTrackingController()
+            controller.updateAircraftHeading(0.0)
+            val curve =
+                observation(
+                    angleDegrees = 0.0,
+                    longSideFraction = 0.8,
+                    heightAboveGroundMeters = 1.2,
+                    centerline = metricCurvedPath(curvaturePerMeter),
+                )
+            var decision = controller.tick(seconds(2))
+            repeat(20) { index ->
+                val now = seconds(3) + index * 250_000_000L
+                controller.observe(curve.copy(capturedAtNanos = now), now)
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+
+        val gentleCurve = settledDecision(curvaturePerMeter = 0.55)
+        val exaggeratedCurve = settledDecision(curvaturePerMeter = 5.0)
+        val expectedYawRate =
+            Math.toDegrees(
+                CircularTrackingSpeed.FAST.targetMetersPerSecond *
+                    TapeTrackingController.SCHEME_C_PLANNED_CURVATURE_PER_METER,
+            )
+
+        assertEquals(TapeTrackingPhase.TRACKING, gentleCurve.phase)
+        assertEquals(TapeTrackingPhase.TRACKING, exaggeratedCurve.phase)
         assertEquals(
-            Math.toDegrees(kotlin.math.atan2(-0.20 * (1600.0 / 900.0), 0.44)),
-            checkNotNull(decision.pathBearingDegrees),
+            expectedYawRate,
+            gentleCurve.circularFeedforwardYawRateDegreesPerSecond,
             1e-9,
         )
-        assertTrue(checkNotNull(decision.pathBearingDegrees) < 0.0)
+        assertEquals(
+            expectedYawRate,
+            exaggeratedCurve.circularFeedforwardYawRateDegreesPerSecond,
+            1e-9,
+        )
+        assertEquals(
+            CircularTrackingSpeed.FAST.targetMetersPerSecond,
+            exaggeratedCurve.forwardSpeedMetersPerSecond,
+            1e-9,
+        )
     }
+
+    @Test
+    fun `scheme C refuses translation without a metric visual centerline`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val incompleteGeometry =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                heightAboveGroundMeters = 1.2,
+                centerline = null,
+            )
+        var decision = controller.tick(seconds(2))
+        repeat(8) { index ->
+            val now = seconds(3) + index * 250_000_000L
+            controller.observe(incompleteGeometry.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
+        }
+
+        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, decision.circularFeedforwardYawRateDegreesPerSecond, 0.0)
+    }
+
 
     @Test
     fun `scheme B ignores physical endpoint hints from partial circle detections`() {
@@ -619,6 +919,126 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `scheme C slows through one implausible detector frame instead of stopping`() {
+        val controller = circularTrackingController()
+        val centeredPath =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                nearFieldOffsetFraction = 0.02,
+                heightAboveGroundMeters = 1.0,
+            )
+        repeat(30) { index ->
+            val now = seconds(2) + (index + 1) * 100_000_000L
+            controller.observe(centeredPath.copy(capturedAtNanos = now), now)
+            controller.tick(now)
+        }
+        val gapStartedAt = seconds(5) + 100_000_000L
+        controller.observe(null, gapStartedAt)
+        val coastStarted = controller.tick(gapStartedAt)
+        assertEquals(TapeTrackingPhase.TRACKING, coastStarted.phase)
+        assertEquals(
+            TapeTrackingController.CIRCULAR_BLIND_COAST_SPEED_METERS_PER_SECOND,
+            coastStarted.forwardSpeedMetersPerSecond,
+            1e-9,
+        )
+
+        val changedPathAt = gapStartedAt + 100_000_000L
+        controller.observe(
+            centeredPath.copy(
+                angleFromVerticalDegrees = 50.0,
+                capturedAtNanos = changedPathAt,
+            ),
+            changedPathAt,
+        )
+        val coasting = controller.tick(changedPathAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, coasting.phase)
+        assertTrue(coasting.forwardSpeedMetersPerSecond > 0.0)
+        assertTrue(
+            coasting.forwardSpeedMetersPerSecond <=
+                TapeTrackingController.CIRCULAR_BLIND_COAST_SPEED_METERS_PER_SECOND,
+        )
+        assertEquals(0.0, checkNotNull(coasting.rawAngleDegrees), 1e-9)
+    }
+
+    @Test
+    fun `scheme C accepts a consistent replacement path without stationary reacquisition`() {
+        val controller = circularTrackingController()
+        val centeredPath =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                nearFieldOffsetFraction = 0.02,
+                heightAboveGroundMeters = 1.0,
+            )
+        val initialAt = seconds(3)
+        controller.observe(centeredPath.copy(capturedAtNanos = initialAt), initialAt)
+        controller.tick(initialAt)
+
+        val gapStartedAt = initialAt + 100_000_000L
+        controller.observe(null, gapStartedAt)
+        val changedPath =
+            centeredPath.copy(
+                angleFromVerticalDegrees = 50.0,
+                nearFieldOffsetFraction = 0.05,
+            )
+        val firstCandidateAt = gapStartedAt + 100_000_000L
+        controller.observe(
+            changedPath.copy(capturedAtNanos = firstCandidateAt),
+            firstCandidateAt,
+        )
+        assertEquals(
+            TapeTrackingPhase.TRACKING,
+            controller.tick(firstCandidateAt).phase,
+        )
+
+        val confirmedAt = firstCandidateAt + 300_000_000L
+        controller.observe(
+            changedPath.copy(
+                angleFromVerticalDegrees = 49.0,
+                capturedAtNanos = confirmedAt,
+            ),
+            confirmedAt,
+        )
+        val resumed = controller.tick(confirmedAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertEquals(49.0, checkNotNull(resumed.rawAngleDegrees), 1e-9)
+        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
+    fun `scheme C stops when a detector gap exceeds the bounded coast`() {
+        val controller = circularTrackingController()
+        val observedAt = seconds(3)
+        controller.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                nearFieldOffsetFraction = 0.02,
+                heightAboveGroundMeters = 1.0,
+                capturedAtNanos = observedAt,
+            ),
+            observedAt,
+        )
+        controller.tick(observedAt)
+
+        val gapStartedAt = observedAt + 100_000_000L
+        controller.observe(null, gapStartedAt)
+        val expiredAt =
+            gapStartedAt +
+                TapeTrackingController.CIRCULAR_BLIND_COAST_DURATION_NANOS +
+                1L
+        val stopped = controller.tick(expiredAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, stopped.phase)
+        assertEquals(0.0, stopped.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.rightSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.yawRateDegreesPerSecond, 0.0)
+    }
+
+    @Test
     fun `distant edge candidate cannot take control after a detection gap`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
@@ -720,6 +1140,104 @@ class TapeTrackingControllerTest {
         assertEquals(TapeTrackingPhase.ALIGNING_CURVE, reacquired.phase)
         assertTrue(reacquired.yawRateDegreesPerSecond < 0.0)
         assertEquals(0.0, reacquired.forwardSpeedMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `scheme C resumes a confirmed turn after a subsecond path discontinuity`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val establishedPath =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 1.2,
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(curvaturePerMeter = 1.0),
+            ).copy(actualTravelDirectionDegrees = 0.0)
+        listOf(
+            3_000_000_000L,
+            3_250_000_000L,
+            3_500_000_000L,
+            3_750_000_000L,
+        ).forEach { now ->
+            controller.observe(establishedPath.copy(capturedAtNanos = now), now)
+            controller.tick(now)
+        }
+        val established = controller.tick(3_750_000_000L)
+        assertEquals(TapeTrackingPhase.TRACKING, established.phase)
+        assertEquals(1.0, established.circularTurnDirection, 0.0)
+
+        val gapStartedAt = 4_000_000_000L
+        controller.observe(null, gapStartedAt)
+        val firstCandidateAt = gapStartedAt + 600_000_000L
+        val reacquiredPath =
+            establishedPath.copy(
+                angleFromVerticalDegrees = 60.0,
+                nearFieldOffsetFraction = 0.067,
+                capturedAtNanos = firstCandidateAt,
+            )
+        controller.observe(reacquiredPath, firstCandidateAt)
+        assertEquals(
+            TapeTrackingPhase.REACQUIRING_PATH,
+            controller.tick(firstCandidateAt).phase,
+        )
+
+        val confirmedAt =
+            firstCandidateAt + TapeTrackingController.REACQUISITION_CONFIRMATION_NANOS
+        controller.observe(reacquiredPath.copy(capturedAtNanos = confirmedAt), confirmedAt)
+        val resumed = controller.tick(confirmedAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertEquals(1.0, resumed.circularTurnDirection, 0.0)
+        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+        assertTrue(resumed.circularFeedforwardYawRateDegreesPerSecond > 0.0)
+    }
+
+    @Test
+    fun `scheme C aligns after retained turn direction expires`() {
+        val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
+        val establishedPath =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 1.2,
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(curvaturePerMeter = 1.0),
+            ).copy(actualTravelDirectionDegrees = 0.0)
+        listOf(
+            3_000_000_000L,
+            3_250_000_000L,
+            3_500_000_000L,
+            3_750_000_000L,
+        ).forEach { now ->
+            controller.observe(establishedPath.copy(capturedAtNanos = now), now)
+            controller.tick(now)
+        }
+
+        val gapStartedAt = 4_000_000_000L
+        controller.observe(null, gapStartedAt)
+        val firstCandidateAt =
+            gapStartedAt +
+                TapeTrackingController.CIRCULAR_DIRECTION_RETENTION_AFTER_GAP_NANOS -
+                TapeTrackingController.REACQUISITION_CONFIRMATION_NANOS +
+                1L
+        val reacquiredPath =
+            establishedPath.copy(
+                angleFromVerticalDegrees = 60.0,
+                capturedAtNanos = firstCandidateAt,
+            )
+        controller.observe(reacquiredPath, firstCandidateAt)
+        assertEquals(
+            TapeTrackingPhase.REACQUIRING_PATH,
+            controller.tick(firstCandidateAt).phase,
+        )
+
+        val confirmedAt =
+            firstCandidateAt + TapeTrackingController.REACQUISITION_CONFIRMATION_NANOS
+        controller.observe(reacquiredPath.copy(capturedAtNanos = confirmedAt), confirmedAt)
+        val aligning = controller.tick(confirmedAt)
+
+        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, aligning.phase)
+        assertEquals(0.0, aligning.forwardSpeedMetersPerSecond, 0.0)
     }
 
     @Test
@@ -1005,6 +1523,26 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `brief detector flicker preserves gap continuation confirmation`() {
+        val controller = circularTrackingController()
+        controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
+        controller.observe(null, seconds(2) + 100_000_000L)
+
+        val firstCandidateAt = seconds(2) + 400_000_000L
+        controller.observe(observation(20.0, 0.82, 0.05), firstCandidateAt)
+        controller.observe(null, firstCandidateAt + 100_000_000L)
+
+        val confirmedAt =
+            firstCandidateAt +
+                TapeTrackingController.CIRCULAR_GAP_CONTINUATION_CONFIRMATION_NANOS
+        controller.observe(observation(19.0, 0.81, 0.04), confirmedAt)
+        val resumed = controller.tick(confirmedAt)
+
+        assertEquals(TapeTrackingPhase.TRACKING, resumed.phase)
+        assertTrue(resumed.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
     fun `detection loss restarts gap continuation confirmation`() {
         val controller = circularTrackingController()
         controller.observe(observation(18.0, 0.8, 0.02), seconds(2))
@@ -1186,122 +1724,65 @@ class TapeTrackingControllerTest {
         assertEquals(
             CircularTrackingSpeed.FAST.targetMetersPerSecond,
             result.forwardSpeedMetersPerSecond,
-            1e-9,
+            0.000_01,
         )
     }
 
     @Test
-    fun `trusted curvature ignores one spike then clamps speed before steering saturation`() {
+    fun `scheme C does not shrink its planned radius for exaggerated visual curvature`() {
         val controller = circularTrackingController()
+        controller.updateAircraftHeading(0.0)
         val startAt = seconds(2)
-        val straightPath = observation(
-            angleDegrees = 0.0,
-            longSideFraction = 1.2,
-            lookahead = TapeLookahead(xFraction = 0.5, yFraction = 0.4),
-            heightAboveGroundMeters = 1.2,
-        )
-        repeat(20) { index ->
-            val now = startAt + index * 250_000_000L
-            controller.observe(straightPath, now)
-            controller.tick(now)
-        }
-        val stable = controller.tick(startAt + 5_000_000_000L)
-        assertEquals(
-            CircularTrackingSpeed.FAST.targetMetersPerSecond,
-            stable.forwardSpeedMetersPerSecond,
-            1e-9,
-        )
-
-        val sharpCurve = straightPath.copy(
-            lookahead = TapeLookahead(xFraction = 0.9, yFraction = 0.4),
-        )
-        val firstCurveAt = startAt + 5_250_000_000L
-        controller.observe(sharpCurve, firstCurveAt)
-        val oneSpike = controller.tick(firstCurveAt)
-        assertEquals(
-            CircularTrackingSpeed.FAST.targetMetersPerSecond,
-            checkNotNull(oneSpike.trustedCurvatureSpeedCapMetersPerSecond),
-            1e-9,
-        )
-
-        var confirmedCurve = oneSpike
-        repeat(4) { index ->
-            val now = firstCurveAt + (index + 1) * 250_000_000L
-            controller.observe(sharpCurve, now)
-            confirmedCurve = controller.tick(now)
-        }
-
-        assertTrue(checkNotNull(confirmedCurve.rawCurvaturePerMeter) > 0.0)
-        assertTrue(checkNotNull(confirmedCurve.predictedCurvaturePerMeter) > 0.0)
-        assertTrue(checkNotNull(confirmedCurve.trustedCurvaturePerMeter) > 0.0)
-        assertTrue(
-            checkNotNull(confirmedCurve.trustedCurvatureSpeedCapMetersPerSecond) <
-                CircularTrackingSpeed.SLOW.targetMetersPerSecond,
-        )
-        assertTrue(
-            confirmedCurve.forwardSpeedMetersPerSecond <=
-                checkNotNull(
-                    confirmedCurve.instantaneousCurvatureSpeedCapMetersPerSecond,
-                ),
-        )
-        assertTrue(
-            confirmedCurve.forwardSpeedMetersPerSecond <=
-                checkNotNull(confirmedCurve.trustedCurvatureSpeedCapMetersPerSecond),
-        )
-        assertTrue(
-            kotlin.math.abs(confirmedCurve.purePursuitYawRateDegreesPerSecond) <=
-                TapeTrackingController.CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND,
-        )
-    }
-
-    @Test
-    fun `trusted curvature cap recovers gradually after the path straightens`() {
-        val controller = circularTrackingController()
-        val startAt = seconds(2)
-        val sharpCurve = observation(
-            angleDegrees = 0.0,
-            longSideFraction = 1.2,
-            lookahead = TapeLookahead(xFraction = 0.9, yFraction = 0.4),
-            heightAboveGroundMeters = 1.2,
-        )
+        val exaggeratedCurve =
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 1.2,
+                lookahead = TapeLookahead(xFraction = 0.9, yFraction = 0.4),
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(curvaturePerMeter = 5.0),
+            )
+        var decision = controller.tick(startAt)
         repeat(3) { index ->
             val now = startAt + index * 250_000_000L
-            controller.observe(sharpCurve, now)
-            controller.tick(now)
+            controller.observe(exaggeratedCurve.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
         }
-        val curveCap = checkNotNull(
-            controller.tick(startAt + 500_000_000L)
-                .trustedCurvatureSpeedCapMetersPerSecond,
+        assertEquals(
+            CircularTrackingSpeed.FAST.targetMetersPerSecond,
+            checkNotNull(decision.trustedCurvatureSpeedCapMetersPerSecond),
+            1e-9,
         )
-        val straightPath = sharpCurve.copy(
-            lookahead = TapeLookahead(xFraction = 0.5, yFraction = 0.4),
-        )
-        var previousCap = curveCap
-        var recoveredCap = curveCap
-        var recoveredDecision = controller.tick(startAt + 500_000_000L)
-        repeat(16) { index ->
-            val now = startAt + 750_000_000L + index * 250_000_000L
-            controller.observe(straightPath, now)
-            recoveredDecision = controller.tick(now)
-            val currentCap = checkNotNull(
-                recoveredDecision.trustedCurvatureSpeedCapMetersPerSecond,
-            )
-            if (currentCap > previousCap) {
-                assertTrue(
-                    currentCap <= previousCap +
-                        TapeTrackingController
-                            .CIRCULAR_CURVATURE_CAP_RISE_METERS_PER_SECOND_SQUARED * 0.25 +
-                        1e-9,
-                )
-            }
-            previousCap = currentCap
-            recoveredCap = currentCap
+        repeat(21) { index ->
+            val now = startAt + (index + 3) * 250_000_000L
+            controller.observe(exaggeratedCurve.copy(capturedAtNanos = now), now)
+            decision = controller.tick(now)
         }
 
-        assertTrue(recoveredCap > curveCap)
-        assertTrue(recoveredDecision.forwardSpeedMetersPerSecond > curveCap)
-        assertTrue(recoveredDecision.forwardSpeedMetersPerSecond <= recoveredCap)
+        assertTrue(
+            kotlin.math.abs(checkNotNull(decision.trustedCurvaturePerMeter)) >
+                TapeTrackingController.SCHEME_C_PLANNED_CURVATURE_PER_METER,
+        )
+        assertEquals(
+            CircularTrackingSpeed.FAST.targetMetersPerSecond,
+            checkNotNull(decision.instantaneousCurvatureSpeedCapMetersPerSecond),
+            1e-9,
+        )
+        assertEquals(
+            CircularTrackingSpeed.FAST.targetMetersPerSecond,
+            checkNotNull(decision.trustedCurvatureSpeedCapMetersPerSecond),
+            1e-9,
+        )
+        assertEquals(
+            CircularTrackingSpeed.FAST.targetMetersPerSecond,
+            decision.forwardSpeedMetersPerSecond,
+            1e-9,
+        )
+        assertTrue(
+            kotlin.math.abs(decision.yawRateDegreesPerSecond) <=
+                TapeTrackingController.CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND,
+        )
     }
+
 
     @Test
     fun `offset rate uses a filtered measurement instead of one frame difference`() {
@@ -1363,9 +1844,15 @@ class TapeTrackingControllerTest {
             driftCapturedAt + 80_000_000L,
         )
         val afterDrift = controller.tick(driftCapturedAt + 80_000_000L)
+        val braking = controller.tick(driftCapturedAt + 180_000_000L)
 
-        assertTrue(beforeDrift.forwardSpeedMetersPerSecond > 0.80)
-        assertTrue(afterDrift.forwardSpeedMetersPerSecond < beforeDrift.forwardSpeedMetersPerSecond)
+        assertTrue(beforeDrift.forwardSpeedMetersPerSecond > 0.65)
+        assertTrue(
+            "projected drift must stop acceleration: before=${beforeDrift.forwardSpeedMetersPerSecond} " +
+                "after=${afterDrift.forwardSpeedMetersPerSecond}",
+            afterDrift.forwardSpeedMetersPerSecond <= beforeDrift.forwardSpeedMetersPerSecond,
+        )
+        assertTrue(braking.forwardSpeedMetersPerSecond < afterDrift.forwardSpeedMetersPerSecond)
     }
 
     @Test
@@ -1981,6 +2468,38 @@ class TapeTrackingControllerTest {
         lookahead = TapeLookahead(xFraction = 0.966, yFraction = 0.714),
     )
 
+    private fun crossingCenterline(): TapeCenterlinePath =
+        TapeCenterlinePath(
+            sourceWidth = 640,
+            sourceHeight = 360,
+            xFractions =
+                floatArrayOf(
+                    0.60f,
+                    0.40f,
+                    0.10f,
+                    0.10f,
+                    0.327f,
+                    0.673f,
+                    0.90f,
+                ),
+            yFractions =
+                floatArrayOf(
+                    0.673f,
+                    0.327f,
+                    0.10f,
+                    0.90f,
+                    0.60f,
+                    0.40f,
+                    0.90f,
+                ),
+            anchorXFraction = 0.5f,
+            anchorYFraction = 0.94f,
+            lookaheadXFraction = null,
+            lookaheadYFraction = null,
+            quality = PathQuality.FULL_PATH,
+            rejection = null,
+        )
+
     private fun fixedHeadingPath(): TapeCenterlinePath =
         TapeCenterlinePath(
             sourceWidth = 640,
@@ -1994,6 +2513,48 @@ class TapeTrackingControllerTest {
             quality = PathQuality.FULL_PATH,
             rejection = null,
         )
+    private fun metricCurvedPath(
+        curvaturePerMeter: Double,
+        tangentDegrees: Double = 0.0,
+    ): TapeCenterlinePath {
+        val sourceWidth = 640
+        val sourceHeight = 360
+        val heightMeters = 1.2
+        val aspectRatio = sourceWidth.toDouble() / sourceHeight
+        val verticalHalfFovTangent =
+            TapeTrackingController.CAMERA_DIAGONAL_HALF_FOV_TANGENT /
+                kotlin.math.sqrt(1.0 + aspectRatio * aspectRatio)
+        val frameHeightMeters = 2.0 * heightMeters * verticalHalfFovTangent
+        val frameWidthMeters = frameHeightMeters * aspectRatio
+        val tangentRadians = Math.toRadians(tangentDegrees)
+        val tangentRight = kotlin.math.sin(tangentRadians)
+        val tangentForward = kotlin.math.cos(tangentRadians)
+        val samplesMeters = (-7..11).map { it * 0.05 }
+        val xFractions = FloatArray(samplesMeters.size)
+        val yFractions = FloatArray(samplesMeters.size)
+        samplesMeters.forEachIndexed { index, distanceMeters ->
+            val normalMeters = 0.5 * curvaturePerMeter * distanceMeters * distanceMeters
+            val rightMeters =
+                tangentRight * distanceMeters + tangentForward * normalMeters
+            val forwardMeters =
+                tangentForward * distanceMeters - tangentRight * normalMeters
+            xFractions[index] = (0.5 + rightMeters / frameWidthMeters).toFloat()
+            yFractions[index] = (0.5 - forwardMeters / frameHeightMeters).toFloat()
+        }
+        return TapeCenterlinePath(
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            xFractions = xFractions,
+            yFractions = yFractions,
+            anchorXFraction = 0.5f,
+            anchorYFraction = 0.94f,
+            lookaheadXFraction = null,
+            lookaheadYFraction = null,
+            quality = PathQuality.FULL_PATH,
+            rejection = null,
+        )
+    }
+
 
 
     private fun verticalBounds(

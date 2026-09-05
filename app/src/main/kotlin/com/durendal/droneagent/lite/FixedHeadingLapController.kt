@@ -19,10 +19,35 @@ internal enum class FixedHeadingLapPhase {
 internal enum class FixedHeadingActuationPhaseLead(
     val degrees: Double,
     val targetSpeedMetersPerSecond: Double,
+    val desiredAlongTrackSpeedMetersPerSecond: Double? = null,
+    val maximumCommandSpeedMetersPerSecond: Double = targetSpeedMetersPerSecond,
+    val speedSlewRateMetersPerSecondSquared: Double? = null,
+    val usesCurvatureFeedforward: Boolean = false,
 ) {
     DEGREES_0(0.0, 1.25),
     DEGREES_14(14.0, 1.25),
-    DEGREES_16(16.0, 1.35),
+    DEGREES_16(
+        degrees = 16.0,
+        targetSpeedMetersPerSecond = 1.60,
+        desiredAlongTrackSpeedMetersPerSecond = 0.70,
+        maximumCommandSpeedMetersPerSecond = 1.80,
+    ),
+    CURVATURE_FEEDFORWARD_16(
+        degrees = 16.0,
+        targetSpeedMetersPerSecond = 1.60,
+        desiredAlongTrackSpeedMetersPerSecond = 0.70,
+        maximumCommandSpeedMetersPerSecond = 1.90,
+        speedSlewRateMetersPerSecondSquared = 1.60,
+        usesCurvatureFeedforward = true,
+    ),
+    CURVATURE_FEEDFORWARD_16_FAST(
+        degrees = 16.0,
+        targetSpeedMetersPerSecond = 1.90,
+        desiredAlongTrackSpeedMetersPerSecond = 0.70,
+        maximumCommandSpeedMetersPerSecond = 2.00,
+        speedSlewRateMetersPerSecondSquared = 1.60,
+        usesCurvatureFeedforward = true,
+    ),
 }
 
 
@@ -50,6 +75,10 @@ internal data class FixedHeadingLapDecision(
     val curvaturePerMeter: Double? = null,
     val endpointReached: Boolean = false,
     val stopRequested: Boolean = false,
+    val measuredAlongTrackSpeedMetersPerSecond: Double? = null,
+    val speedFeedbackBoostMetersPerSecond: Double = 0.0,
+    val commandTargetSpeedMetersPerSecond: Double = 0.0,
+    val lateralCorrectionMetersPerSecond: Double = 0.0,
 )
 
 /**
@@ -76,6 +105,11 @@ internal class FixedHeadingLapController {
     private var pendingRecoveryMeasurement: OmniCenterlineMeasurement? = null
     private var lossObservedAtNanos = 0L
     private var frameStreamRecoveryStartedAtNanos = 0L
+    private var measuredAlongTrackSpeedMetersPerSecond: Double? = null
+    private var speedFeedbackBoostMetersPerSecond = 0.0
+    private var commandTargetSpeedMetersPerSecond = 0.0
+    private var filteredCurvaturePerMeter = 0.0
+    private var filteredLateralOffsetMeters = 0.0
 
     fun start(
         nowNanos: Long,
@@ -98,6 +132,11 @@ internal class FixedHeadingLapController {
         pendingRecoveryMeasurement = null
         lossObservedAtNanos = 0L
         frameStreamRecoveryStartedAtNanos = 0L
+        measuredAlongTrackSpeedMetersPerSecond = null
+        speedFeedbackBoostMetersPerSecond = 0.0
+        commandTargetSpeedMetersPerSecond = 0.0
+        filteredCurvaturePerMeter = 0.0
+        filteredLateralOffsetMeters = 0.0
     }
 
     fun stop() {
@@ -112,6 +151,11 @@ internal class FixedHeadingLapController {
         pendingRecoveryMeasurement = null
         lossObservedAtNanos = 0L
         frameStreamRecoveryStartedAtNanos = 0L
+        measuredAlongTrackSpeedMetersPerSecond = null
+        speedFeedbackBoostMetersPerSecond = 0.0
+        commandTargetSpeedMetersPerSecond = 0.0
+        filteredCurvaturePerMeter = 0.0
+        filteredLateralOffsetMeters = 0.0
     }
 
     /**
@@ -129,6 +173,7 @@ internal class FixedHeadingLapController {
         latestConfidence = 0.0
         pendingRecoveryMeasurement = null
         lossObservedAtNanos = nowNanos
+        filteredCurvaturePerMeter = 0.0
         lastTickAtNanos = nowNanos
     }
 
@@ -138,8 +183,14 @@ internal class FixedHeadingLapController {
         confidence: Double,
         nowNanos: Long,
         capturedAtNanos: Long = 0L,
+        actualTravelDirectionDegrees: Double? = null,
+        actualGroundSpeedMetersPerSecond: Double? = null,
     ) {
         if (!enabled) return
+        updateMeasuredAlongTrackSpeed(
+            actualTravelDirectionDegrees = actualTravelDirectionDegrees,
+            actualGroundSpeedMetersPerSecond = actualGroundSpeedMetersPerSecond,
+        )
         val measurementAtNanos = capturedAtNanos.takeIf { it > 0L } ?: nowNanos
         val measurementAgeSeconds = (
             (nowNanos - measurementAtNanos).coerceAtLeast(0L) / NANOS_PER_SECOND
@@ -180,11 +231,7 @@ internal class FixedHeadingLapController {
             lastDetectionAtNanos = nowNanos
             latestMeasurementCapturedAtNanos = measurementAtNanos
             lossObservedAtNanos = 0L
-        }
-        if (measurement == null) {
-            if (centerline == null || heightMeters == null) {
-                pendingRecoveryMeasurement = null
-            }
+        } else {
             if (phase == FixedHeadingLapPhase.TRACKING) {
                 phase = FixedHeadingLapPhase.COASTING
                 lossObservedAtNanos = nowNanos
@@ -193,9 +240,17 @@ internal class FixedHeadingLapController {
             return
         }
         if (phase == FixedHeadingLapPhase.ACQUIRING) {
-            // The first valid lookahead vector is already a closed-loop steering
-            // target: it contains both path direction and cross-track correction.
-            virtualHeadingDegrees = directionToLookahead(measurement)
+            // The feedforward profile owns the tangent state; the lookahead chord
+            // remains the residual correction target.
+            virtualHeadingDegrees =
+                if (
+                    actuationPhaseLead.usesCurvatureFeedforward &&
+                    measuredAlongTrackSpeedMetersPerSecond != null
+                ) {
+                    measurement.tangentDegrees
+                } else {
+                    directionToLookahead(measurement)
+                }
             phase = FixedHeadingLapPhase.TRACKING
             lastTickAtNanos = nowNanos
         } else if (
@@ -256,6 +311,8 @@ internal class FixedHeadingLapController {
             detectionAgeNanos > speedHoldWindowNanos
         ) {
             phase = FixedHeadingLapPhase.COASTING
+            filteredCurvaturePerMeter = 0.0
+            filteredLateralOffsetMeters = 0.0
             if (!withinExplicitLossHold) {
                 pathAccelerationMetersPerSecondSquared = 0.0
                 pathSpeedMetersPerSecond = moveToward(
@@ -282,32 +339,55 @@ internal class FixedHeadingLapController {
             return decision(stopRequested = true)
         }
 
+        val curvatureFeedforwardActive =
+            actuationPhaseLead.usesCurvatureFeedforward &&
+                measuredAlongTrackSpeedMetersPerSecond != null
+        if (!curvatureFeedforwardActive) {
+            filteredCurvaturePerMeter = 0.0
+            filteredLateralOffsetMeters = 0.0
+        }
+        val curvature =
+            if (curvatureFeedforwardActive) {
+                updateFilteredCurvature(measurement.curvaturePerMeter)
+            } else {
+                0.0
+            }
+        val expectedGuidanceLeadDegrees =
+            Math.toDegrees(curvature * configuredLookaheadMeters() / 2.0)
+        val guidanceResidualDegrees = guidanceError - expectedGuidanceLeadDegrees
+        val expectedLateralOffsetMeters =
+            abs(curvature) * configuredLookaheadMeters() * configuredLookaheadMeters() / 2.0
+        val lateralOffsetResidualMeters =
+            (abs(measurement.lateralOffsetMeters) - expectedLateralOffsetMeters)
+                .coerceAtLeast(0.0)
+
+        commandTargetSpeedMetersPerSecond = feedbackCompensatedCommandSpeed()
         val confidenceLimitedSpeed =
             if (latestConfidence >= MIN_CONFIDENCE) {
-                targetSpeedMetersPerSecond
+                commandTargetSpeedMetersPerSecond
             } else {
                 DEGRADED_SPEED_METERS_PER_SECOND
             }
         val trackingAuthority =
             minOf(
                 authorityAfterMargin(
-                    magnitude = abs(guidanceError),
+                    magnitude = abs(guidanceResidualDegrees),
                     fullAuthorityLimit = HIGH_SPEED_FULL_AUTHORITY_GUIDANCE_ERROR_DEGREES,
                     zeroAuthorityLimit = SLOWDOWN_GUIDANCE_ERROR_DEGREES,
                 ),
                 authorityAfterMargin(
-                    magnitude = abs(measurement.lateralOffsetMeters),
+                    magnitude = lateralOffsetResidualMeters,
                     fullAuthorityLimit = HIGH_SPEED_FULL_AUTHORITY_LATERAL_OFFSET_METERS,
                     zeroAuthorityLimit = SLOWDOWN_LATERAL_OFFSET_METERS,
                 ),
             )
         val authorityLimitedSpeed = confidenceLimitedSpeed * trackingAuthority
         val lookaheadLimitedSpeed =
-            targetSpeedMetersPerSecond *
+            commandTargetSpeedMetersPerSecond *
                 (measurement.lookaheadDistanceMeters / configuredLookaheadMeters())
                     .coerceIn(0.0, 1.0)
         val targetSpeed = minOf(
-            targetSpeedMetersPerSecond,
+            commandTargetSpeedMetersPerSecond,
             authorityLimitedSpeed,
             lookaheadLimitedSpeed,
         )
@@ -318,8 +398,15 @@ internal class FixedHeadingLapController {
         )
         val maximumTurnDegrees =
             MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND * elapsedSeconds
+        val feedforwardTurnDegrees =
+            Math.toDegrees(
+                (measuredAlongTrackSpeedMetersPerSecond ?: 0.0) * curvature,
+            ) * elapsedSeconds
+        val residualTurnDegrees =
+            guidanceResidualDegrees * GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND * elapsedSeconds
         val turnDegrees =
-            guidanceError.coerceIn(-maximumTurnDegrees, maximumTurnDegrees)
+            (feedforwardTurnDegrees + residualTurnDegrees)
+                .coerceIn(-maximumTurnDegrees, maximumTurnDegrees)
         virtualHeadingDegrees = wrapDegrees(virtualHeadingDegrees + turnDegrees)
         lastVirtualTurnRateDegreesPerSecond =
             if (elapsedSeconds > 0.0) turnDegrees / elapsedSeconds else 0.0
@@ -327,17 +414,19 @@ internal class FixedHeadingLapController {
         val phaseLeadDegrees = appliedActuationPhaseLeadDegrees()
         val commandHeadingDegrees = wrapDegrees(virtualHeadingDegrees + phaseLeadDegrees)
         val commandHeadingRadians = Math.toRadians(commandHeadingDegrees)
+        val lateralCorrectionSourceMeters =
+            when {
+                pathSpeedMetersPerSecond == 0.0 -> measurement.lateralOffsetMeters
+                curvatureFeedforwardActive ->
+                    updateFilteredLateralOffset(measurement.lateralOffsetMeters)
+                else -> 0.0
+            }
         val correction =
-            if (pathSpeedMetersPerSecond == 0.0) {
-                (
-                    LATERAL_FEEDBACK_GAIN_PER_SECOND * measurement.lateralOffsetMeters
-                    ).coerceIn(
+            (LATERAL_FEEDBACK_GAIN_PER_SECOND * lateralCorrectionSourceMeters)
+                .coerceIn(
                     -MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
                     MAX_LATERAL_CORRECTION_METERS_PER_SECOND,
                 )
-            } else {
-                0.0
-            }
         val correctionHeadingRadians =
             Math.toRadians(measurement.tangentDegrees + phaseLeadDegrees)
         val forward =
@@ -346,8 +435,19 @@ internal class FixedHeadingLapController {
         val right =
             pathSpeedMetersPerSecond * sin(commandHeadingRadians) +
                 correction * cos(correctionHeadingRadians)
+        val resultantSpeed = hypot(forward, right)
+        val resultantScale =
+            if (resultantSpeed > actuationPhaseLead.maximumCommandSpeedMetersPerSecond) {
+                actuationPhaseLead.maximumCommandSpeedMetersPerSecond / resultantSpeed
+            } else {
+                1.0
+            }
         phase = FixedHeadingLapPhase.TRACKING
-        return decision(forward = forward, right = right)
+        return decision(
+            forward = forward * resultantScale,
+            right = right * resultantScale,
+            lateralCorrectionMetersPerSecond = correction * resultantScale,
+        )
     }
 
 
@@ -442,6 +542,69 @@ internal class FixedHeadingLapController {
             else -> 0.0
         }
     }
+    private fun updateMeasuredAlongTrackSpeed(
+        actualTravelDirectionDegrees: Double?,
+        actualGroundSpeedMetersPerSecond: Double?,
+    ) {
+        if (
+            actualTravelDirectionDegrees == null ||
+            actualGroundSpeedMetersPerSecond == null ||
+            !actualTravelDirectionDegrees.isFinite() ||
+            !actualGroundSpeedMetersPerSecond.isFinite() ||
+            actualGroundSpeedMetersPerSecond < 0.0
+        ) {
+            measuredAlongTrackSpeedMetersPerSecond = null
+            return
+        }
+        val travelDirectionErrorDegrees =
+            shortestAngularDelta(virtualHeadingDegrees, actualTravelDirectionDegrees)
+        measuredAlongTrackSpeedMetersPerSecond =
+            if (abs(travelDirectionErrorDegrees) <= MAX_SPEED_FEEDBACK_DIRECTION_ERROR_DEGREES) {
+                (
+                    actualGroundSpeedMetersPerSecond *
+                        cos(Math.toRadians(travelDirectionErrorDegrees))
+                    ).coerceAtLeast(0.0)
+            } else {
+                null
+            }
+    }
+
+    private fun feedbackCompensatedCommandSpeed(): Double {
+        val desiredSpeed = actuationPhaseLead.desiredAlongTrackSpeedMetersPerSecond
+        val measuredSpeed = measuredAlongTrackSpeedMetersPerSecond
+        if (desiredSpeed == null || measuredSpeed == null) {
+            speedFeedbackBoostMetersPerSecond = 0.0
+            return targetSpeedMetersPerSecond
+        }
+        speedFeedbackBoostMetersPerSecond =
+            (
+                SPEED_FEEDBACK_GAIN *
+                    (desiredSpeed - measuredSpeed).coerceAtLeast(0.0)
+                ).coerceAtMost(
+                actuationPhaseLead.maximumCommandSpeedMetersPerSecond -
+                    targetSpeedMetersPerSecond,
+            )
+        return targetSpeedMetersPerSecond + speedFeedbackBoostMetersPerSecond
+    }
+
+
+    private fun updateFilteredCurvature(measuredCurvaturePerMeter: Double): Double {
+        val boundedMeasurement =
+            measuredCurvaturePerMeter.coerceIn(
+                -MAX_FEEDFORWARD_CURVATURE_PER_METER,
+                MAX_FEEDFORWARD_CURVATURE_PER_METER,
+            )
+        filteredCurvaturePerMeter +=
+            CURVATURE_FILTER_ALPHA * (boundedMeasurement - filteredCurvaturePerMeter)
+        return filteredCurvaturePerMeter
+    }
+    private fun updateFilteredLateralOffset(measuredOffsetMeters: Double): Double {
+        filteredLateralOffsetMeters +=
+            LATERAL_OFFSET_FILTER_ALPHA *
+                (measuredOffsetMeters - filteredLateralOffsetMeters)
+        return filteredLateralOffsetMeters
+    }
+
 
     private fun authorityAfterMargin(
         magnitude: Double,
@@ -458,6 +621,7 @@ internal class FixedHeadingLapController {
         forward: Double = 0.0,
         right: Double = 0.0,
         stopRequested: Boolean = false,
+        lateralCorrectionMetersPerSecond: Double = 0.0,
     ): FixedHeadingLapDecision = FixedHeadingLapDecision(
         phase = phase,
         forwardMetersPerSecond = forward,
@@ -466,6 +630,10 @@ internal class FixedHeadingLapController {
         tangentDegrees = latestMeasurement?.tangentDegrees,
         lateralOffsetMeters = latestMeasurement?.lateralOffsetMeters,
         curvaturePerMeter = latestMeasurement?.curvaturePerMeter,
+        measuredAlongTrackSpeedMetersPerSecond = measuredAlongTrackSpeedMetersPerSecond,
+        speedFeedbackBoostMetersPerSecond = speedFeedbackBoostMetersPerSecond,
+        commandTargetSpeedMetersPerSecond = commandTargetSpeedMetersPerSecond,
+        lateralCorrectionMetersPerSecond = lateralCorrectionMetersPerSecond,
         stopRequested = stopRequested,
     )
 
@@ -481,6 +649,21 @@ internal class FixedHeadingLapController {
                 targetSpeed,
                 MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
             )
+            return
+        }
+        actuationPhaseLead.speedSlewRateMetersPerSecondSquared?.let { speedSlewRate ->
+            val previousSpeed = pathSpeedMetersPerSecond
+            pathSpeedMetersPerSecond = moveToward(
+                current = previousSpeed,
+                target = targetSpeed,
+                maximumDelta = speedSlewRate * elapsedSeconds,
+            )
+            pathAccelerationMetersPerSecondSquared =
+                if (elapsedSeconds > 0.0) {
+                    (pathSpeedMetersPerSecond - previousSpeed) / elapsedSeconds
+                } else {
+                    0.0
+                }
             return
         }
 
@@ -521,7 +704,7 @@ internal class FixedHeadingLapController {
 
     internal companion object {
         const val TARGET_SPEED_METERS_PER_SECOND = 1.25
-        const val FASTER_TARGET_SPEED_METERS_PER_SECOND = 1.35
+        const val FASTER_TARGET_SPEED_METERS_PER_SECOND = 1.60
         const val LOOKAHEAD_METERS = 0.45
         const val DEGRADED_SPEED_METERS_PER_SECOND = 0.22
         const val HIGH_SPEED_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 1.00
@@ -529,8 +712,14 @@ internal class FixedHeadingLapController {
         const val MAX_BLIND_DECELERATION_METERS_PER_SECOND_SQUARED = 1.50
         const val HIGH_SPEED_MAX_JERK_METERS_PER_SECOND_CUBED = 4.00
         const val SPEED_ERROR_RESPONSE_PER_SECOND = 3.00
+        const val SPEED_FEEDBACK_GAIN = 1.0
+        const val MAX_SPEED_FEEDBACK_DIRECTION_ERROR_DEGREES = 45.0
         const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 60.0
+        const val MAX_FEEDFORWARD_CURVATURE_PER_METER = 1.20
+        const val GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND = 4.0
+        const val CURVATURE_FILTER_ALPHA = 0.35
         const val LATERAL_FEEDBACK_GAIN_PER_SECOND = 0.8
+        const val LATERAL_OFFSET_FILTER_ALPHA = 0.35
         const val MAX_LATERAL_CORRECTION_METERS_PER_SECOND = 0.25
         const val MIN_CONFIDENCE = 0.60
         const val HIGH_SPEED_COMMIT_CONFIDENCE = 0.75

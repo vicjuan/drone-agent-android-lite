@@ -81,16 +81,29 @@ class TemporalCenterlineTrackerTest {
     }
 
     @Test
-    fun `ambiguous prior topology always requires full extraction`() {
+    fun `known branch topology requires full extraction`() {
         val points = extractor.extract(maskAlongPath(verticalPath(x = 100.0))).points
-        val ambiguous = CenterlineEstimate(
+        val branched = CenterlineEstimate(
             points = points,
             confidence = 1.0,
             components = CenterlineConfidence(1.0, 1.0, 1.0, 1.0, 1.0),
             topology = CenterlineTopology(branchCount = 1),
         )
 
-        assertNull(tracker.track(maskAlongPath(verticalPath(x = 102.0)), ambiguous))
+        assertNull(tracker.track(maskAlongPath(verticalPath(x = 102.0)), branched))
+    }
+
+    @Test
+    fun `closed loop topology requires full extraction`() {
+        val points = extractor.extract(maskAlongPath(verticalPath(x = 100.0))).points
+        val closedLoop = CenterlineEstimate(
+            points = points,
+            confidence = 1.0,
+            components = CenterlineConfidence(1.0, 1.0, 1.0, 1.0, 1.0),
+            topology = CenterlineTopology(closedLoop = true),
+        )
+
+        assertNull(tracker.track(maskAlongPath(verticalPath(x = 102.0)), closedLoop))
     }
 
     private fun arcPath(shiftX: Double): List<Point> = (0..64).map { step ->

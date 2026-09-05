@@ -650,6 +650,33 @@ class BlackTapeDetectorInstrumentedTest {
     }
 
     @Test
+    fun trackedReferenceMatchedTapeSurvivesMissingCoarseFloorContext() {
+        val width = 1920
+        val height = 1080
+        val diagnostics = mutableListOf<String>()
+        val established =
+            rgbaAsset("flight-reference-zero-floor-before.jpg", width, height)
+        val detections =
+            detectSequence(
+                listOf(
+                    established,
+                    established,
+                    established,
+                    rgbaAsset("flight-reference-zero-floor-at.jpg", width, height),
+                ),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            )
+
+        assertTrue(diagnostics[2], detections[2] != null)
+        assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
     fun oneSidedDeskEdgeCannotProvideEndpointEvidenceBeforeTapeAppears() {
         val width = 1920
         val height = 1080
