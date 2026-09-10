@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="瓦楞紙圓形跑道的尺標貼紙位置圖：22、23 放在 12 點鐘內側；24、25 放在 3 點鐘內側。量圓心距離，並保留黑膠帶旁的淨空。">
+<title>尺標貼紙位置圖｜瓦楞紙圓形跑道</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fbfaf7;
+  --ink: #252b2b;
+  --muted: #606969;
+  --line: #dcd8d0;
+  --card: #fff;
+  --teal: #087b70;
+  --teal-soft: #e5f3ef;
+  --amber: #835b15;
+  --amber-soft: #fff5dd;
+  --yellow: #f1d928;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 17px/1.75 -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+}
+main { max-width: 1160px; margin: auto; padding: 36px 24px; }
+h1, h2, h3, p, figure { margin: 0; }
+h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.3; letter-spacing: -.03em; }
+h2 { font-size: 20px; line-height: 1.5; }
+h3 { font-size: 18px; line-height: 1.5; }
+header { margin-bottom: 24px; }
+.eyebrow { color: var(--teal); font-size: 13px; font-weight: 700; letter-spacing: .1em; margin-bottom: 8px; }
+.lead { margin-top: 12px; color: var(--muted); }
+.layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.figure-head { padding: 18px 20px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.badge { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.diagram { display: block; width: 100%; height: auto; padding: 4px 10px 0; }
+svg { font-family: inherit; }
+.clock { fill: #606969; font-size: 22px; font-weight: 600; }
+.sticker { fill: var(--yellow); stroke: #b59b18; stroke-width: 1.5; }
+.sticker-number { fill: #202320; font-size: 29px; font-weight: 800; text-anchor: middle; dominant-baseline: central; }
+.group-label { fill: #075f57; font-size: 23px; font-weight: 700; text-anchor: middle; }
+.dimension { stroke: #087b70; stroke-width: 2.3; fill: none; }
+.extension { stroke: #087b70; stroke-width: 1.5; stroke-dasharray: 4 4; }
+.measure-label { fill: #075f57; font-size: 22px; font-weight: 700; text-anchor: middle; }
+figcaption { padding: 14px 20px 18px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 7px 18px; margin-bottom: 8px; color: var(--ink); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.swatch { width: 16px; height: 16px; border-radius: 3px; display: inline-block; }
+.swatch.tape { background: #252b2b; }
+.swatch.label { background: var(--yellow); border-radius: 50%; border: 1px solid #b59b18; }
+.swatch.clear { background: #f1d2a8; border: 1px dashed #ae7035; }
+.side { display: grid; gap: 16px; }
+.instructions { padding: 20px; }
+.pair { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.pair p { margin-top: 7px; }
+.number { display: inline-flex; width: 34px; height: 34px; margin-right: 5px; justify-content: center; align-items: center; background: var(--yellow); border: 1px solid #b59b18; border-radius: 50%; color: #202320; font-weight: 800; }
+.distance { color: var(--teal); font-weight: 700; }
+.small { color: var(--muted); font-size: 14px; }
+.clearance { padding: 18px 20px; }
+.clearance svg { display: block; width: 100%; max-width: 340px; margin: 10px auto 2px; }
+.reminder { background: var(--teal-soft); border-left: 4px solid var(--teal); border-radius: 0 10px 10px 0; padding: 16px 18px; }
+.reminder p { margin-top: 6px; }
+.bottom { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.bottom .card { padding: 20px; }
+ol, ul { margin: 10px 0 0; padding-left: 1.35em; }
+li + li { margin-top: 7px; }
+.caution { background: var(--amber-soft); border-color: #eadbb8; }
+.caution h2 { color: var(--amber); }
+.caution p { margin-top: 10px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
+@media (max-width: 820px) {
+  .layout, .bottom { grid-template-columns: 1fr; }
+  main { max-width: 680px; padding: 24px 16px; }
+  .side { grid-template-columns: 1fr; }
+}
+@media (max-width: 420px) {
+  body { font-size: 16px; }
+  main { padding: 20px 12px; }
+  .figure-head { padding: 16px 14px 0; }
+  .diagram { padding: 4px 0 0; }
+  figcaption, .instructions, .clearance, .bottom .card { padding: 16px; }
+}
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: white; font-size: 10pt; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  main { max-width: none; padding: 0; }
+  header { margin-bottom: 12px; }
+  h1 { font-size: 25pt; }
+  h2 { font-size: 12pt; }
+  h3 { font-size: 11pt; }
+  .lead { margin-top: 6px; }
+  .layout { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 12px; }
+  .bottom { grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .side { gap: 10px; }
+  .instructions, .clearance, .bottom .card { padding: 12px; }
+  .figure-head { padding: 12px 12px 0; }
+  .pair { margin-top: 10px; padding-top: 10px; }
+  .number { width: 25px; height: 25px; }
+  .reminder { padding: 10px 12px; }
+  .small, figcaption, .badge { font-size: 9pt; }
+  figcaption { padding: 10px 12px; }
+  .card, .reminder { break-inside: avoid; }
+  footer { font-size: 8pt; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">瓦楞紙圓形跑道 · 距離參考</p>
+    <h1>尺標貼紙位置圖</h1>
+    <p class="lead">先放<strong>兩組、共四張</strong>。都在圓內側；每組兩張要能同時清楚入鏡。</p>
+  </header>
+
+  <div class="layout">
+    <figure class="card">
+      <div class="figure-head">
+        <h2>跑道俯視圖</h2>
+        <span class="badge">位置示意 · 非等比例</span>
+      </div>
+      <svg class="diagram" viewBox="0 0 620 620" role="img" aria-labelledby="placement-title placement-desc">
+        <title id="placement-title">兩組黃色尺標放在圓形黑膠帶的內側</title>
+        <desc id="placement-desc">將圓形看成時鐘。22 和 23 在 12 點鐘附近，左右排列；24 和 25 在 3 點鐘附近，上下排列。每組兩張的圓心直線距離約 20 公分。所有貼紙外緣距離膠帶邊緣至少 5 公分。圓心不放尺標。圖中連接線、虛線和淡色淨空帶都只是說明，不要畫在紙板上。</desc>
+        <defs>
+          <marker id="dimension-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M1 1L7 4L1 7" fill="none" stroke="#087b70" stroke-width="1.5"/>
+          </marker>
+        </defs>
+        <rect x="18" y="24" width="584" height="578" rx="16" fill="#edd8b5"/>
+        <text x="40" y="55" fill="#72593c" font-size="18">瓦楞紙</text>
+        <circle cx="310" cy="325" r="195.5" fill="none" stroke="#eabf84" stroke-width="31"/>
+        <circle cx="310" cy="325" r="180" fill="none" stroke="#ae7035" stroke-width="1.5" stroke-dasharray="5 7"/>
+        <circle cx="310" cy="325" r="220" fill="none" stroke="#252b2b" stroke-width="18"/>
+        <text class="clock" x="310" y="78" text-anchor="middle">12 點鐘</text>
+        <text class="clock" x="562" y="333" text-anchor="middle">3</text>
+        <text class="clock" x="310" y="579" text-anchor="middle">6</text>
+        <text class="clock" x="58" y="333" text-anchor="middle">9</text>
+        <text class="group-label" x="310" y="143">A 組</text>
+        <text class="group-label" x="445" y="220">B 組</text>
+
+        <path class="extension" d="M255 185V244M365 185V244"/>
+        <line class="dimension" x1="255" y1="235" x2="365" y2="235" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="310" y="267">約 20 cm</text>
+        <circle class="sticker" cx="255" cy="185" r="22"/>
+        <circle class="sticker" cx="365" cy="185" r="22"/>
+        <text class="sticker-number" x="255" y="185">22</text>
+        <text class="sticker-number" x="365" y="185">23</text>
+
+        <path class="extension" d="M445 270H384M445 380H384"/>
+        <line class="dimension" x1="392" y1="270" x2="392" y2="380" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="374" y="325" transform="rotate(-90 374 325)">約 20 cm</text>
+        <circle class="sticker" cx="445" cy="270" r="22"/>
+        <circle class="sticker" cx="445" cy="380" r="22"/>
+        <text class="sticker-number" x="445" y="270">24</text>
+        <text class="sticker-number" x="445" y="380">25</text>
+
+        <circle cx="310" cy="325" r="3" fill="#937953"/>
+        <text x="310" y="356" text-anchor="middle" fill="#72593c" font-size="21">圓心</text>
+        <text x="310" y="383" text-anchor="middle" fill="#72593c" font-size="18">不用貼尺標</text>
+        <text x="310" y="461" text-anchor="middle" fill="#075f57" font-size="20" font-weight="600">量圓心到圓心的直線距離</text>
+        <text x="310" y="527" text-anchor="middle" fill="#725024" font-size="18">淨空帶</text>
+      </svg>
+      <figcaption>
+        <div class="legend" aria-label="圖例">
+          <span><i class="swatch tape" aria-hidden="true"></i>黑膠帶</span>
+          <span><i class="swatch label" aria-hidden="true"></i>黃色貼紙</span>
+          <span><i class="swatch clear" aria-hidden="true"></i>不貼記號的淨空帶</span>
+        </div>
+        <strong>箭頭、連接線、虛線與淡色淨空帶都只是示意，不要畫在紙板上。</strong><br>
+        圓徑與貼紙直徑未依實物設定；請用尺量距離，不要照螢幕比例施工。本圖只畫尺標，未畫其他追蹤貼片。
+      </figcaption>
+    </figure>
+
+    <div class="side">
+      <section class="card instructions" aria-labelledby="position-heading">
+        <h2 id="position-heading">照這兩個位置貼</h2>
+        <div class="pair">
+          <h3>A 組｜12 點鐘附近的內側</h3>
+          <p><span class="number">22</span><span class="number">23</span>左右排列</p>
+          <p>圓心直線距離：<span class="distance">約 20 公分</span></p>
+        </div>
+        <div class="pair">
+          <h3>B 組｜3 點鐘附近的內側</h3>
+          <p><span class="number">24</span><span class="number">25</span>上下排列</p>
+          <p>圓心直線距離：<span class="distance">約 20 公分</span></p>
+        </div>
+        <p class="small" style="margin-top:16px">兩組的連線方向大致互相垂直。時鐘方向只是位置描述，不代表機頭方向；不必沿整圈等距貼滿。</p>
+      </section>
+
+      <section class="card clearance" aria-labelledby="clearance-heading">
+        <h2 id="clearance-heading">膠帶旁至少留 5 公分</h2>
+        <svg viewBox="0 0 300 145" role="img" aria-labelledby="clearance-title clearance-desc">
+          <title id="clearance-title">淨空距離要量膠帶邊緣到貼紙外緣</title>
+          <desc id="clearance-desc">左邊是黑膠帶，右邊是黃色貼紙。最近的兩個邊緣之間保留至少 5 公分，不是從貼紙圓心開始量。</desc>
+          <rect x="8" y="8" width="284" height="105" rx="8" fill="#edd8b5"/>
+          <rect x="35" y="8" width="25" height="105" fill="#252b2b"/>
+          <circle class="sticker" cx="230" cy="61" r="28"/>
+          <text class="sticker-number" x="230" y="61">22</text>
+          <line class="dimension" x1="60" y1="61" x2="202" y2="61" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+          <text x="131" y="44" text-anchor="middle" fill="#075f57" font-size="23" font-weight="700">≥ 5 cm</text>
+          <text x="51" y="139" text-anchor="middle" fill="#606969" font-size="16">膠帶邊緣</text>
+          <text x="231" y="139" text-anchor="middle" fill="#606969" font-size="16">貼紙外緣</text>
+        </svg>
+        <p class="small">每張都量「最近邊緣到最近邊緣」。不是圓心到膠帶，也不能覆蓋原跑道。</p>
+      </section>
+
+      <section class="reminder" aria-labelledby="frame-heading">
+        <h2 id="frame-heading">同一組，要同時入鏡</h2>
+        <p>在預定拍攝高度確認：兩張都清楚可見，盡量不要落在畫面邊角。不要把同一組拆放在圓的兩端。</p>
+      </section>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <section class="card" aria-labelledby="record-heading">
+      <h2 id="record-heading">貼好後，留下一張紀錄照</h2>
+      <ol>
+        <li>量好 <strong>22–23</strong> 與 <strong>24–25</strong> 各自的圓心距離。</li>
+        <li>不必硬湊整數；實測 <strong>20.3 公分</strong>，就記 20.3 公分。</li>
+        <li>拍下貼紙位置，附上兩組距離，供影片分析時核對尺度。</li>
+      </ol>
+    </section>
+    <section class="card caution" aria-labelledby="trial-heading">
+      <h2 id="trial-heading">先確認黑字不會干擾循線</h2>
+      <p>這款貼紙有黑色數字；先少量試貼，確認循線辨識未受干擾，再擴展其他追蹤貼片。</p>
+      <p class="small">本圖是建議配置，尚未驗證這款貼紙的實拍效果。目前 App 不會自動讀編號或已知間距；尺標供離線量測與核對。</p>
+    </section>
+  </div>
+  <footer>單一 HTML，離線即可開啟；可使用瀏覽器的列印功能保存。此頁不連線，也不控制無人機。</footer>
+</main>
+</body>
+</html>

@@ -1,6 +1,8 @@
 package com.durendal.droneagent.lite
 
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,6 +69,41 @@ class FlightProfilerTest {
         assertEquals(false, detailsBuilt)
         assertEquals(1, file.readLines().size)
         assertTrue(file.delete())
+    }
+
+    @Test
+    fun `checkpoint publishes preceding records without closing the trace`() {
+        val file = File.createTempFile("flight-profile-checkpoint", ".tsv")
+        val profiler = FlightProfiler(file)
+        val flushed = CountDownLatch(1)
+        var failure: Throwable? = null
+        try {
+            profiler.recordLazy(event = "straight_test_stop") { "attemptId=round-1" }
+            profiler.checkpoint {
+                failure = it
+                flushed.countDown()
+            }
+            assertTrue(flushed.await(2, TimeUnit.SECONDS))
+            assertEquals(null, failure)
+            assertTrue(file.readText().contains("\tstraight_test_stop\t0\t0\tattemptId=round-1\n"))
+            profiler.record(event = "velocity", details = "x=0.0 y=0.0")
+            profiler.close()
+            assertTrue(file.readText().contains("\tvelocity\t0\t0\tx=0.0 y=0.0\n"))
+        } finally {
+            profiler.close()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `checkpoint after close reports failure instead of claiming durable data`() {
+        val file = File.createTempFile("flight-profile-checkpoint-closed", ".tsv")
+        val profiler = FlightProfiler(file)
+        profiler.close()
+        var failure: Throwable? = null
+        profiler.checkpoint { failure = it }
+        assertTrue(failure is IllegalStateException)
+        file.delete()
     }
 
     @Test

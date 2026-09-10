@@ -40,11 +40,11 @@ internal enum class FixedHeadingActuationPhaseLead(
         speedSlewRateMetersPerSecondSquared = 1.60,
         usesCurvatureFeedforward = true,
     ),
-    CURVATURE_FEEDFORWARD_16_FAST(
+    CURVATURE_FEEDFORWARD_16_VISUAL(
         degrees = 16.0,
-        targetSpeedMetersPerSecond = 1.90,
+        targetSpeedMetersPerSecond = 1.60,
         desiredAlongTrackSpeedMetersPerSecond = 0.70,
-        maximumCommandSpeedMetersPerSecond = 2.00,
+        maximumCommandSpeedMetersPerSecond = 1.90,
         speedSlewRateMetersPerSecondSquared = 1.60,
         usesCurvatureFeedforward = true,
     ),
@@ -79,6 +79,10 @@ internal data class FixedHeadingLapDecision(
     val speedFeedbackBoostMetersPerSecond: Double = 0.0,
     val commandTargetSpeedMetersPerSecond: Double = 0.0,
     val lateralCorrectionMetersPerSecond: Double = 0.0,
+    val speedFeedbackSampleAtNanos: Long = 0L,
+    val speedFeedbackObservedAtNanos: Long = 0L,
+    val speedFeedbackUnavailableReason: String? = null,
+    val speedFeedbackDirectionErrorDegrees: Double? = null,
 )
 
 /**
@@ -106,6 +110,12 @@ internal class FixedHeadingLapController {
     private var lossObservedAtNanos = 0L
     private var frameStreamRecoveryStartedAtNanos = 0L
     private var measuredAlongTrackSpeedMetersPerSecond: Double? = null
+    private var speedFeedbackSampleAtNanos = 0L
+    private var speedFeedbackObservedAtNanos = 0L
+    private var speedFeedbackUnavailableReason: String? = "NO_OBSERVATION"
+    private var speedFeedbackDirectionErrorDegrees: Double? = null
+    private var visualTravelDirectionDegrees: Double? = null
+    private var visualGroundSpeedMetersPerSecond: Double? = null
     private var speedFeedbackBoostMetersPerSecond = 0.0
     private var commandTargetSpeedMetersPerSecond = 0.0
     private var filteredCurvaturePerMeter = 0.0
@@ -133,6 +143,12 @@ internal class FixedHeadingLapController {
         lossObservedAtNanos = 0L
         frameStreamRecoveryStartedAtNanos = 0L
         measuredAlongTrackSpeedMetersPerSecond = null
+        speedFeedbackSampleAtNanos = 0L
+        speedFeedbackObservedAtNanos = 0L
+        speedFeedbackUnavailableReason = "NO_OBSERVATION"
+        speedFeedbackDirectionErrorDegrees = null
+        visualTravelDirectionDegrees = null
+        visualGroundSpeedMetersPerSecond = null
         speedFeedbackBoostMetersPerSecond = 0.0
         commandTargetSpeedMetersPerSecond = 0.0
         filteredCurvaturePerMeter = 0.0
@@ -152,6 +168,12 @@ internal class FixedHeadingLapController {
         lossObservedAtNanos = 0L
         frameStreamRecoveryStartedAtNanos = 0L
         measuredAlongTrackSpeedMetersPerSecond = null
+        speedFeedbackSampleAtNanos = 0L
+        speedFeedbackObservedAtNanos = 0L
+        speedFeedbackUnavailableReason = "NO_OBSERVATION"
+        speedFeedbackDirectionErrorDegrees = null
+        visualTravelDirectionDegrees = null
+        visualGroundSpeedMetersPerSecond = null
         speedFeedbackBoostMetersPerSecond = 0.0
         commandTargetSpeedMetersPerSecond = 0.0
         filteredCurvaturePerMeter = 0.0
@@ -177,6 +199,96 @@ internal class FixedHeadingLapController {
         lastTickAtNanos = nowNanos
     }
 
+    fun updateVisualVelocity(
+        forwardMetersPerSecond: Double?,
+        rightMetersPerSecond: Double?,
+        sampleHeadingDegrees: Double?,
+        currentHeadingDegrees: Double?,
+        sampleAtNanos: Long,
+        nowNanos: Long,
+        unavailableReason: String?,
+    ) {
+        if (
+            !enabled || phase == FixedHeadingLapPhase.STOPPED ||
+            actuationPhaseLead != FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL
+        ) return
+        val groundSpeed =
+            if (forwardMetersPerSecond != null && rightMetersPerSecond != null) {
+                hypot(forwardMetersPerSecond, rightMetersPerSecond)
+            } else {
+                null
+            }
+        val reason = when {
+            unavailableReason != null -> unavailableReason
+            sampleAtNanos <= 0L -> "VISUAL_SAMPLE_MISSING"
+            sampleAtNanos < startedAtNanos -> "VISUAL_SAMPLE_BEFORE_START"
+            sampleAtNanos > nowNanos -> "VISUAL_SAMPLE_FUTURE"
+            nowNanos - sampleAtNanos > MAX_VISUAL_VELOCITY_AGE_NANOS -> "VISUAL_VELOCITY_STALE"
+            forwardMetersPerSecond == null || !forwardMetersPerSecond.isFinite() ||
+                rightMetersPerSecond == null || !rightMetersPerSecond.isFinite() ||
+                groundSpeed == null || !groundSpeed.isFinite() -> "VISUAL_VELOCITY_INVALID"
+            sampleHeadingDegrees == null || !sampleHeadingDegrees.isFinite() ||
+                currentHeadingDegrees == null || !currentHeadingDegrees.isFinite() -> "VISUAL_HEADING_INVALID"
+            groundSpeed < MIN_VISUAL_GROUND_SPEED_METERS_PER_SECOND -> "VISUAL_SPEED_TOO_LOW"
+            else -> null
+        }
+        visualTravelDirectionDegrees =
+            if (reason == null) {
+                wrapDegrees(
+                    Math.toDegrees(atan2(checkNotNull(rightMetersPerSecond), checkNotNull(forwardMetersPerSecond))) +
+                        shortestAngularDelta(
+                            wrapDegrees(checkNotNull(currentHeadingDegrees)),
+                            wrapDegrees(checkNotNull(sampleHeadingDegrees)),
+                        ),
+                )
+            } else {
+                null
+            }
+        visualGroundSpeedMetersPerSecond = groundSpeed.takeIf { reason == null }
+        updateMeasuredAlongTrackSpeed(
+            actualTravelDirectionDegrees = visualTravelDirectionDegrees,
+            actualGroundSpeedMetersPerSecond = visualGroundSpeedMetersPerSecond,
+            nowNanos = nowNanos,
+            speedFeedbackSampleAtNanos = sampleAtNanos,
+            speedFeedbackUnavailableReason = reason,
+        )
+        clearUnavailableVisualBoost()
+    }
+
+    private fun refreshVisualVelocity(nowNanos: Long) {
+        if (visualGroundSpeedMetersPerSecond != null) {
+            val reason =
+                if (speedFeedbackSampleAtNanos > nowNanos) {
+                    "VISUAL_SAMPLE_FUTURE"
+                } else if (nowNanos - speedFeedbackSampleAtNanos > MAX_VISUAL_VELOCITY_AGE_NANOS) {
+                    "VISUAL_VELOCITY_STALE"
+                } else {
+                    null
+                }
+            if (reason != null) {
+                visualTravelDirectionDegrees = null
+                visualGroundSpeedMetersPerSecond = null
+            }
+            updateMeasuredAlongTrackSpeed(
+                actualTravelDirectionDegrees = visualTravelDirectionDegrees,
+                actualGroundSpeedMetersPerSecond = visualGroundSpeedMetersPerSecond,
+                nowNanos = speedFeedbackObservedAtNanos,
+                speedFeedbackSampleAtNanos = speedFeedbackSampleAtNanos,
+                speedFeedbackUnavailableReason = reason,
+            )
+        }
+        clearUnavailableVisualBoost()
+    }
+
+    private fun clearUnavailableVisualBoost() {
+        if (measuredAlongTrackSpeedMetersPerSecond == null) {
+            speedFeedbackBoostMetersPerSecond = 0.0
+            if (commandTargetSpeedMetersPerSecond != 0.0) {
+                commandTargetSpeedMetersPerSecond = targetSpeedMetersPerSecond
+            }
+        }
+    }
+
     fun observe(
         centerline: TapeCenterlinePath?,
         heightMeters: Double?,
@@ -185,12 +297,19 @@ internal class FixedHeadingLapController {
         capturedAtNanos: Long = 0L,
         actualTravelDirectionDegrees: Double? = null,
         actualGroundSpeedMetersPerSecond: Double? = null,
+        speedFeedbackSampleAtNanos: Long = 0L,
+        speedFeedbackUnavailableReason: String? = null,
     ) {
         if (!enabled) return
-        updateMeasuredAlongTrackSpeed(
-            actualTravelDirectionDegrees = actualTravelDirectionDegrees,
-            actualGroundSpeedMetersPerSecond = actualGroundSpeedMetersPerSecond,
-        )
+        if (actuationPhaseLead != FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL) {
+            updateMeasuredAlongTrackSpeed(
+                actualTravelDirectionDegrees = actualTravelDirectionDegrees,
+                actualGroundSpeedMetersPerSecond = actualGroundSpeedMetersPerSecond,
+                nowNanos = nowNanos,
+                speedFeedbackSampleAtNanos = speedFeedbackSampleAtNanos,
+                speedFeedbackUnavailableReason = speedFeedbackUnavailableReason,
+            )
+        }
         val measurementAtNanos = capturedAtNanos.takeIf { it > 0L } ?: nowNanos
         val measurementAgeSeconds = (
             (nowNanos - measurementAtNanos).coerceAtLeast(0L) / NANOS_PER_SECOND
@@ -264,7 +383,15 @@ internal class FixedHeadingLapController {
     }
 
     fun tick(nowNanos: Long): FixedHeadingLapDecision {
-        if (!enabled) return FixedHeadingLapDecision(FixedHeadingLapPhase.DISABLED)
+        if (!enabled) {
+            return FixedHeadingLapDecision(
+                FixedHeadingLapPhase.DISABLED,
+                speedFeedbackUnavailableReason = "NO_OBSERVATION",
+            )
+        }
+        if (actuationPhaseLead == FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL) {
+            refreshVisualVelocity(nowNanos)
+        }
         if (phase == FixedHeadingLapPhase.ACQUIRING) {
             if (nowNanos - startedAtNanos >= ACQUISITION_TIMEOUT_NANOS) {
                 phase = FixedHeadingLapPhase.STOPPED
@@ -545,7 +672,15 @@ internal class FixedHeadingLapController {
     private fun updateMeasuredAlongTrackSpeed(
         actualTravelDirectionDegrees: Double?,
         actualGroundSpeedMetersPerSecond: Double?,
+        nowNanos: Long,
+        speedFeedbackSampleAtNanos: Long,
+        speedFeedbackUnavailableReason: String?,
     ) {
+        // Bind diagnostics to the same observation as the cached projection, never a later tick.
+        this.speedFeedbackSampleAtNanos = speedFeedbackSampleAtNanos
+        speedFeedbackObservedAtNanos = nowNanos
+        this.speedFeedbackUnavailableReason = null
+        speedFeedbackDirectionErrorDegrees = null
         if (
             actualTravelDirectionDegrees == null ||
             actualGroundSpeedMetersPerSecond == null ||
@@ -554,10 +689,12 @@ internal class FixedHeadingLapController {
             actualGroundSpeedMetersPerSecond < 0.0
         ) {
             measuredAlongTrackSpeedMetersPerSecond = null
+            this.speedFeedbackUnavailableReason = speedFeedbackUnavailableReason ?: "INVALID_INPUT"
             return
         }
         val travelDirectionErrorDegrees =
             shortestAngularDelta(virtualHeadingDegrees, actualTravelDirectionDegrees)
+        speedFeedbackDirectionErrorDegrees = travelDirectionErrorDegrees
         measuredAlongTrackSpeedMetersPerSecond =
             if (abs(travelDirectionErrorDegrees) <= MAX_SPEED_FEEDBACK_DIRECTION_ERROR_DEGREES) {
                 (
@@ -565,6 +702,7 @@ internal class FixedHeadingLapController {
                         cos(Math.toRadians(travelDirectionErrorDegrees))
                     ).coerceAtLeast(0.0)
             } else {
+                this.speedFeedbackUnavailableReason = "DIRECTION_MISMATCH"
                 null
             }
     }
@@ -634,6 +772,10 @@ internal class FixedHeadingLapController {
         speedFeedbackBoostMetersPerSecond = speedFeedbackBoostMetersPerSecond,
         commandTargetSpeedMetersPerSecond = commandTargetSpeedMetersPerSecond,
         lateralCorrectionMetersPerSecond = lateralCorrectionMetersPerSecond,
+        speedFeedbackSampleAtNanos = speedFeedbackSampleAtNanos,
+        speedFeedbackObservedAtNanos = speedFeedbackObservedAtNanos,
+        speedFeedbackUnavailableReason = speedFeedbackUnavailableReason,
+        speedFeedbackDirectionErrorDegrees = speedFeedbackDirectionErrorDegrees,
         stopRequested = stopRequested,
     )
 
@@ -714,6 +856,8 @@ internal class FixedHeadingLapController {
         const val SPEED_ERROR_RESPONSE_PER_SECOND = 3.00
         const val SPEED_FEEDBACK_GAIN = 1.0
         const val MAX_SPEED_FEEDBACK_DIRECTION_ERROR_DEGREES = 45.0
+        const val MAX_VISUAL_VELOCITY_AGE_NANOS = 250_000_000L
+        const val MIN_VISUAL_GROUND_SPEED_METERS_PER_SECOND = 0.05
         const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 60.0
         const val MAX_FEEDFORWARD_CURVATURE_PER_METER = 1.20
         const val GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND = 4.0

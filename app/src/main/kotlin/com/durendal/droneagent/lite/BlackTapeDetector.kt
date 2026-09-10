@@ -152,6 +152,8 @@ class BlackTapeDetector internal constructor(
     // frame and its masks, but only the Activity knows gimbal pose and height.
     private val captureRecorder: TapeCaptureRecorder? = null,
     private val captureFlightContext: () -> Map<String, String> = ::emptyMap,
+    // Borrowed only for this callback; an observer must own any asynchronous snapshot.
+    private val onRgbaFrameReady: (org.opencv.core.Mat, Long) -> Unit = { _, _ -> },
 ) : AutoCloseable {
 
     private val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -659,6 +661,7 @@ class BlackTapeDetector internal constructor(
             lastFloorFraction = 0.0
             source.create(height, width, org.opencv.core.CvType.CV_8UC4)
             source.put(0, 0, rgbaBytes)
+            onRgbaFrameReady(source, frameNanos)
             val scale = min(1.0, MAX_ANALYSIS_DIMENSION / max(width, height).toDouble())
             val analysis = if (scale < 1.0) {
                 Imgproc.resize(

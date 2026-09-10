@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="用繁體中文圖解、互動模型與理解練習，讀懂 DJI 黑膠帶循線提速的原理，以及 Breaking the 8.5-Second Lap 的建議與限制。">
+<title>先懂，再提速｜董事長 PDF 的互動教室</title>
+<style>
+:root{--bg:#fbfaf7;--ink:#252b2b;--muted:#606969;--accent:#b5451b;--accent-soft:#fbe9e0;--line:#dcd8d0;--card:#fff;--teal:#087b70;--teal-soft:#e5f3ef;--purple:#6556a4;--purple-soft:#f0edf8;--amber:#835b15;--amber-soft:#fff5dd;--mono:"SFMono-Regular",Menlo,Consolas,monospace;--shadow:0 12px 35px #26332b08}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;font-size:17px;line-height:1.8}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}button,a,summary{touch-action:manipulation}button{cursor:pointer}a{color:var(--accent);text-underline-offset:4px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--purple);outline-offset:4px}button:disabled{opacity:.4;cursor:default}h1,h2,h3,p{margin-top:0}h1{font-size:clamp(23px,2.7vw,34px);line-height:1.3;margin-bottom:5px;letter-spacing:-.04em}h2{font-size:clamp(29px,3.6vw,45px);line-height:1.35;letter-spacing:-.04em;margin-bottom:18px}h3{font-size:21px;line-height:1.5;margin-bottom:12px}p{margin-bottom:16px}small,.small{font-size:14px;line-height:1.7}.muted{color:var(--muted)}.mono{font-family:var(--mono)}.cmd{color:var(--accent)}.actual{color:var(--teal)}.estimate{color:var(--purple)}strong{font-weight:650}ul,ol{padding-left:1.4em}li{margin:6px 0}code{font-family:var(--mono);font-size:.87em;background:#efece6;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}sub{font-size:.7em}hr{border:0;border-top:1px solid var(--line);margin:30px 0}
+.skip{position:absolute;top:-80px;left:16px;background:var(--ink);color:white;padding:12px;z-index:10}.skip:focus{top:12px}.site-head{max-width:1420px;margin:auto;padding:30px 38px 22px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid var(--line)}.eyebrow{font:12px/1.5 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}.head-note{font-size:13px;color:var(--muted);margin:0}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);padding:9px 15px;font-size:14px;line-height:1.5;transition:background .15s,border-color .15s}.btn:hover{background:#f1eee7;border-color:#b9b5ab}.btn.primary{background:var(--ink);color:white;border-color:var(--ink)}.btn.primary:hover{background:#384141}.btn[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}.layout{max-width:1420px;margin:auto;padding:28px 38px 50px;display:grid;grid-template-columns:225px minmax(0,1fr);gap:48px}.sidebar{position:sticky;top:22px;align-self:start;max-height:calc(100vh - 45px);overflow:auto}.nav-label{font:12px var(--mono);color:var(--muted);letter-spacing:.07em;margin:0 0 15px}.chapter-nav{display:grid;gap:5px}.chapter-nav a{display:flex;align-items:center;gap:11px;color:var(--muted);text-decoration:none;padding:10px 12px;border-radius:7px;font-size:14px;line-height:1.5;border-left:3px solid transparent}.chapter-nav a:hover{background:#f0ede6}.chapter-nav a[aria-current="step"]{background:var(--accent-soft);color:var(--accent);border-left-color:var(--accent);font-weight:650}.nav-num{font:12px var(--mono);opacity:.8;min-width:20px}.sidebar-note{margin:22px 10px 0;font-size:12px;line-height:1.7;color:var(--muted)}.key{border:1px solid var(--line);border-radius:3px;padding:1px 4px;font-family:var(--mono);font-size:11px}.content{min-width:0;max-width:1030px}.reading-status{display:flex;gap:16px;align-items:center;margin-bottom:26px;color:var(--muted);font:12px var(--mono)}.progress-track{flex:1;height:3px;background:#e7e3dc;border-radius:3px;overflow:hidden}.progress-fill{height:100%;background:var(--accent);width:10%;transition:width .2s}.lesson{scroll-margin-top:24px}.lesson[hidden]{display:none}.section-kicker{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:8px 0 15px}.badge{display:inline-block;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600;line-height:1.7;background:#eeece6;color:#59605d}.badge.fact{background:var(--teal-soft);color:#08685f}.badge.model{background:var(--purple-soft);color:#594991}.badge.hypothesis{background:var(--amber-soft);color:var(--amber)}.lead{font-size:20px;line-height:1.85;color:#45504d;max-width:44em;margin-bottom:26px}.takeaway{padding:20px 24px;background:var(--teal-soft);border-left:4px solid var(--teal);border-radius:0 9px 9px 0;margin:26px 0}.takeaway .label{display:block;font-size:12px;letter-spacing:.08em;color:var(--teal);margin-bottom:6px}.takeaway p:last-child,.note p:last-child{margin-bottom:0}.note{padding:17px 20px;border-radius:8px;margin:20px 0;background:#f0ede6;font-size:15px}.note.caution{background:var(--amber-soft);border-left:3px solid #bc8b35}.note.source{background:transparent;border:1px solid var(--line);color:var(--muted);font-size:14px}.grid-two{display:grid;grid-template-columns:1fr 1fr;gap:20px}.grid-three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;box-shadow:var(--shadow);min-width:0}.card p:last-child{margin-bottom:0}.card-number{font:12px var(--mono);color:var(--accent);margin-bottom:12px}.big-value{display:block;font-family:var(--mono);font-size:clamp(25px,2.6vw,36px);line-height:1.35;margin:9px 0}.unit{font-family:inherit;font-size:14px;color:var(--muted)}.stat-label{display:block;font-size:13px;color:var(--muted)}.stat{min-width:0}.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:18px 0}.stats .value{font:25px/1.5 var(--mono);display:block;overflow-wrap:anywhere}.lab{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:25px 0;background:white;box-shadow:var(--shadow)}.lab-head{padding:15px 21px;border-bottom:1px solid var(--line);background:#f6f4ee;display:flex;justify-content:space-between;gap:12px;align-items:center;font-size:15px}.lab-head strong{font-size:15px}.lab-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(245px,.8fr)}.lab-visual{padding:20px;min-width:0;display:flex;flex-direction:column;justify-content:center}.lab-controls{padding:24px;background:#fcfbf8;border-left:1px solid var(--line);min-width:0}.lab-controls .stats{grid-template-columns:1fr 1fr;gap:14px}.lab-controls .stats .value{font-size:22px}.control{margin-bottom:20px}.control label{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px;font-weight:550}.control output{font:14px var(--mono);color:var(--accent);white-space:nowrap}.control input[type="range"]{display:block;width:100%;accent-color:var(--accent);margin:14px 0 5px;min-height:22px}.range-labels{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--muted)}select{width:100%;border:1px solid var(--line);border-radius:6px;background:white;padding:9px 10px;margin-top:7px;font-size:14px;color:var(--ink)}.button-row{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}.button-row .btn{font-size:13px;padding:8px 12px}.chart{display:block;width:100%;height:auto;overflow:visible}.chart text{font-family:inherit;font-size:14px;fill:var(--muted)}.chart .svg-small{font-size:11px}.chart .svg-label{font-size:15px;fill:var(--ink);font-weight:600}.chart .axis{stroke:#aaa99f;stroke-width:1}.chart .gridline{stroke:#e8e5dd;stroke-width:1}.chart .tape{stroke:#3d4642;fill:none;stroke-width:5}.chart .ghost{stroke:#c9cbc5;stroke-dasharray:5 5;fill:none;stroke-width:2}.legend{display:flex;flex-wrap:wrap;gap:8px 17px;font-size:12px;color:var(--muted);margin:10px 0}.legend span{display:flex;gap:6px;align-items:center}.swatch{width:20px;height:3px;background:var(--ink);display:inline-block}.swatch.cmd{background:var(--accent)}.swatch.actual{background:var(--teal)}.swatch.estimate{background:var(--purple)}.caption{font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0}.lab-bottom{border-top:1px solid var(--line);padding:14px 21px;background:#f8f7f3;font-size:14px}.formula{font-family:var(--mono);font-size:15px;line-height:2;background:#f5f2eb;border-radius:8px;padding:15px 18px;overflow-wrap:anywhere;margin:12px 0}.formula .explain{font-family:inherit;color:var(--muted);font-size:13px}.flow{list-style:none;padding:0;margin:22px 0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px}.flow li{margin:0;padding:17px 12px;background:white;border:1px solid var(--line);border-radius:8px;text-align:center;font-size:14px;position:relative}.flow li:not(:last-child)::after{content:"→";position:absolute;right:-12px;top:40%;z-index:1;color:var(--accent);background:var(--bg);font-size:16px}.flow small{display:block;color:var(--muted);font-size:11px;margin-top:7px}.timeline{display:grid;grid-template-columns:1fr 1.1fr 1.4fr;gap:12px;margin:20px 0}.time-block{padding:20px;border-radius:9px;background:var(--teal-soft);border-top:4px solid var(--teal)}.time-block.unknown{background:#efede7;border-color:#a09b8f}.time-block.observed{background:var(--accent-soft);border-color:var(--accent)}.time-block b{display:block;font:28px var(--mono);margin:10px 0}.time-block small{display:block}.details{border:1px solid var(--line);border-radius:8px;margin:18px 0;background:#fff}.details summary{cursor:pointer;padding:14px 19px;font-size:14px;font-weight:600}.details[open] summary{border-bottom:1px solid var(--line)}.details-body{padding:18px 20px;font-size:15px}.details-body p:last-child{margin-bottom:0}.quiz{margin:25px 0;padding:22px;background:#f1eef8;border-radius:10px}.quiz .quiz-title{font-size:13px;color:var(--purple);margin-bottom:8px}.quiz h3{font-size:17px}.quiz-options{display:grid;gap:8px;margin-top:13px}.quiz-option{text-align:left;background:#fff;border:1px solid #d8d2e7;border-radius:7px;padding:12px 14px;color:var(--ink);font-size:14px;line-height:1.65}.quiz-option:hover{border-color:var(--purple)}.quiz-option.chosen{border-color:var(--purple);background:#e7e0f5}.quiz-option.correct{border-color:var(--teal);background:var(--teal-soft)}.quiz-feedback{margin:13px 0 0;font-size:14px;color:#54476e;min-height:0}.quiz-feedback:empty{display:none}.comparison{width:100%;border-collapse:collapse;font-size:14px;margin:18px 0}.comparison th,.comparison td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top}.comparison th{font-size:12px;color:var(--muted);background:#f1eee7}.comparison tbody tr:last-child td{border-bottom:0}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px}.table-wrap table{margin:0}.table-wrap .comparison{min-width:520px}.roadmap{display:grid;gap:12px;margin:25px 0}.rung{display:grid;grid-template-columns:44px 1fr 120px;gap:15px;align-items:start;padding:20px;background:#fff;border:1px solid var(--line);border-radius:9px}.rung-index{font:22px var(--mono);color:var(--accent);padding-top:4px}.rung h3{margin:0 0 5px;font-size:19px}.rung p{font-size:14px;color:var(--muted);margin:0}.rung-target{text-align:right;font:17px var(--mono);padding-top:5px}.rung-target small{display:block;font-family:inherit;font-size:11px;color:var(--muted)}.rung.boundary{border-style:dashed;background:#efede7}.rung.boundary .rung-index{color:var(--muted)}.terms{display:grid;grid-template-columns:140px 1fr;gap:10px 18px;margin:0;font-size:14px}.terms dt{font-weight:650}.terms dd{margin:0;color:var(--muted)}.lesson-footer{border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:15px;margin-top:40px;padding-top:22px}.next-note{font-size:12px;color:var(--muted);text-align:center;flex:1}.lesson-footer .btn{min-width:110px}.site-footer{font-size:12px;color:var(--muted);margin:28px 0 0}.hero-map{padding:30px;position:relative;overflow:hidden;background:#edf2ec;border-color:#d6e0d5}.hero-map svg{max-height:250px}.hero-badge{font:11px var(--mono);letter-spacing:.1em;color:var(--teal)}.intro-pair{display:grid;grid-template-columns:1.2fr .8fr;gap:25px;align-items:stretch;margin:25px 0}.intro-lines{display:grid;gap:13px;padding:10px 0}.intro-line{display:grid;grid-template-columns:30px 1fr;gap:10px;align-items:start;font-size:16px}.intro-line b{font-family:var(--mono);color:var(--accent)}.mode-flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:15px 0}.mode-flow span{padding:9px 12px;background:#fff;border:1px solid var(--line);border-radius:6px;font-size:13px}.mode-flow .active-stage{background:var(--teal-soft);border-color:var(--teal);color:#08685f}.mode-flow .bypassed{background:#efede7;text-decoration:line-through;color:#83857e;border-style:dashed}.mode-flow i{font-style:normal;color:var(--muted)}.score{padding:22px;background:var(--teal-soft);border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:20px}.score strong{font:27px var(--mono);display:block;color:var(--teal)}.read-all .lesson{padding-bottom:50px;margin-bottom:40px;border-bottom:2px solid var(--line)}.read-all .lesson-footer{display:none}.read-all .reading-status{display:none}noscript .note{margin:25px 0}.definitions{position:absolute;width:0;height:0;overflow:hidden}
+@media(min-width:1600px){.layout{gap:62px}}
+@media(max-width:1100px){.layout{grid-template-columns:185px minmax(0,1fr);gap:28px;padding:24px}.site-head{padding:25px 24px}.chapter-nav a{font-size:13px;padding:9px 8px}.lab-grid{grid-template-columns:minmax(0,1.1fr) minmax(220px,.9fr)}.lab-controls{padding:18px}.grid-three{gap:10px}.card{padding:18px}.intro-pair{grid-template-columns:1fr 1fr}}
+@media(max-width:850px){.layout{display:block;padding:18px 22px 40px}.sidebar{position:static;max-height:none;overflow:visible;margin-bottom:24px}.chapter-nav{display:flex;overflow-x:auto;gap:6px;padding:3px 0 10px}.chapter-nav a{flex:none;white-space:nowrap;border-left:0;border-bottom:3px solid transparent;padding:8px 11px;background:#f1eee7}.chapter-nav a[aria-current="step"]{border-bottom-color:var(--accent)}.nav-label,.sidebar-note{display:none}.reading-status{margin-bottom:18px}.content{max-width:none}.site-head{align-items:flex-start}.toolbar .btn{font-size:12px;padding:8px 10px}.lab-grid{grid-template-columns:1.2fr 1fr}}
+@media(max-width:600px){body{font-size:16px}.site-head{padding:21px 18px;display:block}.toolbar{margin-top:16px}.layout{padding:14px 18px 35px}.lead{font-size:18px}.intro-pair,.grid-two,.grid-three,.lab-grid,.timeline{grid-template-columns:1fr}.intro-pair{gap:15px}.hero-map{padding:18px}.hero-map svg{max-height:210px}.lab-controls{border-left:0;border-top:1px solid var(--line);padding:20px}.lab-visual{padding:16px}.lab-head{padding:13px 16px;align-items:flex-start}.lab-head strong{font-size:14px}.lab-head .badge{font-size:10px;white-space:nowrap}.stats{gap:10px}.stats .value{font-size:21px}.stat-label{font-size:12px}.flow{grid-template-columns:1fr}.flow li{padding:11px 16px;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:8px}.flow small{margin:0}.flow li:not(:last-child)::after{content:"↓";right:50%;top:auto;bottom:-16px}.time-block{padding:16px}.time-block b{font-size:24px}.takeaway{padding:17px 18px}.rung{grid-template-columns:30px 1fr;gap:10px;padding:17px}.rung-target{grid-column:2;text-align:left;font-size:15px}.rung-target small{display:inline;margin-left:8px}.terms{grid-template-columns:1fr;gap:3px}.terms dd{margin-bottom:13px}.lesson-footer{gap:8px}.lesson-footer .btn{min-width:auto;font-size:13px;padding:10px 12px}.next-note{font-size:11px}.score{padding:18px;align-items:flex-start}.chart .svg-small{font-size:12px}.quiz{padding:18px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
+@media print{@page{margin:16mm}body{font-size:11pt;background:white;color:black}.site-head{padding:0 0 14px;max-width:none}.layout{display:block;padding:18px 0;max-width:none}.sidebar,.toolbar,.reading-status,.lesson-footer,.quiz-options,.quiz-feedback,.button-row,.control input,.control select,.skip,.score .btn{display:none!important}.lesson,.lesson[hidden]{display:block!important;border:0!important;margin:0!important;padding:22px 0!important;break-before:page}.lesson:first-of-type{break-before:auto}.lab,.card,.takeaway,.rung,.note,.quiz{box-shadow:none;break-inside:avoid}.lab-grid{grid-template-columns:1.2fr 1fr}.lab-controls{border-left:1px solid var(--line)}.chart{max-height:270px}.control{margin-bottom:9px}h2{font-size:24pt}.lead{font-size:13pt}.caption,.small{font-size:10pt}a{color:inherit}.hero-map svg{max-height:190px}.read-all .lesson{border:0}.details-body{display:block}.site-footer{font-size:9pt}}
+</style>
+</head>
+<body>
+<a class="skip" href="#lesson-body">跳到教材內容</a>
+<svg class="definitions" aria-hidden="true"><defs>
+<marker id="arrow-cmd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#b5451b"/></marker>
+<marker id="arrow-actual" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#087b70"/></marker>
+<marker id="arrow-estimate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#6556a4"/></marker>
+<marker id="arrow-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#8d938c"/></marker>
+</defs></svg>
+<header class="site-head">
+<div><div class="eyebrow">A field guide to flight control · 2026 / 09</div><h1>先懂，再提速。</h1><p class="head-note">讀懂董事長的《Breaking the 8.5-Second Lap》</p></div>
+<div class="toolbar"><button class="btn" id="view-toggle" type="button" aria-pressed="false">全部展開</button><button class="btn" id="print-guide" type="button">列印／存成 PDF</button></div>
+</header>
+<div class="layout">
+<aside class="sidebar" aria-label="教材目錄">
+<p class="nav-label">LEARNING PATH / 閱讀路線</p>
+<nav class="chapter-nav">
+<a href="#lesson-0" data-chapter="0"><span class="nav-num">00</span>先抓住整件事</a>
+<a href="#lesson-1" data-chapter="1"><span class="nav-num">01</span>機頭 ≠ 行進方向</a>
+<a href="#lesson-2" data-chapter="2"><span class="nav-num">02</span>三個速度，不是一回事</a>
+<a href="#lesson-3" data-chapter="3"><span class="nav-num">03</span>晚到，還是慢起來？</a>
+<a href="#lesson-4" data-chapter="4"><span class="nav-num">04</span>提前 16° 到底是什麼</a>
+<a href="#lesson-5" data-chapter="5"><span class="nav-num">05</span>先把速度量清楚</a>
+<a href="#lesson-6" data-chapter="6"><span class="nav-num">06</span>從一小段弧想到整個圓</a>
+<a href="#lesson-7" data-chapter="7"><span class="nav-num">07</span>傾角與 ANGLE 模式</a>
+<a href="#lesson-8" data-chapter="8"><span class="nav-num">08</span>看得清楚，不等於看得早</a>
+<a href="#lesson-9" data-chapter="9"><span class="nav-num">09</span>回頭讀懂那張階梯表</a>
+</nav>
+<p class="sidebar-note">每章只抓一個觀念。<br>先動圖，再看解釋。公式都可展開選讀。<br><br>橘色＝命令<br>綠色＝實際運動／量測<br>紫色＝模型／估計<br><br>單頁模式可用 <span class="key">←</span> <span class="key">→</span> 換章；操作滑桿時，方向鍵只調數值。</p>
+</aside>
+<main class="content" id="lesson-body" tabindex="-1">
+<div class="reading-status"><span id="reading-position">01 / 10</span><div class="progress-track" aria-hidden="true"><div class="progress-fill" id="reading-progress"></div></div><span>閱讀位置，不是測驗成績</span></div>
+<noscript><div class="note caution">JavaScript 未啟用：所有章節仍可閱讀，但滑桿、換章與測驗需要 JavaScript。可用瀏覽器列印保存全文。</div></noscript>
+
+<section class="lesson" id="lesson-0" aria-labelledby="heading-0">
+<div class="section-kicker"><span class="badge">導讀</span><span>不先背公式，也不先談要改哪幾行程式。</span></div>
+<h2 id="heading-0" tabindex="-1">董事長想說的是：<br>別只催它快，先讓它跟得上。</h2>
+<p class="lead">飛機要繞得快，不只要「有力氣」。它還要看得懂路、知道自己怎麼動，並在正確的時間往正確的方向用力。</p>
+<div class="intro-pair">
+<div class="card"><h3>先想像你在指揮一位滑冰者</h3><div class="intro-lines">
+<div class="intro-line"><b>1</b><span>你看到的是<strong>稍早以前</strong>的位置。</span></div>
+<div class="intro-line"><b>2</b><span>你喊「往左」，他<strong>過一會兒才反應</strong>，也不會瞬間到達指定速度。</span></div>
+<div class="intro-line"><b>3</b><span>如果你還把他的速度量錯，下一句指令就可能又錯了一點。</span></div>
+</div><p class="small muted">一直喊得更大聲，不一定滑得更快。可能只是更早衝出路線。</p></div>
+<div class="card hero-map"><div class="hero-badge">ONE CIRCLE. THREE QUESTIONS.</div><svg class="chart" viewBox="0 0 320 240" role="img" aria-label="圓形路線上的飛機，周圍標示看得準、判得對、跟得上三個問題"><circle cx="160" cy="125" r="74" fill="none" stroke="#c5d7cc" stroke-width="22"/><circle cx="160" cy="125" r="74" fill="none" stroke="#3d5148" stroke-width="3" stroke-dasharray="5 5"/><circle cx="234" cy="125" r="9" fill="#087b70"/><path d="M234 113L234 68" fill="none" stroke="#087b70" stroke-width="3" marker-end="url(#arrow-actual)"/><text x="160" y="29" text-anchor="middle" class="svg-label">看得準</text><text x="52" y="222" text-anchor="middle" class="svg-label">判得對</text><text x="266" y="222" text-anchor="middle" class="svg-label">跟得上</text><text x="160" y="124" text-anchor="middle">不是換更大的馬達</text><text x="160" y="148" text-anchor="middle" class="svg-small">而是理解整個控制過程</text></svg></div>
+</div>
+<div class="takeaway"><span class="label">這份教材要讓你能自己解釋</span><p>為什麼命令不等於速度？提前 16° 提前的是什麼？為什麼先量速度，再談模型與 ANGLE？</p></div>
+<h3>讀這份 PDF，要分清三種話</h3>
+<div class="grid-three">
+<div class="card"><span class="badge fact">實測／已核對</span><p><strong>09/01 最佳單圈 7.9 秒。</strong><br>09/04 固定機頭模式的穩定平均約 8.9–9.0 秒。最佳與平均不能直接比輸贏。</p></div>
+<div class="card"><span class="badge model">簡化模型</span><p><strong>圈速越快，需要的向心加速度越大。</strong><br>可以算出理想傾角，但不代表整套系統已能安全做到。</p></div>
+<div class="card"><span class="badge hypothesis">待驗證推論</span><p><strong>速度低估、延遲或飛控限制可能是瓶頸。</strong><br>需要資料分辨；PDF 的提速秒數不是承諾。</p></div>
+</div>
+<p class="note source">本教材依據董事長 PDF、專案控制迴圈報告及已核對的同儕審閱結論。橘／綠／紫的圖是教學示意，不是新實飛結果，也不會連線或控制無人機。</p>
+</section>
+
+<section class="lesson" id="lesson-1" aria-labelledby="heading-1">
+<div class="section-kicker"><span class="badge model">方向圖解</span><span>先認識目前的固定機頭飛法。</span></div>
+<h2 id="heading-1" tabindex="-1">機頭朝哪裡，<br>不等於飛機往哪裡走。</h2>
+<p class="lead">汽車通常車頭朝著前進方向；多旋翼不是。它可以面向北邊，同時往東、往西，甚至倒退。</p>
+<div class="lab">
+<div class="lab-head"><strong>動手看：飛到圓的另一側，機頭需要跟著轉嗎？</strong><span class="badge model">理想運動示意</span></div>
+<div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 430 340" role="img" aria-labelledby="orbit-title"><title id="orbit-title">固定機頭與機頭隨路線轉向的比較；綠色箭頭表示運動方向</title><text x="32" y="28">北／前方 ↑</text><circle cx="210" cy="175" r="103" class="tape"/><circle cx="210" cy="175" r="3" fill="#8d938c"/><text x="210" y="168" text-anchor="middle" class="svg-small">黑膠帶圓</text><text x="210" y="190" text-anchor="middle" class="svg-small">直徑約 1.5 m</text><line id="orbit-velocity" stroke="#087b70" stroke-width="4" marker-end="url(#arrow-actual)"/><g id="orbit-drone"><g id="orbit-body"><path d="M-15 -15L15 15M15 -15L-15 15" stroke="#3d4642" stroke-width="4"/><circle cx="-16" cy="-16" r="7" fill="#fff" stroke="#3d4642" stroke-width="2"/><circle cx="16" cy="-16" r="7" fill="#fff" stroke="#3d4642" stroke-width="2"/><circle cx="-16" cy="16" r="7" fill="#fff" stroke="#3d4642" stroke-width="2"/><circle cx="16" cy="16" r="7" fill="#fff" stroke="#3d4642" stroke-width="2"/><path d="M0 -17L8 7L-8 7Z" fill="#b5451b"/></g></g><text x="210" y="321" text-anchor="middle" class="svg-small">拖動滑桿，或播放一圈。橘色尖端是機頭。</text></svg><div class="legend"><span><i class="swatch cmd"></i>機頭朝向</span><span><i class="swatch actual"></i>行進方向</span></div></div>
+<div class="lab-controls">
+<div class="control"><label for="orbit-angle">圓周位置 <output id="orbit-angle-out" for="orbit-angle" aria-live="off">0°</output></label><input id="orbit-angle" type="range" min="0" max="359" value="0" step="1"><div class="range-labels"><span>同一圈，不同位置</span><span>359°</span></div></div>
+<div class="control"><label for="orbit-mode">比較兩種飛法</label><select id="orbit-mode"><option value="fixed">固定機頭：像滑冰（B2）</option><option value="follow">機頭隨路線轉：用來比較</option></select></div>
+<button id="orbit-play" class="btn" type="button" aria-pressed="false">播放運動</button>
+<div class="stats"><div class="stat"><span class="stat-label">機身前後速度</span><strong class="value" id="orbit-forward">+0.55</strong><span class="small muted">m/s；正＝前進</span></div><div class="stat"><span class="stat-label">機身左右速度</span><strong class="value" id="orbit-right">0.00</strong><span class="small muted">m/s；正＝右移</span></div></div>
+<p class="small" id="orbit-message">現在向前飛。換個位置看看。</p>
+</div></div>
+<div class="lab-bottom">示範假設速度固定為 0.55 m/s、理想地沿圓移動；不是實飛重播。切換比較飛法不會改任何真機設定。</div>
+</div>
+<h3>目前的控制迴圈，其實就是一直重做這五件事</h3>
+<ol class="flow"><li>看影像<small>相機回傳畫面</small></li><li>找路線<small>辨識膠帶中心線</small></li><li>估狀態<small>方向、偏移、速度</small></li><li>算命令<small>前進＋側移</small></li><li>送給 DJI<small>飛機動了，再回頭看</small></li></ol>
+<p><strong>回授（feedback）</strong>就是用「觀察到的結果」修正下一次命令。不是只下令繞圈，就假定它一直在圈上。</p>
+<div class="takeaway"><span class="label">一句話帶走</span><p>固定機頭模式改變的是<strong>速度向量的方向</strong>，不必靠機頭一直旋轉來過彎。</p></div>
+<div class="quiz" data-question="heading"><div class="quiz-title">先猜一下</div><h3>機頭朝北，飛機能不能向西移動？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="yes">可以。用機身向左的水平速度。</button><button class="quiz-option" type="button" data-answer="no">不行。必須先把機頭轉向西。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+</section>
+
+<section class="lesson" id="lesson-2" aria-labelledby="heading-2">
+<div class="section-kicker"><span class="badge fact">PDF 第 4–5 頁的核心數字</span><span>先把比較的東西對齊。</span></div>
+<h2 id="heading-2" tabindex="-1">「我叫它多快」和<br>「它真的多快」是兩回事。</h2>
+<p class="lead">命令是要求；遙測是回報；周長除以圈時是幾何估算。三者有落差值得調查，但不能直接相除，就宣布找到了原因。</p>
+<div class="grid-three">
+<div class="card"><span class="stat-label">09/04 平均命令</span><strong class="big-value cmd">1.633 <span class="unit">m/s</span></strong><p class="small">App 送出的要求。不是飛機實際完成的速度。</p></div>
+<div class="card"><span class="stat-label">09/04 平均遙測地速</span><strong class="big-value actual">0.474 <span class="unit">m/s</span></strong><p class="small">DJI 回報的水平速度大小。仍有取樣、量化與時序問題要檢查。</p></div>
+<div class="card"><span class="stat-label">PDF 以名義周長估算</span><strong class="big-value estimate">0.527 <span class="unit">m/s</span></strong><p class="small">4.712 m ÷ 8.95 s。前提是實際路徑符合那個圓；不是天然真值。</p></div>
+</div>
+<p class="note caution">這些摘要數字不是同一時間逐筆配對的穩態量測。不能直接說「飛機只執行 30% 的命令」，也不能直接替遙測乘 1.1。</p>
+<h3>還有一個容易漏掉的差別：往旁邊飛，也算速度</h3>
+<p>假設你沿著一條向前的路走。你同時向右偏，<strong>總移動速度</strong>可能很快，<strong>沿路前進的速度</strong>卻比較小。</p>
+<div class="lab"><div class="lab-head"><strong>保持地速不變，只改移動方向</strong><span class="badge model">向量投影</span></div><div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 450 300" role="img" aria-labelledby="projection-title"><title id="projection-title">地速向量分解成沿線與橫向分量</title><path d="M225 255V30" stroke="#9da59c" stroke-width="2" marker-end="url(#arrow-grey)"/><path d="M45 240H417" stroke="#d1d2c9" stroke-width="2" marker-end="url(#arrow-grey)"/><text x="237" y="35" class="svg-label">路徑切線：往前</text><text x="365" y="267" class="svg-small">橫向：往右</text><line id="projection-along" x1="225" y1="240" x2="225" y2="75" stroke="#6556a4" stroke-width="5" marker-end="url(#arrow-estimate)"/><line id="projection-cross" x1="225" y1="75" x2="300" y2="75" stroke="#b5451b" stroke-width="3" stroke-dasharray="5 4"/><line id="projection-total" x1="225" y1="240" x2="300" y2="75" stroke="#087b70" stroke-width="4" marker-end="url(#arrow-actual)"/><circle cx="225" cy="240" r="6" fill="#252b2b"/></svg><div class="legend"><span><i class="swatch actual"></i>實際地速向量</span><span><i class="swatch estimate"></i>沿線分量</span><span><i class="swatch cmd"></i>橫向分量</span></div></div>
+<div class="lab-controls"><div class="control"><label for="projection-angle">偏離路徑的方向角 <output id="projection-angle-out" for="projection-angle">30°</output></label><input id="projection-angle" type="range" min="-90" max="90" step="1" value="30"><div class="range-labels"><span>−90°：全向左</span><span>+90°：全向右</span></div></div><div class="control"><label for="projection-speed">總地速 <output id="projection-speed-out" for="projection-speed">0.50 m/s</output></label><input id="projection-speed" type="range" min="0" max="1.5" step=".05" value=".5"></div><div class="stats"><div><span class="stat-label">沿線速度</span><strong class="value estimate" id="projection-along-out">0.433</strong></div><div><span class="stat-label">橫向速度</span><strong class="value cmd" id="projection-cross-out">0.250</strong></div></div><p class="small muted">上面兩項單位都是 m/s。</p><p class="small" id="projection-state"></p></div></div><div class="lab-bottom">把角度拉到 90°：地速仍可是 0.50 m/s，沿線速度卻為零。這不是速度感測器壞掉。</div></div>
+<details class="details"><summary>想看公式，以及「虛擬行進方向」有什麼不同</summary><div class="details-body"><div class="formula">沿線速度 = 地速 × cos(方向差)<br>橫向速度 = 地速 × sin(方向差)</div><p>圖中以<strong>路徑切線</strong>為基準。現有 B2 的沿線速度則是投影到控制器的<strong>虛擬行進方向</strong>，它和路徑切線不必完全相同。因此比較命令與實際速度時，必須先轉到同一個座標與方向基準。</p><p>現有資料可用性還涉及樣本是否過舊、機頭資料是否有效等。本圖只示範方向投影，以及 0.12 m/s、±45° 兩個相關門檻，不是完整控制器重現。</p></div></details>
+<div class="takeaway"><span class="label">一句話帶走</span><p>要比較速度，先問：<strong>哪個時間、哪個方向、命令還是量測？</strong></p></div>
+<div class="quiz" data-question="projection"><div class="quiz-title">確認這個觀念</div><h3>飛機地速 0.5 m/s，沿線只有 0.25 m/s，能立即判定遙測低估嗎？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="bias">可以，先把沿線速度乘 2。</button><button class="quiz-option" type="button" data-answer="direction">不能。它可能正以很大的角度偏離路徑。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+</section>
+
+<section class="lesson" id="lesson-3" aria-labelledby="heading-3">
+<div class="section-kicker"><span class="badge model">PDF 第 2 頁</span><span>把「反應慢」拆成不同原因。</span></div>
+<h2 id="heading-3" tabindex="-1">晚一點才開始，<br>和開始後慢慢加速，不一樣。</h2>
+<p class="lead">像你叫一個人起跑：他可能晚聽到，也可能聽到了卻需要時間加速。兩者都讓你看到「還沒跑快」，但改善方法不同。</p>
+<div class="lab"><div class="lab-head"><strong>拖動參數，看三種不同的「跟不上」</strong><span class="badge model">非真機參數</span></div><div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 520 310" role="img" aria-labelledby="response-title"><title id="response-title">一步命令與一階延遲模型的速度響應曲線</title><g stroke="#e8e5dd"><path d="M55 60H490M55 145H490M55 230H490M142 45V250M229 45V250M316 45V250M403 45V250M490 45V250"/></g><path d="M55 40V250H498" class="axis" fill="none"/><text x="20" y="64" class="svg-small">1.0</text><text x="20" y="149" class="svg-small">0.5</text><text x="30" y="234" class="svg-small">0</text><text x="55" y="277" class="svg-small">0</text><text x="221" y="277" class="svg-small">1.0</text><text x="395" y="277" class="svg-small">2.0</text><text x="468" y="277" class="svg-small">2.5 s</text><text x="55" y="25" class="svg-small">速度（m/s）</text><path d="M55 230V60H490" fill="none" stroke="#b5451b" stroke-width="3" stroke-dasharray="7 4"/><line id="response-delay-line" y1="45" y2="250" stroke="#6556a4" stroke-dasharray="4 4"/><path id="response-curve" fill="none" stroke="#087b70" stroke-width="4"/><text id="response-delay-label" y="300" class="svg-small" text-anchor="middle"></text></svg><div class="legend"><span><i class="swatch cmd"></i>命令：一步變成 1 m/s</span><span><i class="swatch actual"></i>模型算出的速度</span><span><i class="swatch estimate"></i>開始反應的時刻</span></div></div>
+<div class="lab-controls"><div class="control"><label for="response-delay">純延遲 τd：等多久才開始 <output id="response-delay-out" for="response-delay">150 ms</output></label><input id="response-delay" type="range" min="0" max="400" step="10" value="150"></div><div class="control"><label for="response-rise">時間常數 T：起來有多慢 <output id="response-rise-out" for="response-rise">300 ms</output></label><input id="response-rise" type="range" min="0" max="800" step="20" value="300"></div><div class="control"><label for="response-gain">穩態增益 K：最後跟到多少 <output id="response-gain-out" for="response-gain">0.80</output></label><input id="response-gain" type="range" min=".3" max="1" step=".05" value=".8"></div><div class="button-row"><button class="btn" data-response-preset="delay" type="button">只晚到</button><button class="btn" data-response-preset="rise" type="button">只慢起來</button><button class="btn" data-response-preset="both" type="button">兩者都有</button></div><p class="small" id="response-reading"></p></div></div><div class="lab-bottom">這是最簡單的「純延遲＋一階響應」教學模型。滑桿不是 DJI 已量到的數字，真機也不一定符合這個模型。</div></div>
+<h3>那 PDF 裡的 67 ms 和 327 ms 呢？</h3>
+<div class="timeline"><div class="time-block unknown"><span class="small">曝光、編碼、影像下傳</span><b>未知</b><small>App 收到影格以前，已經經過了一段時間。</small></div><div class="time-block"><span class="small">App 已解碼影格 → MSDK 返回</span><b>67.36 ms</b><small>09/04 軟體管線的平均量測。</small></div><div class="time-block observed"><span class="small">命令 → 首次達門檻速度回報</span><b>327.2 ms</b><small>另一項響應量測；混有傳輸、機體響應、回報與判定門檻。</small></div></div>
+<p>PDF 把後兩段相加，得到約 394.6 ms，提醒我們<strong>等待可能比控制數學本身更重要</strong>。但那不是同一張影格一路量到物理動作的完整、已校正延遲，也不能全部叫作純傳輸延遲。</p>
+<details class="details"><summary>想看 T 和 K 的精確意思</summary><div class="details-body"><p>在這個模型中，開始反應後經過一個 T，速度到達最終變化量的約 63%；不是經過 T 就完全穩定。K＝最終輸出／固定輸入，但必須真的量到穩態。</p><div class="formula">G(s) = K · e<sup>−sτd</sup> / (1 + sT)<br><span class="explain">不必背。三個參數分別描述：等多久、起來多慢、最後到多少。</span></div><p>收到第一筆非零遙測的時間，還受速度量化、回報時機與判定門檻影響。只用這一個時刻，不能分出 τd、T、K。</p></div></details>
+<div class="takeaway"><span class="label">一句話帶走</span><p><strong>純延遲是「尚未開始」；動態響應是「正在追上」。</strong>不能把同一個 327 ms 同時當成兩者的答案。</p></div>
+<div class="quiz" data-question="delay"><div class="quiz-title">確認這個觀念</div><h3>把 CPU 加快一倍，就能把整個控制過程的等待減半嗎？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="yes">可以，所有延遲都發生在 App 裡。</button><button class="quiz-option" type="button" data-answer="no">不能，影像傳輸與機體響應等部分不會因此減半。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+</section>
+
+<section class="lesson" id="lesson-4" aria-labelledby="heading-4">
+<div class="section-kicker"><span class="badge model">PDF 第 3–4 頁 · 階梯第 2 步</span><span>先理解它，再回頭看為什麼第 1 步要先做。</span></div>
+<h2 id="heading-4" tabindex="-1">提前 16°，<br>不是把機頭轉 16°。</h2>
+<p class="lead">它是把<strong>準備送出去的水平速度箭頭</strong>，先往過彎方向轉一點。希望等指令真正發揮作用時，箭頭才剛好對準那時候該走的方向。</p>
+<div class="lab"><div class="lab-head"><strong>先保持固定 16°，再把圈時從 8.5 秒拉到 4 秒</strong><span class="badge model">僅純延遲示意</span></div><div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 470 340" role="img" aria-labelledby="phase-title"><title id="phase-title">目前需要的切線方向、現在發送的提前命令，以及經純延遲後此刻生效的方向</title><circle cx="195" cy="185" r="96" class="ghost"/><circle cx="291" cy="185" r="6" fill="#252b2b"/><line x1="291" y1="185" x2="291" y2="65" stroke="#a3a89f" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-grey)"/><line id="phase-command" x1="291" y1="185" stroke="#b5451b" stroke-width="4" marker-end="url(#arrow-cmd)"/><line id="phase-response" x1="291" y1="185" stroke="#087b70" stroke-width="4" marker-end="url(#arrow-actual)"/><text x="306" y="54" class="svg-small">此刻需要的方向 ↑</text><text x="195" y="189" text-anchor="middle" class="svg-small">逆時針繞圈</text><text x="291" y="213" text-anchor="middle" class="svg-small">飛機此刻在這裡</text><text x="235" y="321" text-anchor="middle" class="svg-small">綠箭頭來自更早送出的命令；橘箭頭現在才送出。</text></svg><div class="legend"><span><i class="swatch cmd"></i>現在送出的速度方向</span><span><i class="swatch actual"></i>此刻生效的方向（模型）</span><span><i class="swatch"></i>灰虛線：此刻需要的方向</span></div></div>
+<div class="lab-controls"><div class="control"><label for="phase-lap">理想圈時 <output id="phase-lap-out" for="phase-lap">8.5 s</output></label><input id="phase-lap" type="range" min="3" max="12" step=".1" value="8.5"><div class="range-labels"><span>3 s：快</span><span>12 s：慢</span></div></div><div class="control"><label for="phase-delay">假設的純延遲 <output id="phase-delay-out" for="phase-delay">390 ms</output></label><input id="phase-delay" type="range" min="0" max="500" step="10" value="390"></div><div class="control"><label for="phase-mode">提前方式</label><select id="phase-mode"><option value="fixed">固定提前 16°</option><option value="none">完全不提前</option><option value="scheduled">依速度與延遲計算</option></select></div><div class="stats"><div><span class="stat-label">模型需要提前</span><strong class="value" id="phase-required">16.5°</strong></div><div><span class="stat-label">實際選用提前</span><strong class="value cmd" id="phase-selected">16.0°</strong></div></div><p class="small" id="phase-error"></p></div></div><div class="lab-bottom">390 ms 只是重現 PDF 直覺的假設，不是已辨識的真機純延遲。綠箭頭也不是模擬完整的飛機運動。</div></div>
+<div class="grid-two"><div class="card"><h3>相位提前：補「方向落後」</h3><p>轉得越快，同樣一段等待會錯過越大的角度。固定角度只可能在某些工作點附近合適。</p></div><div class="card"><h3>幅度增益：補「跟到的幅度較小」</h3><p>有些響應會讓旋轉速度命令的幅度被削弱。模型若成立，還可能需要調整命令大小，而不只轉箭頭。</p></div></div>
+<details class="details"><summary>想看公式：純延遲，以及更完整的一階模型</summary><div class="details-body"><div class="formula">ω = v / R = 2π / 圈時<br>純延遲需要的提前角 = ω × τd<br><span class="explain">ω 是行進方向每秒轉多少弧度，不是機頭偏航速度。</span></div><p>例如 8.5 秒一圈，每秒轉約 42.4°；等 0.39 秒就轉過約 16.5°。4 秒一圈則每秒轉 90°，同樣等待對應 35.1°。</p><div class="formula">相位提前 = ωτd + arctan(ωT)<br>幅度增益 = √(1 + (ωT)²) / K</div><p>後兩式只適用於已驗證的一階延遲模型、定速旋轉輸入的穩態情況。不能把未拆開的總等待一律當 τd，也不能在既有 1.60 基準命令上盲目再乘一次補償增益。</p></div></details>
+<p class="note caution">「算出來接近 16°」是有用線索，不是因果證明。模型參數、速度回授、限幅與不規則更新，都可能改變真機結果；換成公式不自動代表安全。</p>
+<div class="takeaway"><span class="label">一句話帶走</span><p>要提前的是<strong>未來需要的速度方向</strong>。飛得越快，不應仍假定同一個 16° 永遠適合。</p></div>
+<div class="quiz" data-question="phase"><div class="quiz-title">確認這個觀念</div><h3>圈時變短、延遲不變，為什麼可能要更多提前角？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="turn">因為在相同等待時間裡，所需行進方向轉過更多角度。</button><button class="quiz-option" type="button" data-answer="yaw">因為必須讓機頭每秒多轉 16°。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+</section>
+
+<section class="lesson" id="lesson-5" aria-labelledby="heading-5">
+<div class="section-kicker"><span class="badge">PDF 階梯第 1 步</span><span>為什麼不是立刻調大速度、改提前角？</span></div>
+<h2 id="heading-5" tabindex="-1">如果尺不準，<br>後面的聰明算法也可能算錯。</h2>
+<p class="lead">要算「每秒該轉多快」，我們會用到速度。速度若偏低，轉彎前饋可能不足；但也可能只是方向投影或資料時刻沒對上。先分辨，才知道該修哪裡。</p>
+<p><strong>前饋（feed-forward）</strong>是「知道接下來會發生什麼，先給預期命令」。例如已知半徑，就可先估計轉彎需要的轉率；<strong>回授</strong>再修正實際偏差。兩者不是二選一。</p>
+<div class="formula">預期轉彎速度 = 沿線速度 × 曲率<br><span class="explain">在理想圓上，曲率 κ = 1 / R。速度輸入錯了，這個前饋項就會跟著錯；但最終效果還取決於其他回授與限制。</span></div>
+<h3>0.1 m/s 一格，是線索，不是「固定加 0.05」的理由</h3>
+<p>09/07 存活資料裡，水平速度分量落在 0.1 m/s 網格上。這證明那些資料有這種顆粒度，<strong>沒有證明 DJI 怎麼取整，更沒有證明全部速度都固定低估 10%。</strong></p>
+<div class="lab"><div class="lab-head"><strong>用負速度看看：不同取整，誤差方向會不同</strong><span class="badge model">量化規則示意</span></div><div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 480 190" role="img" aria-labelledby="quant-title"><title id="quant-title">帶正負號的真實速度與量化回報在數線上的位置</title><path d="M35 95H445" class="axis"/><g id="quant-grid"></g><line id="quant-connector" stroke="#abaeaa" stroke-dasharray="4 4"/><circle id="quant-true-dot" cy="65" r="8" fill="#087b70"/><rect id="quant-reported-dot" y="111" width="14" height="14" rx="2" fill="#b5451b"/><text x="35" y="29" class="svg-small">綠圓點：假設真實分量</text><text x="35" y="170" class="svg-small">橘方塊：以 0.1 m/s 為一格的回報</text></svg></div>
+<div class="lab-controls"><div class="control"><label for="quant-speed">假設真實的東西向速度 <output id="quant-speed-out" for="quant-speed">−0.47 m/s</output></label><input id="quant-speed" type="range" min="-.6" max=".6" step=".01" value="-.47"><div class="range-labels"><span>西：負</span><span>東：正</span></div></div><div class="control"><label for="quant-method">假設取整方式</label><select id="quant-method"><option value="truncate">朝零截斷</option><option value="round">四捨五入（半格時遠離零）</option><option value="floor">向下取整</option></select></div><div class="stats"><div><span class="stat-label">回報分量</span><strong class="value cmd" id="quant-reported">−0.40</strong></div><div><span class="stat-label">回報 − 真實</span><strong class="value" id="quant-error">+0.07</strong></div></div><p class="small muted">單位 m/s；正誤差不一定代表速度大小被高估。</p></div></div><div class="lab-bottom" id="quant-explanation"></div></div>
+<h3>因此，我們先做的事情很樸素：找一把獨立的尺</h3>
+<div class="grid-two"><div class="card"><span class="card-number">MEASURE / 量距離與時間</span><h3>兩個地標，相距 3 公尺</h3><p>影像中從通過第一個地標到第二個，共花 6 秒。</p><div class="formula">區間平均速度 = 3 ÷ 6 = 0.50 m/s</div><p class="small muted">這是例題，不是新實飛結果。它只給區間平均，不給逐時刻速度，也不保證已達穩態。</p></div><div class="card"><span class="card-number">COMPARE / 比同一個量</span><h3>再對照同區間、同方向的遙測</h3><p>遙測不等間隔，應按持續時間加權，而不是把每筆值直接做普通平均。</p><p class="small muted">要核對相機指向、地標通過時刻、資料對齊與誤差。固定影像延遲能在兩時刻相減時抵消；抖動與投影變化不能假裝不存在。</p></div></div>
+<details class="details"><summary>PDF 說的「飽和」是什麼？為什麼不能只看 1.633？</summary><div class="details-body"><p>飽和就是某一項已碰到上限，想再加也加不上去。現有設定中的<strong>期望沿線速度是 0.70 m/s</strong>，不是 1.60 m/s；後者是基準命令。</p><div class="formula">沿線速度假設為 0.47 m/s<br>補償量 = min(0.70 − 0.47, 0.30) = 0.23 m/s</div><p>0.23 還沒碰到 0.30 的補償上限。因此 PDF 的「永久飽和」不能由這些數字直接成立。這個算式只說明補償項，最終命令還有方向合成、限速與縮放。</p></div></details>
+<p class="note caution">本頁教的是量測原理，不是室內飛行操作書。場地、可用停止距離及接管方式需另行確認；不能拿正在查是否低估的速度回報當唯一安全保障。</p>
+<div class="takeaway"><span class="label">一句話帶走</span><p>第一步不是「一定要把速度修大」，而是<strong>確認量得對不對，再決定需不需要修。</strong>沒有顯著偏差，也是有效結論。</p></div>
+</section>
+
+<section class="lesson" id="lesson-6" aria-labelledby="heading-6">
+<div class="section-kicker"><span class="badge model">PDF 第 5–6、7 頁 · 階梯第 3 步</span><span>這一章把圓擬合、前饋與 EKF 串起來。</span></div>
+<h2 id="heading-6" tabindex="-1">如果知道路是圓，<br>就不必每次都重新猜「接下來彎哪裡」。</h2>
+<p class="lead">像拼圖：只看到一小塊弧，但已知道它屬於半徑 0.75 公尺的圓，就能用這個先驗條件，推想看不到的那一部分。</p>
+<div class="lab"><div class="lab-head"><strong>升高會看到更多，但 1 m 不等於看得到整圈</strong><span class="badge model">俯視幾何</span></div><div class="lab-grid">
+<div class="lab-visual"><svg class="chart" viewBox="0 0 500 370" role="img" aria-labelledby="fov-title"><title id="fov-title">相機視野矩形與直徑1.5公尺圓的關係；綠色為視野內膠帶，虛線為推測模型</title><defs><clipPath id="fov-clip"><rect id="fov-clip-rect"/></clipPath></defs><circle cx="250" cy="225" r="78" fill="none" stroke="#e5e4dd" stroke-width="6"/><rect id="fov-background" fill="#e5f3ef" fill-opacity=".8"/><circle id="fov-fit" cx="250" cy="225" r="78" fill="none" stroke="#6556a4" stroke-width="2" stroke-dasharray="6 5"/><g clip-path="url(#fov-clip)"><circle cx="250" cy="225" r="78" fill="none" stroke="#087b70" stroke-width="6"/></g><rect id="fov-frame" fill="none" stroke="#087b70" stroke-width="2"/><g id="fov-camera"><path d="M-7 0H7M0 -7V7" stroke="#252b2b" stroke-width="3"/></g><circle cx="250" cy="225" r="3" fill="#8c948b"/><text x="250" y="346" text-anchor="middle" class="svg-small">底圖顯示全圓，只為教學；相機只看得到綠框內。</text><text id="fov-location-label" x="250" y="31" text-anchor="middle" class="svg-small"></text></svg><div class="legend"><span><i class="swatch actual"></i>綠框：視野／綠線：看見的膠帶</span><span><i class="swatch estimate"></i>紫虛線：已知半徑延伸出的模型</span></div></div>
+<div class="lab-controls"><div class="control"><label for="fov-height">幾何示範高度 <output id="fov-height-out" for="fov-height">1.00 m</output></label><input id="fov-height" type="range" min=".5" max="2" step=".05" value="1"><div class="range-labels"><span>0.50 m</span><span>2.00 m</span></div></div><div class="control"><label for="fov-position">相機在哪裡？</label><select id="fov-position"><option value="tape">膠帶北側正上方</option><option value="center">圓心正上方（比較用）</option></select></div><button class="btn" id="fov-model-toggle" type="button" aria-pressed="true">隱藏已知半徑模型</button><div class="stats"><div><span class="stat-label">視野寬</span><strong class="value" id="fov-width">1.34 m</strong></div><div><span class="stat-label">視野深</span><strong class="value" id="fov-depth">0.75 m</strong></div></div><p class="small" id="fov-status"></p></div></div><div class="lab-bottom">假設：75° 對角視角、16:9、鏡頭垂直向下、平坦地面。75° 是程式常數，尚非實測校正。滑桿不是建議起飛高度。</div></div>
+<p>連 PDF 假設的 <strong>1.5 × 1.0 m</strong> 矩形，也容不下直徑 1.5 m 的整圓。沿膠帶飛時，相機還不在圓心上方。正確的直覺是「較高可能讓觀測條件更好」，不是「1 m 就解決全部辨識問題」。</p>
+<div class="grid-two"><div class="card"><h3>一般路線：看到哪，估到哪</h3><p>先找中心線，再估局部切線與曲率。短弧很像直線，小小的影像誤差也可能讓曲率變動。</p></div><div class="card"><h3>已知圓：用已知幾何約束估計</h3><p>固定半徑，只估圓心相對位置等未知量。可向視野外延伸一個模型；但那是<strong>推測的路徑，不是看見的路徑</strong>。</p></div></div>
+<h3>EKF 不神祕：先預測，再用觀察修正</h3>
+<p><strong>EKF（擴展卡爾曼濾波）</strong>是一種狀態估計方法。它把運動模型的預測與有誤差的觀察結合，並追蹤估計的不確定性。不是「把兩個數字平均」就叫完整 EKF。</p>
+<div class="lab"><div class="lab-head"><strong>小練習：模型與相機意見不同，該信誰多一點？</strong><span class="badge model">單一位置融合示意</span></div><div class="lab-grid"><div class="lab-visual"><svg class="chart" viewBox="0 0 460 180" role="img" aria-labelledby="fusion-title"><title id="fusion-title">模型預測外偏0.2公尺，影像觀察外偏0.5公尺，融合估計依權重介於兩者之間</title><path d="M40 100H420" class="axis"/><text x="40" y="129" class="svg-small">0 m</text><text x="382" y="129" class="svg-small">0.6 m</text><circle cx="166.67" cy="100" r="7" fill="#6556a4"/><circle cx="356.67" cy="100" r="7" fill="#087b70"/><text x="166.67" y="157" text-anchor="middle" class="svg-small">預測 +0.20 m</text><text x="356.67" y="157" text-anchor="middle" class="svg-small">影像 +0.50 m</text><line id="fusion-line" y1="62" y2="94" stroke="#b5451b" stroke-width="2"/><circle id="fusion-dot" cy="53" r="8" fill="#b5451b"/><text id="fusion-svg-label" y="29" text-anchor="middle" class="svg-label"></text></svg></div><div class="lab-controls"><div class="control"><label for="fusion-weight">對影像的信任（示意權重） <output id="fusion-weight-out" for="fusion-weight">50%</output></label><input id="fusion-weight" type="range" min="0" max="100" step="5" value="50"><div class="range-labels"><span>偏向模型</span><span>偏向影像</span></div></div><p class="small">影像模糊、不可靠時，不該每次完全跟著它跳。模型也會漂，不能永遠忽略影像。</p><p class="small muted">完整 EKF 會依模型與量測的不確定性計算更新權重，不是固定手調這個百分比。</p></div></div></div>
+<div class="grid-three"><div class="card"><span class="stat-label">圓周位置 θ</span><h3>走到圈上的哪裡？</h3><p class="small">相對選定起點的圓周角度，不是機頭方向。</p></div><div class="card"><span class="stat-label">徑向誤差 e</span><h3>離那個圓多遠？</h3><p class="small">在圓的內側還是外側？需要多少回正？</p></div><div class="card"><span class="stat-label">速度 v</span><h3>正在移動多快？</h3><p class="small">用來推算等待這段時間後，飛機大概在哪裡。</p></div></div>
+<p class="note"><strong>整套想法：</strong>用圓模型預先安排速度方向，用狀態估計補上資料的時間差，再用影像回授修正漂移。模型不能讓延遲消失，也不能預知所有突發變化。</p>
+<details class="details"><summary>GROUND、BODY、前視距離，又是什麼？</summary><div class="details-body"><dl class="terms"><dt>GROUND 地面座標</dt><dd>用地面固定方向表示速度，例如東、北。</dd><dt>BODY 機身座標</dt><dd>用飛機自己的前、右表示速度；機頭變了，前、右也跟著變。</dd><dt>前視距離 lookahead</dt><dd>不是只追腳下那一點，而是選前面一段路上的目標，引導連續轉彎。</dd></dl><p>已知圓模型能提供視野外的預期路徑，但前視範圍仍受模型可信度限制。改用 GROUND 可以改變座標轉換責任，不代表全部姿態／定位誤差都消失。</p></div></details>
+<div class="takeaway"><span class="label">一句話帶走</span><p><strong>知道路的形狀，幫你提早安排；持續看路，幫你修正預測。</strong>已知圓不是關掉辨識、失路處理與安全檢查的理由。</p></div>
+</section>
+
+<section class="lesson" id="lesson-7" aria-labelledby="heading-7">
+<div class="section-kicker"><span class="badge model">PDF 第 1、6–7 頁 · 階梯第 4 步與物理參考</span><span>現在才來看「機體還有餘裕」這句話。</span></div>
+<h2 id="heading-7" tabindex="-1">繞得越快，<br>就越需要持續往圓心加速。</h2>
+<p class="lead">等速繞圈，速度<strong>大小</strong>沒變，但速度<strong>方向</strong>一直在變。這仍然需要加速度；多旋翼透過傾斜，讓一部分推力朝圓心。</p>
+<div class="lab"><div class="lab-head"><strong>改變圈時，看看理想傾角需求</strong><span class="badge model">理想物理模型</span></div><div class="lab-grid"><div class="lab-visual"><svg class="chart" viewBox="0 0 450 300" role="img" aria-labelledby="tilt-title"><title id="tilt-title">傾斜的飛機把推力分成支撐重量與朝圓心的分量</title><path d="M55 242H395" stroke="#d7d8d0" stroke-width="2"/><text x="60" y="270" class="svg-small">朝圓心 ←</text><line x1="245" y1="160" x2="245" y2="223" stroke="#a0a59d" stroke-width="2" marker-end="url(#arrow-grey)"/><text x="258" y="224" class="svg-small">重力</text><line id="tilt-thrust" x1="245" y1="160" stroke="#6556a4" stroke-width="4" marker-end="url(#arrow-estimate)"/><line id="tilt-horizontal" x1="245" y1="160" stroke="#087b70" stroke-width="3" marker-end="url(#arrow-actual)"/><g id="tilt-aircraft"><line x1="-75" y1="0" x2="75" y2="0" stroke="#3d4642" stroke-width="6"/><rect x="-23" y="-8" width="46" height="17" rx="6" fill="#3d4642"/><path d="M-87 -9H-53M53 -9H87" stroke="#b5451b" stroke-width="4"/></g><text x="278" y="53" class="svg-small">紫：總推力方向</text><text x="278" y="76" class="svg-small">綠：向心分量</text><text x="245" y="29" text-anchor="middle" class="svg-label" id="tilt-svg-label"></text></svg><p class="caption">側面示意，箭頭只表示方向與分量概念，不是推力實測。固定機頭繞圈時，合成傾斜由 roll／pitch 配合，不是只固定打一個橫滾角。</p></div><div class="lab-controls"><div class="control"><label for="tilt-lap">理想圈時 <output id="tilt-lap-out" for="tilt-lap">8.5 s</output></label><input id="tilt-lap" type="range" min="2.5" max="12" step=".1" value="8.5"><div class="range-labels"><span>2.5 s</span><span>12 s</span></div></div><div class="stats"><div><span class="stat-label">所需速度</span><strong class="value" id="tilt-speed">0.55</strong><span class="small muted">m/s</span></div><div><span class="stat-label">所需向心加速度</span><strong class="value" id="tilt-accel">0.41</strong><span class="small muted">m/s²</span></div></div><span class="stat-label">所需合成傾角</span><strong class="big-value actual" id="tilt-angle">2.4°</strong><p class="small" id="tilt-limit-note"></p></div></div><div class="lab-bottom">假設半徑 0.75 m、水平等速圓周運動、無風、推力足夠。這是所需傾角的計算，不是飛機實際傾角量測。</div></div>
+<details class="details"><summary>想看公式，以及 2.5 秒為什麼不是一項操作</summary><div class="details-body"><div class="formula">v = 2πR / 圈時<br>向心加速度 a = v² / R<br>所需傾角 = arctan(a / g)，g ≈ 9.81 m/s²</div><p>同一個圓上，速度變兩倍，向心加速度需求變四倍。PDF 用約 25° 當傾角參考；由此算出的理想圈時約 2.54 秒。精確取 2.5 秒則需約 25.8°，略超過 25°。</p><p>機型與模式的實際限制、可用推力、視覺品質和控制穩定性仍需驗證。所以「約 2.5 秒」是一條<strong>有條件的物理參考線</strong>，不是已知能做到的成果，也不是叫我們直接打到 25°。</p></div></details>
+<h3>ANGLE 改的是：由誰負責「讓速度跟上」</h3>
+<div class="button-row"><button class="btn" id="mode-velocity" type="button" aria-pressed="true">看 VELOCITY 模式</button><button class="btn" id="mode-angle" type="button" aria-pressed="false">看 ANGLE 模式</button></div>
+<div class="card"><div class="mode-flow"><span id="mode-app" class="active-stage">App：給水平速度</span><i>→</i><span id="mode-speed-loop">DJI：水平速度迴路</span><i>→</i><span>DJI：姿態穩定</span><i>→</i><span>馬達</span></div><p id="mode-explanation">速度模式：App 要求往某方向多快，DJI 再用自己的控制迴路調整傾斜，嘗試跟上這個速度。</p></div>
+<p class="note caution"><strong>ANGLE 不是免費加速：</strong>它把更多水平運動控制責任交給 App。姿態穩定仍在，但不能再期待原本的水平速度保持替你修正漂移。SDK 支援、限幅、座標、避障與垂直行為都需另驗證；不是這裡點一下就能安全套用。</p>
+<div class="takeaway"><span class="label">一句話帶走</span><p>董事長用傾角估算說明<strong>值得尋找控制瓶頸</strong>；ANGLE 則是更直接控制傾斜、也承擔更多責任，所以應放在可靠估計與控制之後。</p></div>
+</section>
+
+<section class="lesson" id="lesson-8" aria-labelledby="heading-8">
+<div class="section-kicker"><span class="badge model">PDF 第 6 頁的另一個提醒</span><span>快門和幀率、傳輸延遲，不是同一回事。</span></div>
+<h2 id="heading-8" tabindex="-1">拍照那一瞬間，<br>飛機也還在移動。</h2>
+<p class="lead">快門開著的時間越長，地面在影像上移動得越遠，膠帶就越容易拖成一片。這和「多久收到一張影像」是不同問題。</p>
+<div class="lab"><div class="lab-head"><strong>把快門從 1/60 s 改成 1/500 s，看看拖影</strong><span class="badge model">拖影示意</span></div><div class="lab-grid"><div class="lab-visual"><svg class="chart" viewBox="0 0 480 235" role="img" aria-labelledby="blur-title"><title id="blur-title">清晰的黑色膠帶與水平移動造成的模糊示意</title><defs><pattern id="floor-pattern" x="0" y="0" width="35" height="35" patternUnits="userSpaceOnUse"><rect width="35" height="35" fill="#eeeae1"/><path d="M35 0H0V35" fill="none" stroke="#ddd8ca" stroke-width="1"/></pattern><filter id="shutter-blur" x="-120%" width="340%"><feGaussianBlur id="shutter-blur-filter" stdDeviation="5 0"/></filter></defs><rect x="15" y="44" width="210" height="150" rx="8" fill="url(#floor-pattern)"/><rect x="255" y="44" width="210" height="150" rx="8" fill="url(#floor-pattern)"/><path d="M115 45V194" stroke="#303330" stroke-width="24"/><path d="M355 45V194" stroke="#303330" stroke-width="24" filter="url(#shutter-blur)"/><text x="120" y="25" text-anchor="middle" class="svg-label">理想清晰邊緣</text><text x="360" y="25" text-anchor="middle" class="svg-label">移動中曝光</text><path d="M297 213H411" stroke="#8d938c" stroke-width="2" marker-end="url(#arrow-grey)"/><text x="120" y="220" text-anchor="middle" class="svg-small">模糊形狀僅示意，非相機仿真</text></svg></div><div class="lab-controls"><div class="control"><label for="blur-speed">假設移動速度 <output id="blur-speed-out" for="blur-speed">1.00 m/s</output></label><input id="blur-speed" type="range" min=".3" max="1.5" step=".05" value="1"></div><div class="control"><label for="blur-shutter">曝光時間</label><select id="blur-shutter"><option value="60">1/60 秒</option><option value="125">1/125 秒</option><option value="250">1/250 秒</option><option value="500">1/500 秒</option><option value="1000">1/1000 秒</option></select></div><div class="stats"><div><span class="stat-label">曝光期間移動</span><strong class="value" id="blur-distance">16.7 mm</strong></div><div><span class="stat-label">對應拖影長度</span><strong class="value" id="blur-pixels">16.0 px</strong></div></div><p class="small muted">示範尺度：0.5 m 高、75° 對角視角、640 × 360，約 1.05 mm/px；不是實測校正。</p></div></div><div class="lab-bottom">計算：移動距離＝速度 × 曝光時間。像素拖影還取決於影像尺度、運動方向與相機姿態。</div></div>
+<div class="grid-three"><div class="card"><h3>快門／曝光時間</h3><p class="small">一張影像積光多久。短曝光可能減少動態模糊，但光也變少。</p></div><div class="card"><h3>幀率 FPS</h3><p class="small">每秒產生多少張影像。30 FPS 不代表每張一定曝光 1/30 秒。</p></div><div class="card"><h3>傳輸與處理延遲</h3><p class="small">畫面拍完後，還要多久才送到控制器。快門變快，不會自動消除這些等待。</p></div></div>
+<p class="note">短曝光可能需要更充足的光或更高 ISO；高 ISO 的雜訊也可能干擾膠帶辨識。PDF 提的 1/500 s 是值得檢查的方向，不是所有室內環境一律適用的答案。</p>
+<div class="takeaway"><span class="label">一句話帶走</span><p><strong>看得清楚</strong>和<strong>看得及時</strong>都重要，但必須分開處理。</p></div>
+</section>
+
+<section class="lesson" id="lesson-9" aria-labelledby="heading-9">
+<div class="section-kicker"><span class="badge">回到 PDF 第 7 頁</span><span>現在你不只是在背一張待辦清單。</span></div>
+<h2 id="heading-9" tabindex="-1">四個改進步驟，<br>加上一條物理參考線。</h2>
+<p class="lead">董事長說「Work down the list」，重點是順序：前一步讓後一步更可信、更可量測。不是一次把四種改動全部裝上去。</p>
+<div class="roadmap">
+<div class="rung"><div class="rung-index">01</div><div><h3>誠實的速度回授</h3><p>先確認自己真的多快；如果有偏差，再選擇校正或可靠的視覺估速。不要讓後續模型吃進錯誤速度。</p></div><div class="rung-target">7.5–8 s<small>PDF 預估，非成果</small></div></div>
+<div class="rung"><div class="rung-index">02</div><div><h3>依速度調整相位與增益</h3><p>速度與響應模型可信後，才有依據決定箭頭應提早轉多少、幅度補多少，而不是固定 ±16°。</p></div><div class="rung-target">5.5–6.5 s<small>PDF 預估，非成果</small></div></div>
+<div class="rung"><div class="rung-index">03</div><div><h3>已知圓＋狀態估計＋軌跡前饋</h3><p>利用已知路線預先安排運動，估計現在與未來的位置，再由影像修正漂移；不只是追每張圖的一小段線。</p></div><div class="rung-target">4–5 s<small>PDF 預估，非成果</small></div></div>
+<div class="rung"><div class="rung-index">04</div><div><h3>評估 ANGLE 控制傾斜</h3><p>更直接控制傾角，同時接手更多水平速度與漂移修正責任。需建立在前面的觀測與控制能力上。</p></div><div class="rung-target">3–4 s<small>PDF 預估，非成果</small></div></div>
+<div class="rung boundary"><div class="rung-index">—</div><div><h3>約 25° 傾角的理想參考邊界</h3><p>不是第五個實驗步驟，也不是直接把傾角打到上限。它只說明理想模型下的尺度。</p></div><div class="rung-target">約 2.5 s<small>有條件的理論參考</small></div></div>
+</div>
+<p class="note caution">第一步若讓速度估計更可靠，卻沒有立刻縮短圈時，不等於失敗；可能表示主要瓶頸在別處。反過來，偶然快了一圈，也不代表模型與校正已經正確。</p>
+<h3>用四個問題，看看你是否抓到主線</h3>
+<div class="quiz" data-question="final-measure" data-final="true"><div class="quiz-title">01 / 先量什麼</div><h3>看到命令 1.6、回報 0.5 m/s，最合理的第一步？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="compare">對齊時間與方向，建立獨立運動參考，再判斷量測或控制哪裡有問題。</button><button class="quiz-option" type="button" data-answer="multiply">先把速度回報乘 3，讓它接近命令。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+<div class="quiz" data-question="final-model" data-final="true"><div class="quiz-title">02 / 圓模型幫了什麼</div><h3>已知圓擬合最大的概念改變是什麼？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="blind">知道是圓以後，就不用再看影像了。</button><button class="quiz-option" type="button" data-answer="predict">利用已知形狀預測路徑，同時保留影像修正與有效性檢查。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+<div class="quiz" data-question="final-angle" data-final="true"><div class="quiz-title">03 / ANGLE 的代價</div><h3>ANGLE 相比水平速度模式，主要把什麼責任移給 App？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="speed">更多水平速度與漂移修正責任，不能再依賴原本的速度保持。</button><button class="quiz-option" type="button" data-answer="motor">所有姿態穩定與每顆馬達的底層控制。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+<div class="quiz" data-question="final-limit" data-final="true"><div class="quiz-title">04 / 怎麼看那個 2.5 秒</div><h3>PDF 表尾「約 2.5 秒」應怎麼理解？</h3><div class="quiz-options"><button class="quiz-option" type="button" data-answer="guarantee">董事長保證做完四項就能達到的實飛紀錄。</button><button class="quiz-option" type="button" data-answer="bound">特定半徑與傾角假設下的理想邊界，不是操作指令或成果保證。</button></div><p class="quiz-feedback" aria-live="polite"></p></div>
+<div class="score"><div><span class="stat-label">重點練習</span><strong id="quiz-score">0 / 4</strong><span class="small" id="quiz-score-message">還沒作答；可以回前面的圖找答案。</span></div><button class="btn" id="quiz-reset" type="button">重新作答</button></div>
+<div class="takeaway"><span class="label">你可以這樣把 PDF 講給別人聽</span><p>「我們先確認速度量得對不對，再依飛機的反應，提早送對方向與大小的命令。接著利用已知圓形路線，預測運動並用影像修正。最後才評估更直接的傾角控制，因為那也代表我們要承擔更多控制責任。」</p></div>
+<details class="details"><summary>隨手查：術語對照</summary><div class="details-body"><dl class="terms"><dt>MSDK</dt><dd>DJI 提供給手機 App 的開發介面。呼叫成功／返回，不等於飛機已完成動作。</dd><dt>Virtual Stick</dt><dd>App 向飛控持續發送控制參數的方式。不是繞過飛控直接操縱馬達。</dd><dt>yaw / 機頭偏航</dt><dd>機頭在水平面朝哪個方向轉；不同於水平行進方向。</dd><dt>roll / pitch</dt><dd>橫滾／俯仰，兩者組合決定水平推力方向。固定機頭不代表機身完全不傾斜。</dd><dt>曲率 κ</dt><dd>路線每前進一公尺，切線方向改變多少弧度；圓的曲率是 1/R。</dd><dt>切向／徑向</dt><dd>沿圓向前走／指向或背離圓心。速度應分到同一基準後再比較。</dd><dt>回授／前饋</dt><dd>觀察結果再修正／預先知道需求先給命令。常常一起使用。</dd><dt>相位／增益</dt><dd>反應在時間或方向上落後多少／輸出幅度相對輸入是多少。</dd><dt>飽和／限幅</dt><dd>命令或補償碰到某個上限，不能再增加；要指出到底是哪個量碰上限。</dd><dt>EKF</dt><dd>用模型預測、以觀察修正，並處理不確定性的非線性狀態估計方法。</dd><dt>shadow 記錄</dt><dd>新估值先並行計算與記錄，不接進飛行控制；先確認可靠再使用。</dd></dl></div></details>
+<details class="details"><summary>來源、適用範圍與本機文件</summary><div class="details-body"><ul><li>董事長原文：<cite>Breaking the 8.5-Second Lap</cite>，共 7 頁。各章已標示對應頁數／步驟；本教材是教學解說，不是逐字翻譯。</li><li><a href="breaking-the-8.5-second-lap-zh.html">既有 PDF 中文翻譯</a>：保留原文說法；其中推論須配合本教材的限制一起讀。</li><li><a href="dji-line-following-control-loop-and-optimization-report.md">控制迴圈、Profiling 與改進歷程報告</a>。</li><li><a href="dji-speed-feedback-plan-peer-review.md">速度回授優先計畫</a>與<a href="dji-speed-feedback-plan-peer-review-response.md">同儕審閱回覆</a>。部分理論推論與門檻尚未驗證，本教材不把它們當成實測定論。</li></ul><p>所有互動都在本機瀏覽器計算，不載入外部套件、不傳送資料、不連接無人機。瀏覽器允許時，只記住上次閱讀章節。程式碼、飛行參數及現場安全程序均未因使用本教材而變更。</p></div></details>
+</section>
+
+<footer class="lesson-footer"><button class="btn" id="previous-chapter" type="button">← 上一章</button><span class="next-note" id="next-chapter-label"></span><button class="btn primary" id="next-chapter" type="button">下一章 →</button></footer>
+<p class="site-footer">先懂，再提速 · 教學版 2026-09-09 · 公式能描述假設，不替代量測與安全驗證。</p>
+</main>
+</div>
+<script>
+'use strict';
+(() => {
+  const $ = id => document.getElementById(id);
+  const number = id => Number($(id).value);
+  const text = (id, value) => { $(id).textContent = value; };
+  const radians = degrees => degrees * Math.PI / 180;
+  const degrees = value => value * 180 / Math.PI;
+  const fmt = (value, digits = 2) => (Math.abs(value) < .5 * Math.pow(10, -digits) ? 0 : value).toFixed(digits);
+  const signed = (value, digits = 2) => (value > .5 * Math.pow(10, -digits) ? '+' : '') + fmt(value, digits);
+  const listen = (ids, fn) => ids.forEach(id => $(id).addEventListener('input', fn));
+  const endpoint = (id, x, y) => { $(id).setAttribute('x2', x); $(id).setAttribute('y2', y); };
+  const chapters = [...document.querySelectorAll('.lesson')];
+  const navLinks = [...document.querySelectorAll('[data-chapter]')];
+  const titles = navLinks.map(link => link.textContent.trim().replace(/^\d+/, '').trim());
+  let current = 0;
+  let allMode = false;
+  const storageKey = 'dji-lap-learning-chapter-v1';
+  let orbitFrame = 0;
+  let orbitRunning = false;
+  let orbitLastTime = 0;
+  let orbitAngle = 0;
+
+  function stopOrbit() {
+    orbitRunning = false;
+    cancelAnimationFrame(orbitFrame);
+    $('orbit-play').setAttribute('aria-pressed', 'false');
+    text('orbit-play', '播放運動');
+  }
+  function showChapter(index, focus = false, updateHash = true) {
+    current = Math.max(0, Math.min(chapters.length - 1, index));
+    chapters.forEach((chapter, i) => { chapter.hidden = !allMode && i !== current; });
+    navLinks.forEach((link, i) => {
+      if (i === current) link.setAttribute('aria-current', 'step');
+      else link.removeAttribute('aria-current');
+    });
+    text('reading-position', String(current + 1).padStart(2, '0') + ' / ' + chapters.length);
+    $('reading-progress').style.width = ((current + 1) / chapters.length * 100) + '%';
+    $('previous-chapter').disabled = current === 0;
+    $('next-chapter').disabled = current === chapters.length - 1;
+    text('next-chapter-label', current < chapters.length - 1 ? '接下來：' + titles[current + 1] : '用自己的話講一次，比背公式更重要。');
+    if (current !== 1 && !allMode) stopOrbit();
+    try { localStorage.setItem(storageKey, String(current)); } catch (_) { /* Storage is optional for an offline file. */ }
+    if (updateHash) {
+      try { history.replaceState(null, '', '#lesson-' + current); } catch (_) { /* Navigation still works without URL persistence. */ }
+    }
+    if (focus) {
+      const heading = $('heading-' + current);
+      heading.focus({ preventScroll: true });
+      if (allMode) heading.scrollIntoView({ block: 'start', behavior: 'instant' });
+      else window.scrollTo({ top: 0, behavior: 'instant' });
+    }
+  }
+  navLinks.forEach(link => link.addEventListener('click', event => {
+    event.preventDefault();
+    showChapter(Number(link.dataset.chapter), true);
+  }));
+  $('previous-chapter').addEventListener('click', () => showChapter(current - 1, true));
+  $('next-chapter').addEventListener('click', () => showChapter(current + 1, true));
+  $('view-toggle').addEventListener('click', () => {
+    allMode = !allMode;
+    document.body.classList.toggle('read-all', allMode);
+    $('view-toggle').setAttribute('aria-pressed', String(allMode));
+    text('view-toggle', allMode ? '回到逐章閱讀' : '全部展開');
+    showChapter(current, true);
+  });
+  document.addEventListener('keydown', event => {
+    if (allMode || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.target.closest('input, select, textarea, button, summary, [contenteditable="true"]')) return;
+    if (event.key === 'ArrowRight' && current < chapters.length - 1) { event.preventDefault(); showChapter(current + 1, true); }
+    if (event.key === 'ArrowLeft' && current > 0) { event.preventDefault(); showChapter(current - 1, true); }
+  });
+  window.addEventListener('hashchange', () => {
+    const match = location.hash.match(/^#lesson-(\d+)$/);
+    if (match && Number(match[1]) < chapters.length) showChapter(Number(match[1]), true, false);
+  });
+  history.scrollRestoration = 'manual';
+  window.addEventListener('load', () => requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' })), { once: true });
+  let printDetails = [];
+  window.addEventListener('beforeprint', () => {
+    stopOrbit();
+    printDetails = [...document.querySelectorAll('details')].map(element => [element, element.open]);
+    printDetails.forEach(([element]) => { element.open = true; });
+  });
+  window.addEventListener('afterprint', () => { printDetails.forEach(([element, wasOpen]) => { element.open = wasOpen; }); });
+  $('print-guide').addEventListener('click', () => window.print());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopOrbit(); });
+
+  function renderOrbit() {
+    const a = radians(orbitAngle);
+    const x = 210 + 103 * Math.cos(a);
+    const y = 175 - 103 * Math.sin(a);
+    const fixed = $('orbit-mode').value === 'fixed';
+    $('orbit-drone').setAttribute('transform', `translate(${x} ${y})`);
+    $('orbit-body').setAttribute('transform', `rotate(${fixed ? 0 : -orbitAngle})`);
+    $('orbit-velocity').setAttribute('x1', x);
+    $('orbit-velocity').setAttribute('y1', y);
+    endpoint('orbit-velocity', x - 65 * Math.sin(a), y - 65 * Math.cos(a));
+    text('orbit-angle-out', Math.round(orbitAngle) + '°');
+    text('orbit-forward', signed(fixed ? .55 * Math.cos(a) : .55));
+    text('orbit-right', signed(fixed ? -.55 * Math.sin(a) : 0));
+    text('orbit-message', fixed ? '機頭保持朝北；前後、左右兩個速度分量配合改變。' : '這個比較模式讓機頭沿切線轉，因此主要以機身向前速度移動。');
+  }
+  $('orbit-angle').addEventListener('input', () => { stopOrbit(); orbitAngle = number('orbit-angle'); renderOrbit(); });
+  $('orbit-mode').addEventListener('change', renderOrbit);
+  function orbitTick(time) {
+    if (!orbitRunning) return;
+    const dt = orbitLastTime ? Math.min((time - orbitLastTime) / 1000, .1) : 0;
+    orbitLastTime = time;
+    orbitAngle = (orbitAngle + degrees(.55 / .75) * dt) % 360;
+    $('orbit-angle').value = String(Math.round(orbitAngle) % 360);
+    renderOrbit();
+    orbitFrame = requestAnimationFrame(orbitTick);
+  }
+  $('orbit-play').addEventListener('click', () => {
+    if (orbitRunning) { stopOrbit(); return; }
+    orbitRunning = true;
+    orbitLastTime = 0;
+    $('orbit-play').setAttribute('aria-pressed', 'true');
+    text('orbit-play', '暫停運動');
+    orbitFrame = requestAnimationFrame(orbitTick);
+  });
+  renderOrbit();
+
+  function renderProjection() {
+    const angle = number('projection-angle');
+    const speed = number('projection-speed');
+    const along = speed * Math.cos(radians(angle));
+    const cross = speed * Math.sin(radians(angle));
+    const length = speed / 1.5 * 175;
+    const x = 225 + length * Math.sin(radians(angle));
+    const y = 240 - length * Math.cos(radians(angle));
+    endpoint('projection-total', x, y);
+    endpoint('projection-along', 225, y);
+    $('projection-cross').setAttribute('x1', 225);
+    $('projection-cross').setAttribute('y1', y);
+    endpoint('projection-cross', x, y);
+    text('projection-angle-out', signed(angle, 0) + '°');
+    text('projection-speed-out', fmt(speed) + ' m/s');
+    text('projection-along-out', fmt(along, 3));
+    text('projection-cross-out', signed(cross, 3));
+    text('projection-state', speed < .12 ? '在現有門檻下，地速低於 0.12 m/s 時不使用這個方向回授。' : Math.abs(angle) > 45 ? '幾何分量仍可算；但若這是與虛擬行進方向的差，現有 ±45° 門檻會將沿線回授判為不可用。' : '沿線分量較小，可能只是幾何投影。實際使用還須通過資料新鮮度等檢查。');
+  }
+  listen(['projection-angle', 'projection-speed'], renderProjection);
+  renderProjection();
+
+  function renderResponse() {
+    const delay = number('response-delay') / 1000;
+    const rise = number('response-rise') / 1000;
+    const gain = number('response-gain');
+    const points = [];
+    for (let i = 0; i <= 250; i++) {
+      const t = i / 100;
+      const velocity = t < delay ? 0 : rise === 0 ? gain : gain * (1 - Math.exp(-(t - delay) / rise));
+      points.push((i === 0 ? 'M' : 'L') + (55 + t / 2.5 * 435).toFixed(2) + ' ' + (230 - velocity * 170).toFixed(2));
+    }
+    $('response-curve').setAttribute('d', points.join(' '));
+    const delayX = 55 + delay / 2.5 * 435;
+    $('response-delay-line').setAttribute('x1', delayX);
+    $('response-delay-line').setAttribute('x2', delayX);
+    $('response-delay-label').setAttribute('x', Math.max(75, delayX));
+    text('response-delay-label', '等待 ' + Math.round(delay * 1000) + ' ms');
+    text('response-delay-out', Math.round(delay * 1000) + ' ms');
+    text('response-rise-out', Math.round(rise * 1000) + ' ms');
+    text('response-gain-out', fmt(gain));
+    text('response-reading', `模型最終趨近 ${fmt(gain)} m/s。` + (rise ? `開始反應後約 ${Math.round(rise * 1000)} ms，到達最終變化量的 63%。` : '這個預設把加速過程理想化為瞬間完成。'));
+  }
+  listen(['response-delay', 'response-rise', 'response-gain'], renderResponse);
+  const responsePresets = { delay: [300, 0, 1], rise: [0, 600, 1], both: [150, 300, .8] };
+  document.querySelectorAll('[data-response-preset]').forEach(button => button.addEventListener('click', () => {
+    const values = responsePresets[button.dataset.responsePreset];
+    ['response-delay', 'response-rise', 'response-gain'].forEach((id, i) => { $(id).value = String(values[i]); });
+    renderResponse();
+  }));
+  renderResponse();
+
+  function renderPhase() {
+    const lap = number('phase-lap');
+    const delay = number('phase-delay') / 1000;
+    const required = 360 * delay / lap;
+    const selected = $('phase-mode').value === 'fixed' ? 16 : $('phase-mode').value === 'none' ? 0 : required;
+    const error = selected - required;
+    endpoint('phase-command', 291 - 123 * Math.sin(radians(selected)), 185 - 123 * Math.cos(radians(selected)));
+    endpoint('phase-response', 291 - 105 * Math.sin(radians(error)), 185 - 105 * Math.cos(radians(error)));
+    text('phase-lap-out', fmt(lap, 1) + ' s');
+    text('phase-delay-out', Math.round(delay * 1000) + ' ms');
+    text('phase-required', fmt(required, 1) + '°');
+    text('phase-selected', fmt(selected, 1) + '°');
+    text('phase-error', Math.abs(error) < .05 ? '在這個純延遲模型中，此刻生效的方向對齊了。真機仍需驗證模型與穩定性。' : `此刻生效的方向${error < 0 ? '落後' : '超前'}約 ${fmt(Math.abs(error), 1)}°。` + (error < 0 ? '只加大命令，並不會修正這個方向差。' : '過度提前也會改變需要的運動方向。'));
+  }
+  listen(['phase-lap', 'phase-delay', 'phase-mode'], renderPhase);
+  renderPhase();
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  for (let i = -6; i <= 6; i++) {
+    const x = 35 + (i + 6) / 12 * 410;
+    const tick = document.createElementNS(svgNS, 'line');
+    tick.setAttribute('x1', x); tick.setAttribute('x2', x); tick.setAttribute('y1', 88); tick.setAttribute('y2', 102); tick.setAttribute('stroke', '#b0b4ac');
+    $('quant-grid').appendChild(tick);
+    if (i % 2 === 0) {
+      const label = document.createElementNS(svgNS, 'text');
+      label.setAttribute('x', x); label.setAttribute('y', 145); label.setAttribute('text-anchor', 'middle'); label.setAttribute('class', 'svg-small'); label.textContent = fmt(i / 10, 1);
+      $('quant-grid').appendChild(label);
+    }
+  }
+  function renderQuantization() {
+    const value = number('quant-speed');
+    const method = $('quant-method').value;
+    const reported = method === 'round' ? Math.sign(value) * Math.round(Math.abs(value) * 10 + 1e-9) / 10 : method === 'floor' ? Math.floor(value * 10 + 1e-9) / 10 : Math.sign(value) * Math.floor(Math.abs(value) * 10 + 1e-9) / 10;
+    const xTrue = 35 + (value + .6) / 1.2 * 410;
+    const xReported = 35 + (reported + .6) / 1.2 * 410;
+    $('quant-true-dot').setAttribute('cx', xTrue);
+    $('quant-reported-dot').setAttribute('x', xReported - 7);
+    $('quant-connector').setAttribute('x1', xTrue); $('quant-connector').setAttribute('y1', 73);
+    endpoint('quant-connector', xReported, 111);
+    text('quant-speed-out', signed(value) + ' m/s');
+    text('quant-reported', signed(reported));
+    text('quant-error', signed(reported - value));
+    const explanations = {
+      truncate: '朝零截斷讓正、負分量都往零靠；負分量的帶符號誤差可能是正的。不能一律說「每個分量少 0.05」。',
+      floor: '向下取整一律往更負的格子走；負分量的大小反而可能增加。這與朝零截斷不是同一種規則。',
+      round: '四捨五入選最近的格子；誤差可以是正、也可以是負。平均偏差仍取決於訊號分布與規則。'
+    };
+    text('quant-explanation', explanations[method] + ' 此圖不判定 DJI 實際採哪一種。');
+  }
+  listen(['quant-speed', 'quant-method'], renderQuantization);
+  renderQuantization();
+
+  function footprint(height) {
+    const diagonal = 2 * height * Math.tan(radians(75 / 2));
+    return { width: diagonal * 16 / Math.hypot(16, 9), depth: diagonal * 9 / Math.hypot(16, 9) };
+  }
+  let showFovModel = true;
+  function renderFov() {
+    const height = number('fov-height');
+    const size = footprint(height);
+    const onTape = $('fov-position').value === 'tape';
+    const scale = 104;
+    const cameraY = onTape ? 147 : 225;
+    const attrs = { x: 250 - size.width * scale / 2, y: cameraY - size.depth * scale / 2, width: size.width * scale, height: size.depth * scale };
+    ['fov-frame', 'fov-background', 'fov-clip-rect'].forEach(id => Object.entries(attrs).forEach(([name, value]) => $(id).setAttribute(name, value)));
+    $('fov-camera').setAttribute('transform', `translate(250 ${cameraY})`);
+    $('fov-fit').style.display = showFovModel ? '' : 'none';
+    const entireCircle = size.width / 2 >= .75 && size.depth / 2 >= (onTape ? 1.5 : .75);
+    text('fov-height-out', fmt(height) + ' m');
+    text('fov-width', fmt(size.width) + ' m');
+    text('fov-depth', fmt(size.depth) + ' m');
+    text('fov-location-label', onTape ? '相機在膠帶北側上方：不是在圓心' : '相機在圓心上方：只用來比較視野');
+    text('fov-status', entireCircle ? '在這組理想幾何條件下，整圈能落入視野。這不是該高度已適合實飛的結論。' : '在這組幾何條件下，整圈沒有落入視野。紫色模型能延伸，不代表相機看見了那些部分。');
+  }
+  listen(['fov-height', 'fov-position'], renderFov);
+  $('fov-model-toggle').addEventListener('click', () => {
+    showFovModel = !showFovModel;
+    $('fov-model-toggle').setAttribute('aria-pressed', String(showFovModel));
+    text('fov-model-toggle', showFovModel ? '隱藏已知半徑模型' : '顯示已知半徑模型');
+    renderFov();
+  });
+  renderFov();
+  function renderFusion() {
+    const weight = number('fusion-weight') / 100;
+    const estimate = .2 * (1 - weight) + .5 * weight;
+    const x = 40 + estimate / .6 * 380;
+    $('fusion-dot').setAttribute('cx', x);
+    $('fusion-line').setAttribute('x1', x); $('fusion-line').setAttribute('x2', x);
+    $('fusion-svg-label').setAttribute('x', x);
+    text('fusion-svg-label', '融合 ' + signed(estimate) + ' m');
+    text('fusion-weight-out', Math.round(weight * 100) + '%');
+  }
+  listen(['fusion-weight'], renderFusion);
+  renderFusion();
+
+  function renderTilt() {
+    const lap = number('tilt-lap');
+    const speed = 2 * Math.PI * .75 / lap;
+    const acceleration = speed * speed / .75;
+    const angle = Math.atan(acceleration / 9.81);
+    $('tilt-aircraft').setAttribute('transform', `translate(245 160) rotate(${-degrees(angle)})`);
+    // Level flight: vertical thrust balances the 63-unit gravity arrow.
+    const inwardThrust = 63 * acceleration / 9.81;
+    endpoint('tilt-thrust', 245 - inwardThrust, 97);
+    endpoint('tilt-horizontal', 245 - inwardThrust, 160);
+    text('tilt-lap-out', fmt(lap, 1) + ' s');
+    text('tilt-speed', fmt(speed));
+    text('tilt-accel', fmt(acceleration));
+    text('tilt-angle', fmt(degrees(angle), 1) + '°');
+    text('tilt-svg-label', '理想需求 ' + fmt(degrees(angle), 1) + '°');
+    text('tilt-limit-note', degrees(angle) > 25 ? '已略超過 PDF 假設的 25° 參考線；2.5 秒不是可以直接保證的目標。' : '低於 PDF 假設的 25° 參考線，但不代表目前視覺與控制系統已能完成這個圈時。');
+  }
+  listen(['tilt-lap'], renderTilt);
+  renderTilt();
+  function setControlMode(angleMode) {
+    $('mode-angle').setAttribute('aria-pressed', String(angleMode));
+    $('mode-velocity').setAttribute('aria-pressed', String(!angleMode));
+    text('mode-app', angleMode ? 'App：給 roll／pitch 傾角' : 'App：給水平速度');
+    $('mode-speed-loop').classList.toggle('bypassed', angleMode);
+    text('mode-explanation', angleMode ? 'ANGLE 模式：不再以同一個水平速度迴路追蹤 App 的速度目標。App 需要估計實際速度、設計傾斜並修正漂移；DJI 的姿態穩定仍在。' : '速度模式：App 要求往某方向多快，DJI 再用自己的控制迴路調整傾斜，嘗試跟上這個速度。');
+  }
+  $('mode-angle').addEventListener('click', () => setControlMode(true));
+  $('mode-velocity').addEventListener('click', () => setControlMode(false));
+
+  function renderBlur() {
+    const speed = number('blur-speed');
+    const denominator = number('blur-shutter');
+    const distance = speed / denominator;
+    const metersPerPixel = footprint(.5).width / 640;
+    const pixels = distance / metersPerPixel;
+    $('shutter-blur-filter').setAttribute('stdDeviation', Math.max(.01, pixels / 3).toFixed(3) + ' 0');
+    text('blur-speed-out', fmt(speed) + ' m/s');
+    text('blur-distance', fmt(distance * 1000, 1) + ' mm');
+    text('blur-pixels', fmt(pixels, 1) + ' px');
+  }
+  listen(['blur-speed', 'blur-shutter'], renderBlur);
+  renderBlur();
+
+  const answers = {
+    heading: { correct: 'yes', explanation: '多旋翼可以側移；固定機頭模式就是用前後與左右速度合成沿圓運動。' },
+    projection: { correct: 'direction', explanation: '如果方向差為 60°，0.5 × cos(60°) 就是 0.25。先分清投影方向，不能用倍率掩蓋。' },
+    delay: { correct: 'no', explanation: 'App 計算只是其中一段。影像下傳、命令傳輸、機體響應與遙測回報仍需要時間。' },
+    phase: { correct: 'turn', explanation: '同樣等 0.39 秒，8.5 秒圈轉過約 16.5°，4 秒圈卻轉過 35.1°。提前的是速度命令方向，不是強迫機頭偏航。' },
+    'final-measure': { correct: 'compare', explanation: '命令、遙測、路徑投影和取樣時間可能不同。先建立可信比較，才知道要修量測、資料流還是控制響應。' },
+    'final-model': { correct: 'predict', explanation: '已知幾何提供預期路徑，影像仍負責修正漂移與檢查模型是否可信。看不到不等於一定沒變化。' },
+    'final-angle': { correct: 'speed', explanation: 'ANGLE 更直接指定傾斜，但不是直接逐顆控制馬達；失去原本水平速度保持的幫忙，App 的責任更大。' },
+    'final-limit': { correct: 'bound', explanation: '它是理想物理估算。實際機型限制、控制穩定性、感知品質與現場安全都還要成立，不能保證圈速。' }
+  };
+  const selectedAnswers = new Map();
+  const finalQuestions = [...document.querySelectorAll('[data-final="true"]')];
+  function updateScore() {
+    const answered = finalQuestions.filter(quiz => selectedAnswers.has(quiz.dataset.question)).length;
+    const correct = finalQuestions.filter(quiz => selectedAnswers.get(quiz.dataset.question) === answers[quiz.dataset.question].correct).length;
+    text('quiz-score', correct + ' / ' + finalQuestions.length);
+    text('quiz-score-message', correct === finalQuestions.length ? '這幾個重點答對了。試著不看提示，用自己的話解釋一次。' : answered ? `已回答 ${answered} 題；可以看解釋後再選一次。` : '還沒作答；可以回前面的圖找答案。');
+  }
+  document.querySelectorAll('.quiz').forEach(quiz => {
+    const key = quiz.dataset.question;
+    quiz.querySelectorAll('.quiz-option').forEach(button => button.addEventListener('click', () => {
+      selectedAnswers.set(key, button.dataset.answer);
+      const correct = button.dataset.answer === answers[key].correct;
+      quiz.querySelectorAll('.quiz-option').forEach(option => {
+        const selected = option === button;
+        option.classList.toggle('chosen', selected);
+        option.classList.toggle('correct', selected && correct);
+        option.setAttribute('aria-pressed', String(selected));
+      });
+      quiz.querySelector('.quiz-feedback').textContent = (correct ? '對。' : '這裡要分清楚：') + answers[key].explanation;
+      updateScore();
+    }));
+  });
+  $('quiz-reset').addEventListener('click', () => {
+    finalQuestions.forEach(quiz => {
+      selectedAnswers.delete(quiz.dataset.question);
+      quiz.querySelector('.quiz-feedback').textContent = '';
+      quiz.querySelectorAll('.quiz-option').forEach(button => { button.classList.remove('chosen', 'correct'); button.setAttribute('aria-pressed', 'false'); });
+    });
+    updateScore();
+  });
+  let initial = 0;
+  const initialHash = location.hash.match(/^#lesson-(\d+)$/);
+  if (initialHash && Number(initialHash[1]) < chapters.length) initial = Number(initialHash[1]);
+  else { try { const stored = Number(localStorage.getItem(storageKey)); if (Number.isInteger(stored) && stored >= 0 && stored < chapters.length) initial = stored; } catch (_) { /* All lessons work without storage. */ } }
+  showChapter(initial);
+})();
+</script>
+</body>
+</html>

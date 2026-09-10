@@ -15,6 +15,8 @@ internal class FlightProfiler(
 ) : AutoCloseable {
 
     val path: String = file.absolutePath
+    @Volatile var failure: Throwable? = null
+        private set
 
     private val startedAtNanos = clock()
     private var closed = false
@@ -84,11 +86,33 @@ internal class FlightProfiler(
     }
 
     private fun writeLine(line: String) {
-        writer.write(line)
-        val nowNanos = System.nanoTime()
-        if (nowNanos - lastFlushedAtNanos >= FLUSH_INTERVAL_NANOS) {
-            writer.flush()
-            lastFlushedAtNanos = nowNanos
+        if (failure != null) return
+        try {
+            writer.write(line)
+            val nowNanos = System.nanoTime()
+            if (nowNanos - lastFlushedAtNanos >= FLUSH_INTERVAL_NANOS) {
+                writer.flush()
+                lastFlushedAtNanos = nowNanos
+            }
+        } catch (error: java.io.IOException) {
+            failure = error
+        }
+    }
+
+    /** Flushes all preceding rows off the flight-control thread; reports real storage failure. */
+    @Synchronized
+    fun checkpoint(onComplete: (Throwable?) -> Unit) {
+        if (closed) {
+            onComplete(failure ?: IllegalStateException("profiling trace already closed"))
+            return
+        }
+        writerExecutor.execute {
+            try {
+                writer.flush()
+            } catch (error: java.io.IOException) {
+                failure = error
+            }
+            onComplete(failure)
         }
     }
 

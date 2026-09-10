@@ -368,7 +368,7 @@ class FixedHeadingLapControllerTest {
         val profiles =
             listOf(
                 FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 to 1.90,
-                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST to 2.00,
+                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL to 1.90,
             )
 
         profiles.forEach { (profile, expectedMaximumSpeed) ->
@@ -385,6 +385,7 @@ class FixedHeadingLapControllerTest {
                     actualTravelDirectionDegrees = 0.0,
                     actualGroundSpeedMetersPerSecond = 0.0,
                 )
+                controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, now, now, null)
                 decision = controller.tick(now)
             }
 
@@ -400,13 +401,13 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
-    fun `B3 cruises at 1 point 90 meters per second without feedback boost`() {
+    fun `B3 cruises at B2 command speed without visual feedback despite slow SDK speed`() {
         val centerline = path(
             xs = FloatArray(6) { 0.50f },
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
         )
         val controller = FixedHeadingLapController()
-        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST)
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
         var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(20) { index ->
             val now = (index + 1L) * 100_000_000L + 1L
@@ -416,19 +417,196 @@ class FixedHeadingLapControllerTest {
                 confidence = 0.9,
                 nowNanos = now,
                 actualTravelDirectionDegrees = 0.0,
-                actualGroundSpeedMetersPerSecond = 0.70,
+                actualGroundSpeedMetersPerSecond = 0.10,
             )
             decision = controller.tick(now)
         }
 
         assertEquals(
-            1.90,
+            1.60,
             kotlin.math.hypot(
                 decision.forwardMetersPerSecond,
                 decision.rightMetersPerSecond,
             ),
             0.001,
         )
+        assertNull(decision.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, decision.speedFeedbackBoostMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `B3 actual command follows visual speed rather than contradictory SDK velocity`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+        var step = 0L
+        fun cruise(visualSpeed: Double, sdkSpeed: Double): FixedHeadingLapDecision {
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(20) {
+                val now = ++step * 100_000_000L + 1L
+                controller.updateVisualVelocity(visualSpeed, 0.0, 0.0, 0.0, now, now, null)
+                controller.observe(
+                    centerline, 1.2, 0.9, now,
+                    actualTravelDirectionDegrees = 0.0,
+                    actualGroundSpeedMetersPerSecond = sdkSpeed,
+                )
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+
+        val slow = cruise(0.10, 2.0)
+        assertEquals(0.10, checkNotNull(slow.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.30, slow.speedFeedbackBoostMetersPerSecond, 1e-9)
+        assertEquals(1.90, slow.forwardMetersPerSecond, 1e-9)
+        assertEquals(0.0, slow.rightMetersPerSecond, 1e-9)
+
+        val fast = cruise(1.0, 0.10)
+        assertEquals(1.0, checkNotNull(fast.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.0, fast.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.60, fast.forwardMetersPerSecond, 1e-9)
+
+        val slowAgain = cruise(0.60, 2.0)
+        assertEquals(1.70, slowAgain.forwardMetersPerSecond, 1e-9)
+    }
+
+    @Test
+    fun `B3 expires visual boost after 250 milliseconds even without another observation`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+        val sampledAt = 100_000_001L
+        controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, sampledAt, sampledAt, null)
+        assertEquals(0.30, controller.tick(sampledAt).speedFeedbackBoostMetersPerSecond, 1e-9)
+        val boundary = sampledAt + 250_000_000L
+        controller.observe(centerline, 1.2, 0.9, boundary)
+        assertEquals(0.10, checkNotNull(controller.tick(boundary).measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+
+        val expired = controller.tick(boundary + 1L)
+        assertNull(expired.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, expired.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.60, expired.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertEquals("VISUAL_VELOCITY_STALE", expired.speedFeedbackUnavailableReason)
+        val coasting = controller.tick(boundary + 300_000_000L)
+        assertNull(coasting.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, coasting.speedFeedbackBoostMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `B3 missing invalid future stale and stationary samples clear an existing boost`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+        val now = 1_000_000_001L
+        fun rejects(
+            forward: Double?,
+            right: Double? = 0.0,
+            sampleHeading: Double? = 0.0,
+            currentHeading: Double? = 0.0,
+            sampleAt: Long = now,
+            reason: String? = null,
+        ) {
+            controller.observe(centerline, 1.2, 0.9, now)
+            controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, now, now, null)
+            assertEquals(0.30, controller.tick(now).speedFeedbackBoostMetersPerSecond, 1e-9)
+            controller.updateVisualVelocity(forward, right, sampleHeading, currentHeading, sampleAt, now, reason)
+            val rejected = controller.tick(now)
+            assertNull(rejected.measuredAlongTrackSpeedMetersPerSecond)
+            assertEquals(0.0, rejected.speedFeedbackBoostMetersPerSecond, 0.0)
+            assertEquals(1.60, rejected.commandTargetSpeedMetersPerSecond, 1e-9)
+            assertNotNull(rejected.speedFeedbackUnavailableReason)
+        }
+        rejects(null, right = null, sampleAt = 0L)
+        rejects(Double.NaN)
+        rejects(0.10, right = Double.POSITIVE_INFINITY)
+        rejects(0.10, sampleHeading = null)
+        rejects(0.10, currentHeading = Double.NaN)
+        rejects(0.10, sampleAt = now + 1L)
+        rejects(0.10, sampleAt = now - 250_000_001L)
+        rejects(0.0)
+        rejects(0.049)
+        rejects(0.10, reason = "INSUFFICIENT_INLIERS")
+    }
+
+    @Test
+    fun `B3 rotates sample body velocity through heading wrap and preserves right left signs`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+        val now = 100_000_001L
+        fun sample(forward: Double, right: Double, sampleHeading: Double, currentHeading: Double): FixedHeadingLapDecision {
+            controller.updateVisualVelocity(forward, right, sampleHeading, currentHeading, now, now, null)
+            return controller.tick(now)
+        }
+
+        val wrap = sample(0.20, 0.0, 179.0, -179.0)
+        assertEquals(-2.0, checkNotNull(wrap.speedFeedbackDirectionErrorDegrees), 1e-9)
+        assertEquals(0.20 * kotlin.math.cos(Math.toRadians(2.0)), checkNotNull(wrap.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.20, checkNotNull(sample(0.0, 0.20, 179.0, -91.0).measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.20, checkNotNull(sample(0.0, -0.20, -179.0, 91.0).measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        val right = sample(0.20, 0.10, 0.0, 0.0)
+        val left = sample(0.20, -0.10, 0.0, 0.0)
+        assertTrue(checkNotNull(right.speedFeedbackDirectionErrorDegrees) > 0.0)
+        assertTrue(checkNotNull(left.speedFeedbackDirectionErrorDegrees) < 0.0)
+        assertEquals(0.20, checkNotNull(right.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.20, checkNotNull(left.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        val backwards = sample(-0.20, 0.0, 0.0, 0.0)
+        assertNull(backwards.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals("DIRECTION_MISMATCH", backwards.speedFeedbackUnavailableReason)
+        assertEquals(0.0, backwards.speedFeedbackBoostMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `B3 stop and restart discard visual velocity and B2 continues using SDK feedback`() {
+        val centerline = path(
+            xs = FloatArray(6) { 0.50f },
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 1L)
+        controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, 100_000_001L, 100_000_001L, null)
+        assertEquals(0.30, controller.tick(100_000_001L).speedFeedbackBoostMetersPerSecond, 1e-9)
+        controller.stop()
+        controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, 150_000_001L, 150_000_001L, null)
+        val stopped = controller.tick(150_000_001L)
+        assertEquals(0.0, stopped.forwardMetersPerSecond, 0.0)
+        assertNull(stopped.measuredAlongTrackSpeedMetersPerSecond)
+        controller.start(200_000_001L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        controller.observe(centerline, 1.2, 0.9, 200_000_001L)
+        val restarted = controller.tick(200_000_001L)
+        assertNull(restarted.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, restarted.speedFeedbackBoostMetersPerSecond, 0.0)
+        controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, 150_000_001L, 200_000_001L, null)
+        assertNull(controller.tick(200_000_001L).measuredAlongTrackSpeedMetersPerSecond)
+
+        controller.start(300_000_001L, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16)
+        controller.observe(
+            centerline, 1.2, 0.9, 300_000_001L,
+            actualTravelDirectionDegrees = 0.0,
+            actualGroundSpeedMetersPerSecond = 0.60,
+        )
+        controller.updateVisualVelocity(0.10, 0.0, 0.0, 0.0, 300_000_001L, 300_000_001L, null)
+        val sdk = controller.tick(300_000_001L)
+        assertEquals(0.60, checkNotNull(sdk.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(0.10, sdk.speedFeedbackBoostMetersPerSecond, 1e-9)
+        assertEquals(1.70, sdk.commandTargetSpeedMetersPerSecond, 1e-9)
     }
 
     @Test
@@ -447,12 +625,23 @@ class FixedHeadingLapControllerTest {
             nowNanos = 100_000_001L,
             actualTravelDirectionDegrees = 0.0,
             actualGroundSpeedMetersPerSecond = 0.60,
+            speedFeedbackSampleAtNanos = 80_000_001L,
         )
         val aligned = controller.tick(100_000_001L)
 
         assertEquals(0.60, checkNotNull(aligned.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
         assertEquals(0.10, aligned.speedFeedbackBoostMetersPerSecond, 1e-9)
         assertEquals(1.70, aligned.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertEquals(80_000_001L, aligned.speedFeedbackSampleAtNanos)
+        assertEquals(100_000_001L, aligned.speedFeedbackObservedAtNanos)
+        assertNull(aligned.speedFeedbackUnavailableReason)
+        assertEquals(0.0, checkNotNull(aligned.speedFeedbackDirectionErrorDegrees), 1e-9)
+
+        val laterTick = controller.tick(150_000_001L)
+        assertEquals(80_000_001L, laterTick.speedFeedbackSampleAtNanos)
+        assertEquals(100_000_001L, laterTick.speedFeedbackObservedAtNanos)
+        assertEquals(0.60, checkNotNull(laterTick.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(1.70, laterTick.commandTargetSpeedMetersPerSecond, 1e-9)
 
         controller.observe(
             centerline = centerline,
@@ -472,14 +661,54 @@ class FixedHeadingLapControllerTest {
             heightMeters = 1.2,
             confidence = 0.9,
             nowNanos = 300_000_001L,
-            actualTravelDirectionDegrees = 90.0,
+            actualTravelDirectionDegrees = -90.0,
             actualGroundSpeedMetersPerSecond = 0.60,
+            speedFeedbackSampleAtNanos = 280_000_001L,
         )
         val sideways = controller.tick(300_000_001L)
 
         assertNull(sideways.measuredAlongTrackSpeedMetersPerSecond)
         assertEquals(0.0, sideways.speedFeedbackBoostMetersPerSecond, 0.0)
         assertEquals(1.60, sideways.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertEquals(280_000_001L, sideways.speedFeedbackSampleAtNanos)
+        assertEquals(300_000_001L, sideways.speedFeedbackObservedAtNanos)
+        assertEquals("DIRECTION_MISMATCH", sideways.speedFeedbackUnavailableReason)
+        assertEquals(-90.0, checkNotNull(sideways.speedFeedbackDirectionErrorDegrees), 1e-9)
+
+        controller.observe(
+            centerline = centerline,
+            heightMeters = 1.2,
+            confidence = 0.9,
+            nowNanos = 400_000_001L,
+            actualGroundSpeedMetersPerSecond = 0.60,
+            speedFeedbackSampleAtNanos = 280_000_001L,
+            speedFeedbackUnavailableReason = "VELOCITY_STALE",
+        )
+        val stale = controller.tick(450_000_001L)
+        assertNull(stale.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, stale.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.60, stale.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertEquals(280_000_001L, stale.speedFeedbackSampleAtNanos)
+        assertEquals(400_000_001L, stale.speedFeedbackObservedAtNanos)
+        assertEquals("VELOCITY_STALE", stale.speedFeedbackUnavailableReason)
+        assertNull(stale.speedFeedbackDirectionErrorDegrees)
+
+        controller.observe(centerline, 1.2, 0.9, 500_000_001L)
+        val invalid = controller.tick(500_000_001L)
+        assertEquals("INVALID_INPUT", invalid.speedFeedbackUnavailableReason)
+        assertNull(invalid.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, invalid.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.60, invalid.commandTargetSpeedMetersPerSecond, 1e-9)
+
+        controller.stop()
+        val stopped = controller.tick(600_000_001L)
+        assertEquals("NO_OBSERVATION", stopped.speedFeedbackUnavailableReason)
+        assertEquals(0L, stopped.speedFeedbackSampleAtNanos)
+        assertEquals(0L, stopped.speedFeedbackObservedAtNanos)
+        assertNull(stopped.speedFeedbackDirectionErrorDegrees)
+        assertNull(stopped.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, stopped.forwardMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.rightMetersPerSecond, 0.0)
     }
 
 

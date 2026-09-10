@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>突破 8.5 秒單圈 — DJI Mini 4 Pro 循線飛行分析</title>
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --ink: #1f1f1f;
+    --muted: #6b6b6b;
+    --accent: #b5451b;
+    --accent-soft: #fbe9e0;
+    --line: #dcd8d0;
+    --card: #ffffff;
+    --mono: "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 24px 96px; }
+  .eyebrow {
+    font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); font-family: var(--mono);
+  }
+  h1 { font-size: 40px; line-height: 1.2; margin: 8px 0 12px; }
+  .lede { font-size: 19px; color: #3a3a3a; margin: 0 0 32px; }
+  h2 {
+    font-size: 24px; margin: 56px 0 12px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+  }
+  h2 .num { font-family: var(--mono); color: var(--accent); font-size: 14px; margin-right: 10px; }
+  p { margin: 0 0 16px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 24px 0 40px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+  .stat .label { font-size: 12px; letter-spacing: .1em; color: var(--muted); font-family: var(--mono); }
+  .stat .value { font-size: 36px; font-weight: 700; margin: 4px 0; }
+  .stat .note { font-size: 13px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 15px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; letter-spacing: .08em; color: var(--muted); font-family: var(--mono); font-weight: 600; }
+  td.num { font-family: var(--mono); white-space: nowrap; }
+  tr.now td { background: var(--accent-soft); }
+  .table-wrap { overflow-x: auto; }
+  .caption { font-size: 13px; color: var(--muted); margin: -12px 0 24px; }
+  .callout {
+    border-left: 4px solid var(--accent); background: var(--accent-soft);
+    padding: 14px 18px; margin: 24px 0; border-radius: 0 6px 6px 0;
+  }
+  .callout .tag { font-family: var(--mono); font-size: 12px; letter-spacing: .15em; color: var(--accent); display: block; margin-bottom: 6px; }
+  .callout p:last-child { margin-bottom: 0; }
+  pre {
+    background: #2b2b2b; color: #f2f2f2; padding: 16px 18px; border-radius: 6px;
+    overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.6;
+  }
+  code { font-family: var(--mono); font-size: .92em; background: #efece6; padding: 1px 5px; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  ul { padding-left: 22px; }
+  li { margin-bottom: 8px; }
+  .bar-chart { margin: 16px 0 8px; }
+  .bar-row { display: grid; grid-template-columns: 70px 1fr 140px; align-items: center; gap: 12px; margin: 6px 0; font-size: 14px; }
+  .bar-row .lbl { font-family: var(--mono); text-align: right; }
+  .bar-track { background: #ece9e2; border-radius: 3px; height: 18px; position: relative; }
+  .bar-fill { background: var(--accent); height: 100%; border-radius: 3px; }
+  .bar-row .val { font-family: var(--mono); color: var(--muted); }
+  .limit { border-top: 2px dashed var(--muted); font-size: 12px; color: var(--muted); margin: 4px 0 0 82px; padding-top: 2px; }
+  .sources { font-size: 14px; color: var(--muted); border-top: 1px solid var(--line); margin-top: 56px; padding-top: 20px; }
+  .footer { font-size: 12px; color: var(--muted); font-family: var(--mono); margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+
+<div class="eyebrow">飛行測試分析 · DJI MINI 4 PRO · 黑色膠帶圓形跑道，直徑 1.5 M，離地高度 0.5 M</div>
+<h1>突破 8.5 秒單圈</h1>
+<p class="lede">單圈時間受限於迴路延遲，以及一個在頂端開環飽和的速度迴路，而不是受限於機體本身。在這個圓形跑道上，Mini 4 Pro 大約 25° 的可用傾角，目前只用到 2.4°。</p>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">最佳紀錄單圈</div>
+    <div class="value">7.9 秒</div>
+    <div class="note">09/01 達成。目前版本落在 8.5–9.0 秒。</div>
+  </div>
+  <div class="stat">
+    <div class="label">實際使用的傾角</div>
+    <div class="value">2.4°</div>
+    <div class="note">可用約 25°。向心加速度需求 0.41 m/s²。</div>
+  </div>
+  <div class="stat">
+    <div class="label">閉迴路延遲</div>
+    <div class="value">394 ms</div>
+    <div class="note">手機端 67 ms，從 MSDK 呼叫到量測到回應 327 ms。</div>
+  </div>
+</div>
+
+<p><strong>簡短回答：可以，而且空間很大。</strong>圓周長 4.712 m，所以 8.5 秒相當於 0.554 m/s。從這個速度一路到大約 2.5 秒之間的差距，全是控制與感知工程的問題，不是機體能力的問題。</p>
+
+<h2><span class="num">01</span>機體不是瓶頸</h2>
+<p>半徑 0.75 m 的向心加速度需求為 v²/R。在 0.554 m/s 時是 0.41 m/s²，多旋翼只要傾斜 2.4° 就能換到。就算是 3 秒單圈，也只需要 18.5°，仍然舒服地落在 Mini 4 Pro 一般模式的飛行包絡之內。</p>
+
+<p><strong>各單圈時間所需的傾角</strong><br>
+<span class="eyebrow">直徑 1.5 M 圓形 · R = 0.75 M · 協調轉彎，無風</span></p>
+
+<div class="bar-chart">
+  <div class="bar-row"><span class="lbl">8.5 s</span><div class="bar-track"><div class="bar-fill" style="width:8%"></div></div><span class="val">2.4° · 0.55 m/s ← 現況</span></div>
+  <div class="bar-row"><span class="lbl">7.9 s</span><div class="bar-track"><div class="bar-fill" style="width:9.3%"></div></div><span class="val">2.8° · 0.60 m/s</span></div>
+  <div class="bar-row"><span class="lbl">6 s</span><div class="bar-track"><div class="bar-fill" style="width:16%"></div></div><span class="val">4.8° · 0.79 m/s</span></div>
+  <div class="bar-row"><span class="lbl">5 s</span><div class="bar-track"><div class="bar-fill" style="width:23%"></div></div><span class="val">6.9° · 0.94 m/s</span></div>
+  <div class="bar-row"><span class="lbl">4 s</span><div class="bar-track"><div class="bar-fill" style="width:35.7%"></div></div><span class="val">10.7° · 1.18 m/s</span></div>
+  <div class="bar-row"><span class="lbl">3 s</span><div class="bar-track"><div class="bar-fill" style="width:61.7%"></div></div><span class="val">18.5° · 1.57 m/s</span></div>
+  <div class="bar-row"><span class="lbl">2.5 s</span><div class="bar-track"><div class="bar-fill" style="width:86%"></div></div><span class="val">25.8° · 1.88 m/s</span></div>
+  <div class="limit">橫軸 0°–30°；傾角上限約 25°（虛線）</div>
+</div>
+<p class="caption">傾角 = atan(v²/gR)。傾角上限是一般飛行模式的實務天花板，運動模式會再拉高。一路到 2.5 秒的每個單圈時間都落在上限之內。</p>
+
+<p>所以沒有必要去調更大的推力或更緊湊的機體。真正的問題是：一台轉向權限是實際使用量十倍的飛行器，為什麼跑不快？</p>
+
+<h2><span class="num">02</span>394 毫秒花到哪裡去了</h2>
+<p>Profiling 結果非常明確：83% 的迴路延遲發生在 MSDK 呼叫的下游。手機已經不再是瓶頸。</p>
+
+<p><strong>迴路延遲預算</strong><br>
+<span class="eyebrow">2026/09/04 · 1,294 個影格 · 2,927 次控制更新 · 各階段平均值</span></p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>階段</th><th>平均耗時</th></tr>
+  <tr><td>手機端流程（合計）</td><td class="num">67.4 ms</td></tr>
+  <tr><td>　影格交接</td><td class="num">1.24 ms</td></tr>
+  <tr><td>　影像處理</td><td class="num">28.54 ms</td></tr>
+  <tr><td>　中心線擷取與評分</td><td class="num">17.56 ms</td></tr>
+  <tr><td>　派送到控制迴路</td><td class="num">8.15 ms</td></tr>
+  <tr><td>　Virtual Stick 等待</td><td class="num">11.91 ms</td></tr>
+  <tr><td>RC 連線 → 飛控 → 馬達反應</td><td class="num">327.2 ms</td></tr>
+  <tr class="now"><td><strong>總計</strong></td><td class="num"><strong>394.6 ms</strong></td></tr>
+</table>
+</div>
+<p class="caption">手機端流程中，中心線擷取（17.6 ms）與前處理（13.2 ms）佔了大宗；控制數學本身只花 0.22 ms。327.2 ms 這個數字是把延遲、上升時間、跨越門檻時間混在一起量到的，量測方式是遙測速度第一次變化超過門檻的時間點。</p>
+
+<p>由此得出兩個結論。第一，再最佳化影像流程的回報有限：就算把整個 67 ms 砍半，也只換到迴路的 8%。第二，那 327 ms 並不全是無法削減的延遲。它包含一段真正的傳輸延遲（RC 上行加上飛控延遲），以及飛控自己速度迴路的上升時間。上升時間那部分可以用模型反演補償，傳輸延遲那部分不行。</p>
+
+<div class="callout">
+  <span class="tag">請先做這件事</span>
+  <p>把這兩個分開量出來。懸停、對單一軸做步階命令、記錄命令速度與量測速度，然後擬合出一個純延遲 τ<sub>d</sub> 加上一個一階時間常數 T。本文件後面所有內容都需要這兩個數字。我的估計是，真正的傳輸延遲比較接近 150 ms，而不是 327 ms。</p>
+</div>
+
+<h2><span class="num">03</span>寫死的 16° 就是整個問題的縮影</h2>
+<p>沿圓飛行時，要抵銷延遲 τ 所需的航向提前量是 v·τ/R。在 v = 0.554 m/s、τ = 0.39 s 時算出來是 16.4°。而 <code>計算水平命令</code> 裡調出來的常數正好是 16°。</p>
+<p>這不是巧合：延遲補償是在唯一一個速度點上手工擬合出來的。而它跟速度成線性關係，所以無人機一加速，這個值馬上就是錯的。此外它是用依符號決定的 ±16 套上去，而不是按比例套用，所以在平緩區段提前過頭、在快速區段提前不足。</p>
+
+<p><strong>所需航向提前量與速度的關係</strong><br>
+<span class="eyebrow">LEAD = V·τ/R · R = 0.75 M</span></p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>速度</th><th>等效單圈</th><th>τ = 390 ms（現況）</th><th>τ = 200 ms（延遲改善後）</th><th>寫死的常數</th></tr>
+  <tr class="now"><td class="num">0.55 m/s</td><td class="num">8.5 s</td><td class="num">16.4°（今天）</td><td class="num">≈ 8.4°</td><td class="num">±16°</td></tr>
+  <tr><td class="num">0.79 m/s</td><td class="num">6.0 s</td><td class="num">≈ 23.5°</td><td class="num">≈ 12.1°</td><td class="num">±16°</td></tr>
+  <tr><td class="num">0.94 m/s</td><td class="num">5.0 s</td><td class="num">28.0°</td><td class="num">≈ 14.4°</td><td class="num">±16°</td></tr>
+  <tr><td class="num">1.18 m/s</td><td class="num">4.0 s</td><td class="num">35.1°</td><td class="num">≈ 18.0°</td><td class="num">±16°</td></tr>
+  <tr><td class="num">1.57 m/s</td><td class="num">3.0 s</td><td class="num">≈ 46.8°</td><td class="num">≈ 24.0°</td><td class="num">±16°</td></tr>
+</table>
+</div>
+<p class="caption">寫死的 16° 只有在 τ = 390 ms 曲線與它交會的地方才正確，也就是今天的速度。5 秒單圈需要 28°；4 秒單圈需要 35°。這很可能就是 08/31 之後每一次提速都卡住的原因。（原圖只標示 16.4°、28.0°、35.1° 三點，其餘數值為依公式換算的近似值。）</p>
+
+<p>修法是解析式的，而且每一項在程式碼裡都已經存在。把常數換成「一階延滯加純延遲」的反函數：</p>
+
+<pre><code># 計算水平命令 — 取代 ±16° 常數
+# ω 就是 預先轉彎速度，已經算好了：航向旋轉的 rad/s
+ω        = 沿線速度 × 曲率估計值
+提前角度  = ω × τ_total × 180 / π   # → 在今天的速度下得到 16°
+速度增益  = sqrt(1 + (ω × T)²)      # 飛控會損失掉的幅度</code></pre>
+
+<p>這在目前的工作點會化簡成 16°，所以是安全的替換；而且它會正確地外推，不必在每個速度重新調參。</p>
+
+<h2><span class="num">04</span>那道去不了任何地方的命令</h2>
+<p>09/04 的 log 帶著這份報告裡最有診斷價值的一個數字：平均命令速度 1.633 m/s，平均回報地速 0.474 m/s。同時，8.95 秒的單圈時間意味著真實切線速度是 0.527 m/s。三個數字，三個獨立的發現。</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>量</th><th>數值</th><th>它告訴你什麼</th></tr>
+  <tr><td>命令速度</td><td class="num">1.633 m/s</td><td>釘在上限：速度迴路已經飽和</td></tr>
+  <tr><td>遙測地速</td><td class="num">0.474 m/s</td><td>相對幾何真值低了約 10%</td></tr>
+  <tr><td>幾何真值（4.712 m ÷ 8.95 s）</td><td class="num">0.527 m/s</td><td>唯一能完全信任的速度量測</td></tr>
+  <tr><td>命令轉化為前進的比例</td><td class="num">32%</td><td>三分之二的命令速度沒有變成沿路徑的運動</td></tr>
+</table>
+</div>
+
+<div class="callout">
+  <span class="tag">發現 — 速度迴路在頂端是開環的</span>
+  <p><code>計算目標速度</code> 只要量測速度低於目標，就會加上 <code>期望沿線速度 − 沿線速度</code>。由於量測速度永遠到不了 1.6 m/s，這一項永久停在 <code>最大允許增加量</code>。迴路已經沒有可用的調變範圍：它在命令一個飛控透過 327 ms 延遲根本追不上的數字，而多出來的部分被花在徑向的 <code>回正命令</code> 和相位落後震盪上，最後再被 <code>最大速度命令</code> 的重新縮放裁掉。</p>
+</div>
+
+<div class="callout">
+  <span class="tag">發現 — 有偏差的速度回授毒害了前饋</span>
+  <p><code>沿線速度</code> 同時餵給目標速度加成和 <code>預先轉彎速度 = 沿線速度 × 曲率</code>。速度估計低了 10%，代表曲率前饋轉向不足，表現為殘餘航向誤差，進而觸發 <code>速度上限比例</code> 把速度砍掉：一個自我懲罰的迴路。這最可能就是 09/04 版本（8.9–9.0 秒）雖然加了曲率前饋，卻比 09/01 版本（7.9 秒）更慢的原因。</p>
+</div>
+
+<div class="callout">
+  <span class="tag">改任何東西之前先跑這個</span>
+  <p>把命令向量和回報速度向量都分解到路徑座標系（切線與徑向分量分開），記錄完整一圈。如果切線命令 ≈ 1.6 m/s 而切線實際 ≈ 0.53，問題在飛控追蹤，第 07 節是答案。如果切線命令遠低於 1.6，代表控制器把權限花在徑向修正上，第 06 節是答案。一張圖就能決定剩下的工作哪一半才重要。</p>
+</div>
+
+<p>另外，<code>行進方向</code> 是從 <code>轉向速度</code> 開環積分出來的，只透過視覺方位誤差修正。轉向率前饋一旦有偏差，這個積分就會漂移，而漂移正是 <code>追蹤角度上限</code> 被觸發的原因。速度向量已經拿得到：只要幅度超過雜訊底線，就對它取 <code>atan2</code> 當作直接的航向觀測值，融合進去。</p>
+
+<h2><span class="num">05</span>相機實際上看得到什麼</h2>
+<p>在 0.5 m 離地高度，等效 24 mm 的垂直向下相機大約涵蓋 0.75 × 0.50 m 的地面。在 0.75 m 半徑上，這是一段 39° 的弧，弧矢高只有 43 mm，曲率訊號幾乎不比膠帶本身寬。這就是為什麼會有 <code>曲率平滑比例</code>、<code>曲率上限</code>，以及圍繞它們的脆弱性。</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>高度</th><th>涵蓋範圍</th><th>可見弧</th><th>弧矢高</th><th>後果</th></tr>
+  <tr class="now"><td class="num">0.50 m（現況）</td><td class="num">0.75 × 0.50 m</td><td class="num">39°</td><td class="num">43 mm</td><td>曲率條件很差；前瞻距離 ≈ 0.3 m</td></tr>
+  <tr><td class="num">0.75 m</td><td class="num">1.12 × 0.75 m</td><td class="num">60°</td><td class="num">100 mm</td><td>曲率可直接使用</td></tr>
+  <tr><td class="num">1.00 m</td><td class="num">1.50 × 1.00 m</td><td class="num">整個圓</td><td class="num">—</td><td>每影格做全域擬合；感知問題整個瓦解</td></tr>
+</table>
+</div>
+
+<p>作為對照：在 0.554 m/s 時，無人機在 394 ms 的延遲期間會前進 0.215 m，跟整個可用前瞻距離差不多。這就是「為什麼目前架構已經到極限」的幾何說法。</p>
+
+<h2><span class="num">06</span>別再追蹤一條線；追蹤一個已知的圓</h2>
+<p>半徑是事先知道的：0.75 m。所以根本不要去估計曲率。在每個影格裡對膠帶擬合一段已知半徑的弧，一個只有兩個自由度（徑向偏移與切線方位）的擬合，取代骨架擷取加曲率估計。它在 39° 的弧上條件好得多，而且會給出一個延伸到視野之外的全域路徑模型，徹底解除前瞻距離的限制。</p>
+<p>然後圍繞這個模型重新組織控制器：</p>
+<ul>
+  <li><strong>狀態。</strong>圓上的相位 θ、徑向誤差 e、速度 v，放進 EKF，並向前預測 τ，讓控制器針對未來狀態動作，而不是針對延遲後的狀態。</li>
+  <li><strong>標稱命令。</strong>純前饋，v·(−sin θ̂, cos θ̂)，以地面座標系下達。設定 <code>rollPitchCoordinateSystem = GROUND</code>：航向固定時，偏航估計誤差就會完全從命令路徑中消失。</li>
+  <li><strong>視覺。</strong>只對徑向誤差與相位閉一個慢迴路。</li>
+  <li><strong>速度。</strong>用視覺量測：中心線影格到影格的弧長位移，在已知比例尺下可提供延遲約 50 ms 的地速，完全沒有遙測的衰減問題。</li>
+</ul>
+<p>在這個結構下，延遲不再是速度上限，因為標稱運動是建立在你已知的幾何上開環執行的。視覺只需要修正漂移。</p>
+
+<h2><span class="num">07</span>無論如何都值得做的兩個改變</h2>
+
+<p><strong>強制使用快速快門</strong></p>
+<p>超過大約 1 m/s 之後，動態模糊會變成硬性阻礙。在 0.5 m 離地高度，地面比例尺約為每像素 0.59 mm：</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>速度</th><th>1/60 s</th><th>1/125 s</th><th>1/250 s</th><th>1/500 s</th></tr>
+  <tr class="now"><td class="num">0.55 m/s（現況）</td><td class="num">15.6 px</td><td class="num">7.5 px</td><td class="num">3.8 px</td><td class="num">1.9 px</td></tr>
+  <tr><td class="num">1.00 m/s</td><td class="num">28.4 px</td><td class="num">13.7 px</td><td class="num">6.8 px</td><td class="num">3.4 px</td></tr>
+  <tr><td class="num">1.50 m/s</td><td class="num">42.7 px</td><td class="num">20.5 px</td><td class="num">10.2 px</td><td class="num">5.1 px</td></tr>
+</table>
+</div>
+<p>在 1.5 m/s 與 1/60 s 時，拖影達 25 mm，跟膠帶寬度相當。透過 MSDK 把曝光鎖定在 1/500 s 或更快，讓 ISO 自行上升。便宜，而且 1 m/s 以上的一切都以它為前提。</p>
+
+<p><strong>考慮對 roll 與 pitch 使用 ANGLE 模式</strong></p>
+<p><code>sendVirtualStickAdvancedParam</code> 可以直接接受傾角，而不是速度。這繞過了飛控的速度迴路，也就是 327 ms 裡最大的單一區塊；而對固定半徑的圓來說，所需傾角是一個以 ω 旋轉的固定幅度，是理想的前饋目標。保持 <code>verticalControlMode = VELOCITY</code> 為零以維持定高。代價是速度保持功能會消失，所有漂移修正都得移到視覺迴路；等圓形模型估計器做好之後再做原型。</p>
+
+<h2><span class="num">08</span>階梯</h2>
+<p>依相依性排序，而不是依收益大小排序：每一步都讓下一步變得可量測。</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>步驟</th><th>改變</th><th>預期單圈</th></tr>
+  <tr><td class="num">—</td><td>目前版本</td><td class="num">8.5–9.0 s</td></tr>
+  <tr><td class="num">01</td><td>誠實的速度回授：視覺里程計，或用單圈推導的真值校正遙測</td><td class="num">7.5–8 s</td></tr>
+  <tr><td class="num">02</td><td>依速度排程的相位提前與增益，取代 ±16° 常數</td><td class="num">5.5–6.5 s</td></tr>
+  <tr><td class="num">03</td><td>已知半徑圓擬合、含延遲預測的 EKF、前饋軌跡</td><td class="num">4–5 s</td></tr>
+  <tr><td class="num">04</td><td>ANGLE 模式的 roll/pitch</td><td class="num">3–4 s</td></tr>
+  <tr><td class="num">—</td><td>25° 傾角上限</td><td class="num">~2.5 s</td></tr>
+</table>
+</div>
+
+<h2><span class="num">09</span>一個會改變答案的問題</h2>
+<p>0.5 m 是硬性需求，還是一個選擇出來的工作點？在 1.0 m 時，涵蓋範圍加倍成 1.5 × 1.0 m，整個圓可以塞進單一影格。感知問題就此瓦解成每影格一次全域擬合：不用追蹤中心線、不用估計曲率、沒有前瞻距離限制、也不用做丟線後的恢復。</p>
+<p>如果高度可以商量，哪怕只是在開發階段，最快的路徑是先在幾何條件寬裕的 1.0 m 把估計器和控制器做起來，然後在架構已經正確的前提下把高度一路降回 0.5 m。如果 0.5 m 是應用端固定的，那第 06 節的已知半徑擬合就是讓小涵蓋範圍得以存活的關鍵。</p>
+
+<div class="sources">
+<p><strong>資料來源：</strong>《讓 DJI 無人機循線飛行的開發報告》（控制迴路、虛擬碼、2026/09/04 profiling 測試、08/17–09/04 開發日誌）。幾何與傾角數字由 R = 0.75 m 及標準協調轉彎關係式計算；相機涵蓋範圍以等效 24 mm 垂直向下視野推算。階梯中的單圈時間估計是工程判斷，不是量測結果。</p>
+</div>
+
+<div class="footer">突破 8.5 秒單圈 · DJI Mini 4 Pro 循線飛行分析 · 中文翻譯版（譯自英文原稿，2026/09）</div>
+
+</main>
+</body>
+</html>

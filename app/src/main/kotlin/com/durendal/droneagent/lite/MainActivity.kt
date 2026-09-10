@@ -16,6 +16,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.HorizontalScrollView
 import android.widget.TextView
+import java.util.Locale
 import dji.sdk.keyvalue.key.DJIKey
 import dji.sdk.keyvalue.key.BatteryKey
 import dji.sdk.keyvalue.key.FlightAssistantKey
@@ -88,6 +89,8 @@ class MainActivity : Activity() {
         HARDWARE_LATENCY,
         DIRECTIONAL_VELOCITY,
         FIXED_DIRECTION_SPEED,
+        STRAIGHT_REHEARSAL,
+        STRAIGHT_MEASUREMENT,
     }
 
 
@@ -121,6 +124,8 @@ class MainActivity : Activity() {
     private lateinit var hardwareLatencyButton: PillButton
     private lateinit var directionalVelocityPulseButton: PillButton
     private lateinit var fixedDirectionSpeedButton: PillButton
+    private lateinit var straightRehearsalButton: PillButton
+    private lateinit var straightMeasurementButton: PillButton
     private lateinit var mathematicalSkatingCircleButton: PillButton
     private lateinit var mathematicalRacingCircleButton: PillButton
     private lateinit var virtualStickFrameRateButton: PillButton
@@ -134,12 +139,15 @@ class MainActivity : Activity() {
     private var aircraftConnected = false
     private var flying = false
     private var landingRequested = false
+    private var landingAuthorityWaitPending = false
     private var confirmationNeeded = false
     private var confirmAttempts = 0
 
     /** Height when the landing command was issued, to prove the aircraft descended. */
     private var landingHeightAtCommand: Double? = null
     private var stickStatus = VirtualStickStatus()
+    private var lastStickStatusAtNanos = 0L
+    private var lastReleaseRequestedAtNanos = 0L
 
     /** True once MSDK accepted enableVirtualStick; the app then owns the control link. */
     private var stickOwned = false
@@ -147,6 +155,7 @@ class MainActivity : Activity() {
     private var acquireAttempts = 0
     private var transitionTimeoutAction: (() -> Unit)? = null
     private var transitionGeneration = 0L
+    private var pendingAcquireCallbacks = 0
 
     /** Ground-relative height and when it was observed; null until the first sample. */
     private var altitudeMeters: Double? = null
@@ -207,6 +216,7 @@ class MainActivity : Activity() {
     private val aircraftVelocityKey =
         KeyTools.createKey(FlightControllerKey.KeyAircraftVelocity)
     /** Earth-frame horizontal velocity used to verify and disambiguate fixed-heading travel. */
+    private val aircraftVelocityLock = Any()
     @Volatile private var aircraftVelocityX = 0.0
     @Volatile private var aircraftVelocityY = 0.0
     private var aircraftVelocityZ = 0.0
@@ -234,7 +244,106 @@ class MainActivity : Activity() {
     private var hardwareLatencyArmedAtNanos = 0L
     private var hardwareLatencyStartedAtNanos = 0L
     private var horizontalPulseExperiment: HorizontalPulseExperiment? = null
+    private var horizontalPulseGeneration = 0L
     private var nextDirectionalPulseDirection = DirectionalVelocityPulseDirection.FORWARD
+    private data class StraightLineTestConfig(
+        val direction: DirectionalVelocityPulseDirection,
+        val speedMetersPerSecond: Double,
+        val maximumCruiseSeconds: Int,
+    )
+
+    private var straightLineTestConfig: StraightLineTestConfig? = null
+    private var straightLineInitialHeading: Double? = null
+    private var straightLineAttemptId: String? = null
+    private var straightLineLastSampleAtNanos = 0L
+    private var straightLineReleasePending = false
+    private var straightLineTracePending = false
+    @Volatile private var visualVelocityDiagnostics: VisualVelocityDiagnostics? = null
+    @Volatile private var visualVelocityFrameContext: VisualVelocityDiagnostics.FrameContext? = null
+    private var fixedHeadingVisualVelocityAttemptId: String? = null
+    private var activityForeground = false
+
+    private val velocityReadDiagnostics = VelocityReadDiagnostics(
+        readVelocity = { complete ->
+            KeyManager.getInstance().getValue(
+                aircraftVelocityKey,
+                object : CommonCallbacks.CompletionCallbackWithParam<Velocity3D> {
+                    override fun onSuccess(result: Velocity3D) {
+                        complete(VelocityReadDiagnostics.Velocity(result.x, result.y, result.z), null)
+                    }
+
+                    override fun onFailure(error: IDJIError) {
+                        complete(null, error.toString())
+                    }
+                },
+            )
+        },
+        listenerSnapshot = {
+            synchronized(aircraftVelocityLock) {
+                if (aircraftVelocityAtNanos == 0L) null else VelocityReadDiagnostics.ListenerSample(
+                    aircraftVelocityX, aircraftVelocityY, aircraftVelocityZ, aircraftVelocityAtNanos,
+                )
+            }
+        },
+        record = { event, atNanos, details ->
+            flightProfiler.record(event = event, atNanos = atNanos, details = details)
+        },
+    )
+    private val velocityReadTickRunnable = object : Runnable {
+        override fun run() {
+            if (activityDestroying || !registered || !aircraftConnected || !isStraightLineTest() ||
+                (!hardwareLatencyStartPending && hardwareLatencyPulseSequence == null)
+            ) {
+                velocityReadDiagnostics.stop()
+                if (isStraightLineTest()) {
+                    straightLineAttemptId?.let { visualVelocityDiagnostics?.stop(it) }
+                    refreshVisualVelocityContext()
+                }
+                return
+            }
+            velocityReadDiagnostics.tick()
+            mainHandler.postDelayed(this, VelocityReadDiagnostics.INTERVAL_MS)
+        }
+    }
+
+    /** Main-thread telemetry snapshot; image workers never read mutable flight state. */
+    private fun refreshVisualVelocityContext() {
+        if (visualVelocityDiagnostics?.isActive() != true) {
+            visualVelocityFrameContext = null
+            return
+        }
+        val listener = synchronized(aircraftVelocityLock) {
+            if (aircraftVelocityAtNanos == 0L) null else VelocityReadDiagnostics.ListenerSample(
+                aircraftVelocityX, aircraftVelocityY, aircraftVelocityZ, aircraftVelocityAtNanos,
+            )
+        }
+        visualVelocityFrameContext = VisualVelocityDiagnostics.FrameContext(
+            heightMeters = usableHeightMeters(),
+            heightReceivedAtNanos = altitudeAtNanos,
+            heightSource = heightSource.name,
+            cameraPitchCommandDegrees = selectedCameraPitchDegrees,
+            aircraftHeadingDegrees = aircraftHeadingDegrees,
+            listener = listener,
+            capturedAtNanos = System.nanoTime(),
+            aircraftHeadingReceivedAtNanos = aircraftHeadingAtNanos,
+            cameraPitchCommandPending = cameraPitchCommandPending,
+        )
+    }
+
+    private fun submitVisualVelocityFrame(rgba: org.opencv.core.Mat, frameNanos: Long) {
+        val diagnostic = visualVelocityDiagnostics ?: return
+        val context = visualVelocityFrameContext ?: return
+        try {
+            diagnostic.submitRgba(rgba, frameNanos, context)
+        } catch (error: Exception) {
+            // A diagnostic failure must not abort the existing tape-detection path.
+            flightProfiler.record(
+                event = "visual_velocity_error",
+                frameNanos = frameNanos,
+                details = profileDetails("stage" to "submission", "error" to error, "controlFeedback" to false),
+            )
+        }
+    }
 
     /** Camera- and position-independent circle generated solely from elapsed time. */
     @Volatile private var mathematicalCircleController: MathematicalCircleController? = null
@@ -342,12 +451,14 @@ class MainActivity : Activity() {
         )
     }
     private val virtualStick = VirtualStickSession(
-        onStatus = ::handleVirtualStickStatus,
+        onStatus = { status -> handleVirtualStickStatus(status, System.nanoTime()) },
         onFrameSummary = { summary -> flightLog.write(summary) },
         onFrameSent = ::recordVirtualStickFrame,
     )
 
-    private fun handleVirtualStickStatus(status: VirtualStickStatus) = runOnUiThread {
+    private fun handleVirtualStickStatus(status: VirtualStickStatus, receivedAtNanos: Long) = runOnUiThread {
+        if (receivedAtNanos < lastStickStatusAtNanos) return@runOnUiThread
+        lastStickStatusAtNanos = receivedAtNanos
         val previous = stickStatus
         stickStatus = status
         if (previous.enabled != status.enabled || previous.authority != status.authority) {
@@ -416,8 +527,11 @@ class MainActivity : Activity() {
             )
         flightProfiler.record(
             event = "session_start",
+            atNanos = System.nanoTime(),
             details = profileDetails(
                 "sessionId" to flightProfileSessionId,
+                "wallTimeMillis" to System.currentTimeMillis(),
+                "timestampMeaning" to "app_monotonic_receive_not_camera_exposure",
                 "device" to "${Build.MANUFACTURER}/${Build.MODEL}",
                 "android" to Build.VERSION.RELEASE,
                 "sdk" to Build.VERSION.SDK_INT,
@@ -438,6 +552,13 @@ class MainActivity : Activity() {
         }.onFailure { error ->
             flightLog.write("tape capture unavailable: $error")
         }.getOrNull()
+        visualVelocityDiagnostics = runCatching {
+            VisualVelocityDiagnostics { event, atNanos, details ->
+                flightProfiler.record(event = event, atNanos = atNanos, details = details)
+            }
+        }.onFailure { error ->
+            flightLog.write("visual velocity diagnostics unavailable: $error")
+        }.getOrNull()
         tapeDetector = runCatching {
             BlackTapeDetector(
                 onResult = ::handleTapeDetection,
@@ -447,6 +568,7 @@ class MainActivity : Activity() {
                 },
                 captureRecorder = captureRecorder,
                 captureFlightContext = ::tapeCaptureFlightContext,
+                onRgbaFrameReady = ::submitVisualVelocityFrame,
             )
         }.onFailure { error ->
             flightLog.write("OpenCV initialization failed: $error")
@@ -461,11 +583,34 @@ class MainActivity : Activity() {
         mainHandler.post(horizontalSafetyWatchdog)
     }
 
+    override fun onResume() {
+        super.onResume()
+        activityForeground = true
+    }
+
+    override fun onPause() {
+        activityForeground = false
+        mainHandler.removeCallbacks(velocityReadTickRunnable)
+        velocityReadDiagnostics.stop()
+        visualVelocityDiagnostics?.stop()
+        visualVelocityFrameContext = null
+        fixedHeadingVisualVelocityAttemptId = null
+        if (isStraightLineTest()) {
+            stopHardwareLatencyTest("測試畫面離開前景，已中止直線測試")
+        }
+        super.onPause()
+    }
+
     override fun onDestroy() {
         // Listeners are held by `this`; leaking them across an Activity restart
         // would deliver key updates to a dead view hierarchy. The stick link is
         // released too, so a killed UI can never leave a live control link.
         activityDestroying = true
+        velocityReadDiagnostics.close()
+        visualVelocityDiagnostics?.close()
+        visualVelocityDiagnostics = null
+        visualVelocityFrameContext = null
+        fixedHeadingVisualVelocityAttemptId = null
         stopHardwareLatencyTest("App 關閉，${activeHorizontalPulseName()}已停止", release = false)
         stopMathematicalCircle("App 關閉，數學圓周已停止", release = false)
         mainHandler.removeCallbacksAndMessages(null)
@@ -556,13 +701,27 @@ class MainActivity : Activity() {
             PillButton("硬體延遲脈衝・0.50 m/s", StickPadView.RED) {
                 toggleHardwareLatencyTest()
             }
+        straightRehearsalButton =
+            PillButton("低速試跑・0.30 m/s", StickPadView.GREEN) {
+                toggleStraightLineTest(HorizontalPulseExperiment.STRAIGHT_REHEARSAL)
+            }
+        straightMeasurementButton =
+            PillButton("直線測速・0.50 m/s", StickPadView.CYAN) {
+                toggleStraightLineTest(HorizontalPulseExperiment.STRAIGHT_MEASUREMENT)
+            }
         root.addView(
-            hardwareLatencyButton,
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(hardwareLatencyButton)
+                addView(straightRehearsalButton)
+                addView(straightMeasurementButton)
+            },
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-            ).apply { topMargin = dp(90) },
+            ).apply { topMargin = dp(46) },
         )
         hardwareLatencySyncMarker = buildHardwareLatencySyncMarker()
         root.addView(
@@ -599,8 +758,10 @@ class MainActivity : Activity() {
             },
         )
         if (tapeTracking.enabled) {
+            val visualFeedback = usesVisualVelocityFeedback()
             tapeTracking.observe(
                 detection?.let {
+                    synchronized(aircraftVelocityLock) {
                     TapeTrackingObservation(
                         angleFromVerticalDegrees = it.angleFromVerticalDegrees,
                         longSideFraction = it.longSideFraction,
@@ -618,9 +779,15 @@ class MainActivity : Activity() {
                         },
                         confidence = it.confidence,
                         centerline = it.centerline,
-                        actualTravelDirectionDegrees = usableBodyTravelDirectionDegrees(now),
-                        actualGroundSpeedMetersPerSecond = groundSpeedMetersPerSecond,
+                        actualTravelDirectionDegrees =
+                            if (visualFeedback) null else usableBodyTravelDirectionDegrees(now),
+                        actualGroundSpeedMetersPerSecond =
+                            if (visualFeedback) null else groundSpeedMetersPerSecond,
+                        speedFeedbackSampleAtNanos = if (visualFeedback) 0L else aircraftVelocityAtNanos,
+                        speedFeedbackUnavailableReason =
+                            if (visualFeedback) null else speedFeedbackInputFailure(now),
                     )
+                    }
                 },
                 now,
             )
@@ -876,9 +1043,9 @@ class MainActivity : Activity() {
                         )
                     }
                 fixedHeadingFastCruiseButton =
-                    PillButton("方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s", StickPadView.RED) {
+                    PillButton("方案 B3：視覺速度回饋・巡航 1.60 m/s・最大 1.90 m/s", StickPadView.RED) {
                         toggleFixedHeadingLap(
-                            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST,
+                            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL,
                         )
                     }
                 directionalVelocityPulseButton =
@@ -942,6 +1109,104 @@ class MainActivity : Activity() {
         "定向速度：前・漸進至 %.2f m/s".format(
             FIXED_DIRECTION_SPEED_METERS_PER_SECOND,
         )
+
+
+    private fun isStraightLineTest(experiment: HorizontalPulseExperiment? = horizontalPulseExperiment): Boolean =
+        experiment == HorizontalPulseExperiment.STRAIGHT_REHEARSAL ||
+            experiment == HorizontalPulseExperiment.STRAIGHT_MEASUREMENT
+
+    private fun straightLineButton(experiment: HorizontalPulseExperiment): PillButton =
+        if (experiment == HorizontalPulseExperiment.STRAIGHT_REHEARSAL) {
+            straightRehearsalButton
+        } else {
+            straightMeasurementButton
+        }
+
+    private fun toggleStraightLineTest(experiment: HorizontalPulseExperiment) {
+        if (straightLineReleasePending) {
+            if (stickTransitionPending || pendingAcquireCallbacks > 0 || straightLineTracePending) return
+            releaseControlLink { error ->
+                render(error?.let { "交還控制權失敗：$it，請用實體遙控器接管" } ?: "等待飛機確認 RC 控制權")
+            }
+            return
+        }
+        if (hardwareLatencyStartPending || hardwareLatencyPulseSequence != null) {
+            if (horizontalPulseExperiment != experiment) return
+            val sequence = hardwareLatencyPulseSequence as? StraightLineSpeedSequence
+            if (sequence == null || hardwareLatencyStartedAtNanos == 0L) {
+                stopHardwareLatencyTest("操作者取消；本趟未開始移動")
+            } else {
+                sequence.requestStop(System.nanoTime())?.let(::applyHorizontalPulseStep)
+            }
+            return
+        }
+        if (stickTransitionPending || anotherFlightControlActive()) return
+        startStraightLineTest(experiment)
+    }
+
+
+    private fun startStraightLineTest(experiment: HorizontalPulseExperiment) {
+        val rehearsal = experiment == HorizontalPulseExperiment.STRAIGHT_REHEARSAL
+        val config = StraightLineTestConfig(
+            direction = DirectionalVelocityPulseDirection.FORWARD,
+            speedMetersPerSecond = if (rehearsal) 0.3 else 0.5,
+            maximumCruiseSeconds = 20,
+        )
+        val attemptId = "${if (rehearsal) "rehearsal" else "measurement"}-${System.currentTimeMillis()}"
+        straightLineTestConfig = config
+        straightLineAttemptId = attemptId
+        straightLineInitialHeading = aircraftHeadingDegrees?.takeIf { it.isFinite() }
+        straightLineLastSampleAtNanos = 0L
+        flightProfiler.record(
+            event = "straight_test_requested",
+            details = profileDetails(
+                "attemptId" to attemptId, "kind" to experiment,
+                "direction" to config.direction, "commandMps" to config.speedMetersPerSecond,
+                "maximumCruiseSeconds" to config.maximumCruiseSeconds,
+                "markerDistanceMeters" to null,
+                "heightMeters" to usableHeightMeters(), "heightSource" to heightSource,
+                "heading" to straightLineInitialHeading, "gimbalPitch" to selectedCameraPitchDegrees,
+                "recordingConfirmedByOperator" to false,
+                "safetyConfirmedByOperator" to false,
+                "wallTimeMillis" to System.currentTimeMillis(),
+            ),
+        )
+        startHorizontalPulseExperiment(experiment)
+    }
+
+
+    private fun recordStraightLineSample(nowNanos: Long, sequence: StraightLineSpeedSequence) {
+        if (nowNanos - straightLineLastSampleAtNanos < 100_000_000L) return
+        straightLineLastSampleAtNanos = nowNanos
+        val config = straightLineTestConfig ?: return
+        val details = synchronized(aircraftVelocityLock) {
+            val sampleAt = aircraftVelocityAtNanos
+            val age = sampleAt.takeIf { it > 0L }?.let { (nowNanos - it).coerceAtLeast(0L) / 1_000_000.0 }
+            val axis = straightLineInitialHeading?.let(Math::toRadians)
+            val sign = config.direction.forwardSign
+            val rawAlong = axis?.let {
+                sign * (aircraftVelocityX * kotlin.math.cos(it) + aircraftVelocityY * kotlin.math.sin(it))
+            }
+            val rawCross = axis?.let {
+                sign * (-aircraftVelocityX * kotlin.math.sin(it) + aircraftVelocityY * kotlin.math.cos(it))
+            }
+            profileDetails(
+                "attemptId" to straightLineAttemptId, "phase" to sequence.phase,
+                "stopReason" to sequence.stopReason, "direction" to config.direction,
+                "velocitySampleNanos" to sampleAt, "velocityAgeMs" to age,
+                "velocityValid" to (age != null && age <= 1_000.0),
+                "velocityX" to aircraftVelocityX, "velocityY" to aircraftVelocityY, "velocityZ" to aircraftVelocityZ,
+                "alongRawMps" to rawAlong, "crossRawMps" to rawCross,
+                "axisHeading" to straightLineInitialHeading, "heading" to aircraftHeadingDegrees,
+                "headingSampleNanos" to aircraftHeadingAtNanos, "pitch" to aircraftPitchDegrees,
+                "roll" to aircraftRollDegrees, "heightMeters" to usableHeightMeters(),
+                "heightSampleNanos" to altitudeAtNanos, "heightSource" to heightSource,
+                "authority" to stickStatus.authority, "flightMode" to flightModeName,
+                "obstacleMm" to nearestHorizontalObstacleMm, "upMm" to upwardObstacleMm,
+            )
+        }
+        flightProfiler.record(event = "straight_test_sample", atNanos = nowNanos, details = details)
+    }
 
     private fun toggleVirtualStickFrameRate() {
         if (
@@ -1429,6 +1694,24 @@ class MainActivity : Activity() {
                             circularTrackingSpeed = circularTrackingSpeed,
                             fixedHeadingActuationPhaseLead = fixedHeadingActuationPhaseLead,
                         )
+                        if (
+                            mode == TapeTrackingMode.FIXED_HEADING &&
+                            fixedHeadingActuationPhaseLead.usesCurvatureFeedforward &&
+                            activityForeground && !activityDestroying
+                        ) {
+                            val profileTag =
+                                if (fixedHeadingActuationPhaseLead ==
+                                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL
+                                ) "b3" else "b2"
+                            val attemptId = "$flightProfileSessionId-$profileTag-$now"
+                            fixedHeadingVisualVelocityAttemptId = attemptId
+                            visualVelocityDiagnostics?.start(
+                                attemptId, TapeTrackingPhase.RECENTERING.name, fixedHeadingReferenceDegrees,
+                                controlFeedback = fixedHeadingActuationPhaseLead ==
+                                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL,
+                            )
+                            refreshVisualVelocityContext()
+                        }
                         angleHeadingController.reset()
                         armFrameCaptureFor(mode)
                         tapeTrackingStartedAtNanos = now
@@ -1493,7 +1776,7 @@ class MainActivity : Activity() {
                                             fixedHeadingFasterPhaseLeadButton
                                         FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 ->
                                             fixedHeadingCurvatureFeedforwardButton
-                                        FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST ->
+                                        FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL ->
                                             fixedHeadingFastCruiseButton
                                     }
                                 button?.text = "停止$trackingName"
@@ -1526,6 +1809,11 @@ class MainActivity : Activity() {
             }
         }
     }
+
+    private fun usesVisualVelocityFeedback(): Boolean =
+        activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+            activeFixedHeadingActuationPhaseLead ==
+                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL
 
     private val tapeTrackingControlRunnable = object : Runnable {
         override fun run() {
@@ -1583,6 +1871,30 @@ class MainActivity : Activity() {
             }
 
             val decisionStartedAtNanos = System.nanoTime()
+            val visualFeedback = usesVisualVelocityFeedback()
+            if (visualFeedback) {
+                val sample = fixedHeadingVisualVelocityAttemptId?.let {
+                    visualVelocityDiagnostics?.controlSample(it)
+                }
+                val cameraReady = !cameraPitchCommandPending &&
+                    selectedCameraPitchDegrees?.let { it.isFinite() && abs(it + 90.0) <= 0.5 } == true
+                tapeTracking.updateVisualVelocity(
+                    forwardMetersPerSecond = sample?.forwardMps?.takeIf { cameraReady },
+                    rightMetersPerSecond = sample?.rightMps?.takeIf { cameraReady },
+                    sampleHeadingDegrees = sample?.aircraftHeadingDegrees,
+                    currentHeadingDegrees = aircraftHeadingDegrees?.takeIf {
+                        aircraftHeadingAtNanos != 0L &&
+                            now - aircraftHeadingAtNanos in 0L..MAX_MOVING_HEADING_AGE_NANOS
+                    },
+                    sampleAtNanos = sample?.frameNanos ?: 0L,
+                    nowNanos = now,
+                    unavailableReason = when {
+                        !cameraReady -> "CAMERA_NOT_READY"
+                        sample == null -> "MISSING_VISUAL_VELOCITY"
+                        else -> sample.reason
+                    },
+                )
+            }
             val decision = tapeTracking.tick(now)
             val decisionCompletedAtNanos = System.nanoTime()
             if (decision.endpointReached) {
@@ -1750,6 +2062,16 @@ class MainActivity : Activity() {
                     "offset" to decision.controlledOffsetFraction,
                     "groundSpeed" to groundSpeedMetersPerSecond,
                     "alongTrackSpeed" to decision.measuredAlongTrackSpeedMetersPerSecond,
+                    "speedFeedbackSource" to if (visualFeedback) "visual_velocity" else "dji_listener",
+                    "controlFeedback" to
+                        (visualFeedback && decision.measuredAlongTrackSpeedMetersPerSecond != null),
+                    "visualVelocityAttemptId" to fixedHeadingVisualVelocityAttemptId.takeIf { visualFeedback },
+                    "speedFeedbackSampleNanos" to decision.speedFeedbackSampleAtNanos,
+                    "speedFeedbackObservedNanos" to decision.speedFeedbackObservedAtNanos,
+                    "speedFeedbackSampleAgeMs" to decision.speedFeedbackSampleAtNanos
+                        .takeIf { it > 0L }?.let { (now - it).coerceAtLeast(0L) / 1_000_000.0 },
+                    "speedFeedbackUnavailableReason" to decision.speedFeedbackUnavailableReason,
+                    "speedFeedbackDirectionError" to decision.speedFeedbackDirectionErrorDegrees,
                     "speedFeedbackBoost" to decision.speedFeedbackBoostMetersPerSecond,
                     "commandTargetSpeed" to decision.commandTargetSpeedMetersPerSecond,
                     "heading" to aircraftHeadingDegrees,
@@ -1803,6 +2125,9 @@ class MainActivity : Activity() {
                 )
             }
             if (decision.phase != renderedTapeTrackingPhase) {
+                fixedHeadingVisualVelocityAttemptId?.let {
+                    visualVelocityDiagnostics?.updatePhase(decision.phase.name, it)
+                }
                 renderedTapeTrackingPhase = decision.phase
                 val trackingName = tapeTrackingName(activeTapeTrackingMode)
                 val status = when (decision.phase) {
@@ -1842,6 +2167,7 @@ class MainActivity : Activity() {
     }
     private val tapeTrackingPeriodicRunnable = object : Runnable {
         override fun run() {
+            refreshVisualVelocityContext()
             activeTapeControlTrigger = TapeControlTrigger.PERIODIC
             tapeTrackingControlRunnable.run()
             if (tapeTracking.enabled && !tapeEndpointTurn) {
@@ -1871,8 +2197,8 @@ class MainActivity : Activity() {
                 when (fixedHeadingActuationPhaseLead) {
                     FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 ->
                         "方案 B2：曲率前饋・巡航 1.60 m/s・最大 1.90 m/s"
-                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST ->
-                        "方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s"
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL ->
+                        "方案 B3：視覺速度回饋・巡航 1.60 m/s・最大 1.90 m/s"
                     else ->
                         "方案 B：定向滑行・%.2f m/s・相位超前 %.0f°".format(
                             fixedHeadingActuationPhaseLead.targetSpeedMetersPerSecond,
@@ -1915,6 +2241,11 @@ class MainActivity : Activity() {
         message: String,
         release: Boolean,
     ) {
+        fixedHeadingVisualVelocityAttemptId?.let {
+            visualVelocityDiagnostics?.stop(it)
+            fixedHeadingVisualVelocityAttemptId = null
+            refreshVisualVelocityContext()
+        }
         val wasActive =
             tapeTrackingStartPending || tapeTracking.enabled ||
                 renderedTapeTrackingPhase != TapeTrackingPhase.DISABLED ||
@@ -1993,7 +2324,7 @@ class MainActivity : Activity() {
         }
         if (::fixedHeadingFastCruiseButton.isInitialized) {
             fixedHeadingFastCruiseButton.text =
-                "方案 B3：曲率前饋・巡航 1.90 m/s・最大 2.00 m/s"
+                "方案 B3：視覺速度回饋・巡航 1.60 m/s・最大 1.90 m/s"
         }
         if (::curvedOutAndBackTrackingButton.isInitialized) {
             curvedOutAndBackTrackingButton.text = "弧形往返追蹤"
@@ -2147,11 +2478,32 @@ class MainActivity : Activity() {
 
     /** Single place that turns state into what the operator sees. */
     private fun render(message: String) = runOnUiThread {
+        if (straightLineReleasePending && !straightLineTracePending &&
+            pendingAcquireCallbacks == 0 && !stickTransitionPending &&
+            stickStatus.authority == "RC" && lastStickStatusAtNanos >= lastReleaseRequestedAtNanos
+        ) {
+            straightLineReleasePending = false
+            stickOwned = false
+            resetHorizontalPulseButtonLabels()
+        }
         val ready = registered && aircraftConnected
         val hardwareLatencyActive =
             hardwareLatencyStartPending || hardwareLatencyPulseSequence != null
         val mathematicalCircleActive =
             mathematicalCircleStartPending || mathematicalCircleController != null
+        val straightIdle = !hardwareLatencyActive &&
+            !straightLineReleasePending && !stickTransitionPending && !anotherFlightControlActive()
+        straightRehearsalButton.available = straightIdle ||
+            hardwareLatencyActive && horizontalPulseExperiment == HorizontalPulseExperiment.STRAIGHT_REHEARSAL
+        straightMeasurementButton.available = straightIdle ||
+            hardwareLatencyActive && horizontalPulseExperiment == HorizontalPulseExperiment.STRAIGHT_MEASUREMENT
+        if (straightLineReleasePending) {
+            straightRehearsalButton.text = "重試交還控制權"
+            straightRehearsalButton.available = !straightLineTracePending &&
+                !stickTransitionPending && pendingAcquireCallbacks == 0 && !landingAuthorityWaitPending
+            straightMeasurementButton.text = "等待回交・禁止重啟"
+            straightMeasurementButton.available = false
+        }
         val (headline, headlineColor) = when {
             lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true) ->
                 "LOCAL FLIGHT • BATTERY CRITICAL" to StickPadView.RED
@@ -2261,7 +2613,7 @@ class MainActivity : Activity() {
                 tapeTracking.enabled &&
                     activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
                     activeFixedHeadingActuationPhaseLead ==
-                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_FAST
+                    FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL
                 ) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
         curvedOutAndBackTrackingButton.available =
@@ -2515,6 +2867,9 @@ class MainActivity : Activity() {
                 avoidance = AvoidanceCheck.Status()
                 refreshHorizontalSafety("aircraft disconnected")
                 runOnUiThread {
+                    visualVelocityDiagnostics?.stop()
+                    visualVelocityFrameContext = null
+                    fixedHeadingVisualVelocityAttemptId = null
                     consecutiveTapeMisses = 0
                     tapeDetected = false
                     tapeOverlay.showDetection(null)
@@ -2910,6 +3265,7 @@ class MainActivity : Activity() {
     private val horizontalSafetyWatchdog = object : Runnable {
         override fun run() {
             refreshHorizontalSafety("watchdog")
+            if (isStraightLineTest()) refreshVisualVelocityContext()
             mainHandler.postDelayed(this, HORIZONTAL_WATCHDOG_MS)
         }
     }
@@ -2960,20 +3316,25 @@ class MainActivity : Activity() {
         val x = velocity?.x?.takeIf(Double::isFinite) ?: return false
         val y = velocity.y?.takeIf(Double::isFinite) ?: return false
         val z = velocity.z?.takeIf(Double::isFinite) ?: return false
-        val previousReceivedAtNanos = aircraftVelocityAtNanos
-        aircraftVelocityX = x
-        aircraftVelocityY = y
-        aircraftVelocityZ = z
-        groundSpeedMetersPerSecond = hypot(x, y)
-        aircraftVelocityAtNanos = receivedAtNanos
+        val measuredSpeed = hypot(x, y)
+        val previousReceivedAtNanos = synchronized(aircraftVelocityLock) {
+            val previous = aircraftVelocityAtNanos
+            aircraftVelocityX = x
+            aircraftVelocityY = y
+            aircraftVelocityZ = z
+            groundSpeedMetersPerSecond = measuredSpeed
+            aircraftVelocityAtNanos = receivedAtNanos
+            previous
+        }
         flightProfiler.record(
             event = "velocity",
             atNanos = receivedAtNanos,
             details = profileDetails(
+                "source" to "listener",
                 "x" to x,
                 "y" to y,
                 "z" to z,
-                "groundSpeed" to groundSpeedMetersPerSecond,
+                "groundSpeed" to measuredSpeed,
                 "intervalMs" to
                     previousReceivedAtNanos
                         .takeIf { it > 0L }
@@ -2994,6 +3355,14 @@ class MainActivity : Activity() {
         val heading = aircraftHeadingDegrees ?: return null
         val earthTravelDegrees = Math.toDegrees(atan2(aircraftVelocityY, aircraftVelocityX))
         return wrapDegrees(earthTravelDegrees - heading)
+    }
+
+    private fun speedFeedbackInputFailure(nowNanos: Long): String? = when {
+        aircraftVelocityAtNanos == 0L -> "MISSING_VELOCITY"
+        nowNanos - aircraftVelocityAtNanos > AIRCRAFT_VELOCITY_STALE_NANOS -> "VELOCITY_STALE"
+        groundSpeedMetersPerSecond < MIN_DIRECTIONAL_GROUND_SPEED_METERS_PER_SECOND -> "SPEED_TOO_LOW"
+        aircraftHeadingDegrees == null -> "MISSING_HEADING"
+        else -> null
     }
 
 
@@ -3026,12 +3395,13 @@ class MainActivity : Activity() {
         headingTurn != null || quarterArcController != null || holdingHeight || tapeTracking.enabled ||
             tapeTrackingStartPending || hardwareLatencyStartPending ||
             hardwareLatencyPulseSequence != null || mathematicalCircleStartPending ||
-            mathematicalCircleController != null || leftStickActive || rightStickActive
+            mathematicalCircleController != null || leftStickActive || rightStickActive ||
+            straightLineReleasePending || landingAuthorityWaitPending || pendingAcquireCallbacks > 0
 
     /**
-     * All horizontal experiments share one authority/safety pipeline. A directional
-     * measurement executes exactly one pulse; the operator must manually recenter
-     * before pressing again for the next direction.
+     * All horizontal experiments share the authority pipeline. Straight experiments
+     * bypass flight-condition gates; pulse experiments retain their checks.
+     * A directional measurement executes one pulse and requires manual recentering.
      */
     private fun toggleHardwareLatencyTest() {
         toggleHorizontalPulseExperiment(HorizontalPulseExperiment.HARDWARE_LATENCY)
@@ -3058,15 +3428,27 @@ class MainActivity : Activity() {
     }
 
     private fun startHorizontalPulseExperiment(experiment: HorizontalPulseExperiment) {
-        hardwareLatencyStartFailure()?.let { reason ->
+        (if (isStraightLineTest(experiment)) null else hardwareLatencyStartFailure())?.let { reason ->
             flightLog.write("horizontal pulse refused: $reason")
             render(reason)
             return
         }
 
+        val generation = ++horizontalPulseGeneration
         horizontalPulseExperiment = experiment
         hardwareLatencyStartPending = true
         hardwareLatencyArmedAtNanos = System.nanoTime()
+        if (isStraightLineTest(experiment)) {
+            velocityReadDiagnostics.start(
+                checkNotNull(straightLineAttemptId), "ACQUIRING", straightLineInitialHeading,
+            )
+            visualVelocityDiagnostics?.start(
+                checkNotNull(straightLineAttemptId), "ACQUIRING", straightLineInitialHeading,
+            )
+            refreshVisualVelocityContext()
+            mainHandler.removeCallbacks(velocityReadTickRunnable)
+            mainHandler.post(velocityReadTickRunnable)
+        }
         when (experiment) {
             HorizontalPulseExperiment.HARDWARE_LATENCY ->
                 hardwareLatencyButton.text = "停止硬體延遲脈衝"
@@ -3074,6 +3456,9 @@ class MainActivity : Activity() {
                 directionalVelocityPulseButton.text = "停止四方向階躍"
             HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                 fixedDirectionSpeedButton.text = "停止漸進速度實驗"
+            HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+            HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                straightLineButton(experiment).text = "停止"
         }
         setHardwareLatencyMarker(white = false)
         val experimentName = horizontalPulseName(experiment)
@@ -3086,18 +3471,27 @@ class MainActivity : Activity() {
                         "${nextDirectionalPulseDirection.displayName}脈衝 0.5 秒…"
                 HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                     "正在取得控制權；取得後懸停 3 秒，再用 1 秒漸進至 1.60 m/s…"
+                HorizontalPulseExperiment.STRAIGHT_REHEARSAL ->
+                    "取得控制權後直接向前 0.30 m/s；按「停止」結束，最長 20 秒"
+                HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                    "取得控制權後直接向前 0.50 m/s；按「停止」結束，最長 20 秒"
             },
         )
         acquireControlLink(
             onFailure = { reason ->
+                if (generation != horizontalPulseGeneration) return@acquireControlLink
+                if (isStraightLineTest(experiment)) {
+                    stopHardwareLatencyTest("$experimentName 未啟動：$reason", release = false)
+                    return@acquireControlLink
+                }
                 hardwareLatencyStartPending = false
                 horizontalPulseExperiment = null
                 resetHorizontalPulseButtonLabels()
                 render("$experimentName 未啟動：$reason")
             },
-            shouldContinue = { hardwareLatencyStartPending },
+            shouldContinue = { hardwareLatencyStartPending && generation == horizontalPulseGeneration },
         ) {
-            if (!hardwareLatencyStartPending) {
+            if (!hardwareLatencyStartPending || generation != horizontalPulseGeneration) {
                 if (stickOwned && !activityDestroying) {
                     releaseControlLink { error ->
                         render(error?.let { "已取消脈衝，但釋放控制權失敗：$it" } ?: "速度脈衝已取消")
@@ -3106,7 +3500,7 @@ class MainActivity : Activity() {
                 return@acquireControlLink
             }
             hardwareLatencyStartPending = false
-            hardwareLatencyStartFailure()?.let { reason ->
+            (if (isStraightLineTest(experiment)) null else hardwareLatencyStartFailure())?.let { reason ->
                 flightLog.write("horizontal pulse aborted after acquire: $reason")
                 horizontalPulseExperiment = null
                 resetHorizontalPulseButtonLabels()
@@ -3134,14 +3528,27 @@ class MainActivity : Activity() {
                             rampDownNanos = FIXED_DIRECTION_SPEED_RAMP_DOWN_NANOS,
                             settleNanos = FIXED_DIRECTION_SPEED_SETTLE_NANOS,
                         )
+                    HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+                    HorizontalPulseExperiment.STRAIGHT_MEASUREMENT -> {
+                        val config = checkNotNull(straightLineTestConfig)
+                        StraightLineSpeedSequence(
+                            direction = config.direction,
+                            speedMetersPerSecond = config.speedMetersPerSecond,
+                            maximumCruiseNanos = config.maximumCruiseSeconds * 1_000_000_000L,
+                            baselineNanos = 0L,
+                        )
+                    }
                 }
-            hardwareLatencySyncMarker.visibility = View.VISIBLE
+            hardwareLatencySyncMarker.visibility = if (isStraightLineTest(experiment)) View.GONE else View.VISIBLE
             hardwareLatencyAuthoritySeen = false
             hardwareLatencyArmedAtNanos = System.nanoTime()
             hardwareLatencyStartedAtNanos = 0L
             virtualStick.setHorizontalVelocity(0.0, 0.0)
             virtualStick.setClimbRate(0.0)
             virtualStick.setYawRate(0.0)
+            if (isStraightLineTest(experiment)) {
+                straightLineInitialHeading?.let { virtualStick.setYawHeading(it) }
+            }
             val direction =
                 when (experiment) {
                     HorizontalPulseExperiment.HARDWARE_LATENCY -> null
@@ -3149,6 +3556,9 @@ class MainActivity : Activity() {
                         nextDirectionalPulseDirection.displayName
                     HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                         DirectionalVelocityPulseDirection.FORWARD.displayName
+                    HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+                    HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                        checkNotNull(straightLineTestConfig).direction.displayName
                 }
             val speed =
                 when (experiment) {
@@ -3158,6 +3568,9 @@ class MainActivity : Activity() {
                         DirectionalVelocityPulseSequence.DEFAULT_SPEED_METERS_PER_SECOND
                     HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                         FIXED_DIRECTION_SPEED_METERS_PER_SECOND
+                    HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+                    HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                        checkNotNull(straightLineTestConfig).speedMetersPerSecond
                 }
             val pulseNanos =
                 when (experiment) {
@@ -3167,11 +3580,15 @@ class MainActivity : Activity() {
                         DirectionalVelocityPulseSequence.DEFAULT_PULSE_NANOS
                     HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                         FIXED_DIRECTION_SPEED_HOLD_NANOS
+                    HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+                    HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                        checkNotNull(straightLineTestConfig).maximumCruiseSeconds * 1_000_000_000L
                 }
             flightProfiler.record(
                 event = horizontalPulseEventName(experiment, "armed"),
                 atNanos = hardwareLatencyArmedAtNanos,
                 details = profileDetails(
+                    "attemptId" to straightLineAttemptId.takeIf { isStraightLineTest(experiment) },
                     "direction" to direction,
                     "cycles" to
                         HardwareLatencyPulseSequence.DEFAULT_CYCLE_COUNT.takeIf {
@@ -3200,6 +3617,8 @@ class MainActivity : Activity() {
             HorizontalPulseExperiment.HARDWARE_LATENCY -> "硬體延遲脈衝"
             HorizontalPulseExperiment.DIRECTIONAL_VELOCITY -> "四方向階躍"
             HorizontalPulseExperiment.FIXED_DIRECTION_SPEED -> "定向速度實驗"
+            HorizontalPulseExperiment.STRAIGHT_REHEARSAL -> "低速試跑"
+            HorizontalPulseExperiment.STRAIGHT_MEASUREMENT -> "直線測速"
         }
 
     private fun activeHorizontalPulseName(): String =
@@ -3213,6 +3632,8 @@ class MainActivity : Activity() {
             HorizontalPulseExperiment.HARDWARE_LATENCY -> "latency_test_$suffix"
             HorizontalPulseExperiment.DIRECTIONAL_VELOCITY -> "directional_velocity_test_$suffix"
             HorizontalPulseExperiment.FIXED_DIRECTION_SPEED -> "fixed_direction_speed_test_$suffix"
+            HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+            HorizontalPulseExperiment.STRAIGHT_MEASUREMENT -> "straight_test_$suffix"
         }
 
     private fun resetHorizontalPulseButtonLabels() {
@@ -3224,6 +3645,10 @@ class MainActivity : Activity() {
         }
         if (::fixedDirectionSpeedButton.isInitialized) {
             fixedDirectionSpeedButton.text = fixedDirectionSpeedLabel()
+        }
+        if (::straightRehearsalButton.isInitialized) {
+            straightRehearsalButton.text = "低速試跑・0.30 m/s"
+            straightMeasurementButton.text = "直線測速・0.50 m/s"
         }
     }
 
@@ -3248,6 +3673,7 @@ class MainActivity : Activity() {
     }
 
     private fun hardwareLatencyRuntimeFailure(nowNanos: Long): String? {
+        if (isStraightLineTest()) return null
         if (!registered || !aircraftConnected || !flying) return "飛行狀態已結束"
         if (lowCellVoltage || (batteryPercent?.let { it <= BATTERY_CRITICAL_PERCENT } == true)) {
             return "電量狀態危急"
@@ -3308,11 +3734,33 @@ class MainActivity : Activity() {
                             }
                             HorizontalPulseExperiment.FIXED_DIRECTION_SPEED ->
                                 "定向速度實驗完成；已歸零並交回遙控器"
+                            HorizontalPulseExperiment.STRAIGHT_REHEARSAL,
+                            HorizontalPulseExperiment.STRAIGHT_MEASUREMENT ->
+                                when ((sequence as StraightLineSpeedSequence).stopReason) {
+                                    StraightLineStopReason.OPERATOR -> "操作者結束本趟；歸零紀錄完成，請確認實際停穩"
+                                    StraightLineStopReason.CANCELLED_BEFORE_CRUISE -> "操作者取消；未開始移動，不算完成測試"
+                                    StraightLineStopReason.TIME_LIMIT -> "命令時間到期中止；未確認通過 B，不算有效區間"
+                                    else -> "控制更新中斷；本趟中止，不算有效區間"
+                                }
                         }
-                    stopHardwareLatencyTest(message, completed = true)
+                    stopHardwareLatencyTest(message,
+                        completed = sequence !is StraightLineSpeedSequence ||
+                            sequence.stopReason == StraightLineStopReason.OPERATOR)
                     return
                 }
                 applyHorizontalPulseStep(step)
+            }
+            if (sequence is StraightLineSpeedSequence) {
+                val config = checkNotNull(straightLineTestConfig)
+                val cruising = sequence.phase == StraightLineSpeedPhase.CRUISE
+                virtualStick.setHorizontalVelocity(
+                    if (cruising) config.speedMetersPerSecond * config.direction.forwardSign else 0.0,
+                    0.0,
+                    validUntilNanos = if (cruising) {
+                        minOf(sequence.commandDeadlineNanos, nowNanos + 500_000_000L)
+                    } else 0L,
+                )
+                recordStraightLineSample(nowNanos, sequence)
             }
             mainHandler.postDelayed(this, HARDWARE_LATENCY_TICK_MS)
         }
@@ -3321,13 +3769,22 @@ class MainActivity : Activity() {
     private fun applyHorizontalPulseStep(step: HorizontalPulseStep) {
         val requestedAtNanos = System.nanoTime()
         setHardwareLatencyMarker(step.markerWhite)
+        val straightSequence = hardwareLatencyPulseSequence as? StraightLineSpeedSequence
         virtualStick.setHorizontalVelocity(
             step.forwardMetersPerSecond,
             step.rightMetersPerSecond,
+            validUntilNanos = if (straightSequence?.phase == StraightLineSpeedPhase.CRUISE) {
+                minOf(straightSequence.commandDeadlineNanos, requestedAtNanos + 500_000_000L)
+            } else 0L,
         )
         val hardwareStep = step as? HardwareLatencyPulseStep
         val directionalStep = step as? DirectionalVelocityPulseStep
         val fixedDirectionStep = step as? FixedDirectionSpeedStep
+        val straightStep = step as? StraightLineSpeedStep
+        if (straightStep != null) velocityReadDiagnostics.updatePhase(straightStep.phase.name)
+        if (straightStep != null) {
+            straightLineAttemptId?.let { visualVelocityDiagnostics?.updatePhase(straightStep.phase.name, it) }
+        }
         val experiment = checkNotNull(horizontalPulseExperiment)
         val event = horizontalPulseEventName(experiment, "command")
         flightProfiler.record(
@@ -3335,21 +3792,23 @@ class MainActivity : Activity() {
             atNanos = requestedAtNanos,
             details = profileDetails(
                 "cycle" to hardwareStep?.cycle,
+                "attemptId" to straightLineAttemptId.takeIf { straightStep != null },
+                "stopReason" to straightSequence?.stopReason,
                 "phase" to step.phaseName,
                 "direction" to
-                    (directionalStep?.direction ?: fixedDirectionStep?.direction)?.displayName,
+                    (directionalStep?.direction ?: fixedDirectionStep?.direction ?: straightStep?.direction)?.displayName,
                 "forward" to step.forwardMetersPerSecond,
                 "right" to step.rightMetersPerSecond,
                 "groundSpeed" to groundSpeedMetersPerSecond,
                 "velocityX" to aircraftVelocityX,
                 "velocityY" to aircraftVelocityY,
                 "heading" to aircraftHeadingDegrees,
-                "marker" to if (step.markerWhite) "white" else "black",
+                "marker" to if (straightStep != null) "none_center_clear" else if (step.markerWhite) "white" else "black",
             ),
         )
         flightLog.write(
             "$event phase=${step.phaseName} direction=" +
-                "${(directionalStep?.direction ?: fixedDirectionStep?.direction)?.displayName} " +
+                "${(directionalStep?.direction ?: fixedDirectionStep?.direction ?: straightStep?.direction)?.displayName} " +
                 "forward=${step.forwardMetersPerSecond} right=${step.rightMetersPerSecond}",
         )
         holdStatus =
@@ -3391,6 +3850,21 @@ class MainActivity : Activity() {
                     FixedDirectionSpeedPhase.COMPLETE ->
                         error("complete step is handled before application")
                 }
+                is StraightLineSpeedStep -> {
+                    val config = checkNotNull(straightLineTestConfig)
+                    straightLineButton(experiment).text =
+                        if (step.phase == StraightLineSpeedPhase.BRAKING) "停止中" else "停止"
+                    when (step.phase) {
+                        StraightLineSpeedPhase.BASELINE -> "${horizontalPulseName(experiment)}：基線歸零 2 秒"
+                        StraightLineSpeedPhase.CRUISE -> String.format(Locale.US,
+                            "%s %s・命令 %.2f m/s・上限 %d 秒；過 B 請按停止",
+                            straightLineAttemptId, config.direction.displayName,
+                            config.speedMetersPerSecond, config.maximumCruiseSeconds)
+                        StraightLineSpeedPhase.BRAKING ->
+                            "${straightSequence?.stopReason}：已送零速度，續錄 3 秒；不代表已停穩"
+                        StraightLineSpeedPhase.COMPLETE -> "歸零記錄結束"
+                    }
+                }
                 else -> error("unsupported horizontal pulse step ${step::class.java.name}")
             }
         render(holdStatus)
@@ -3403,6 +3877,9 @@ class MainActivity : Activity() {
     ) {
         val wasActive = hardwareLatencyStartPending || hardwareLatencyPulseSequence != null
         val experiment = horizontalPulseExperiment
+        val straightSequence = hardwareLatencyPulseSequence as? StraightLineSpeedSequence
+        val straight = isStraightLineTest(experiment)
+        horizontalPulseGeneration += 1
         if (completed && experiment == HorizontalPulseExperiment.DIRECTIONAL_VELOCITY) {
             nextDirectionalPulseDirection = nextDirectionalPulseDirection.next()
         }
@@ -3411,6 +3888,14 @@ class MainActivity : Activity() {
         hardwareLatencyAuthoritySeen = false
         mainHandler.removeCallbacks(hardwareLatencyTickRunnable)
         virtualStick.setHorizontalVelocity(0.0, 0.0)
+        if (straight) {
+            mainHandler.removeCallbacks(velocityReadTickRunnable)
+            velocityReadDiagnostics.stop()
+            straightLineAttemptId?.let { visualVelocityDiagnostics?.stop(it) }
+            refreshVisualVelocityContext()
+            virtualStick.setYawRate(0.0)
+            virtualStick.setClimbRate(0.0)
+        }
         setHardwareLatencyMarker(white = false)
         if (::hardwareLatencySyncMarker.isInitialized) {
             hardwareLatencySyncMarker.visibility = View.GONE
@@ -3426,6 +3911,9 @@ class MainActivity : Activity() {
             atNanos = nowNanos,
             details = profileDetails(
                 "completed" to completed,
+                "attemptId" to straightLineAttemptId.takeIf { straight },
+                "stopReason" to straightSequence?.stopReason,
+                "physicalMarkerCrossingVerified" to false,
                 "durationMs" to
                     hardwareLatencyStartedAtNanos
                         .takeIf { it > 0L }
@@ -3439,6 +3927,30 @@ class MainActivity : Activity() {
         hardwareLatencyStartedAtNanos = 0L
         hardwareLatencyArmedAtNanos = 0L
         holdStatus = message
+        if (straight) {
+            straightLineTestConfig = null
+            straightLineReleasePending = true
+            straightLineTracePending = true
+            fun finish(releaseError: String?) {
+                flightProfiler.checkpoint { storageError ->
+                    runOnUiThread {
+                        straightLineTracePending = false
+                        if (activityDestroying) return@runOnUiThread
+                        holdStatus = message +
+                            (releaseError?.let { "；交還控制權失敗：$it，請用實體遙控器接管" } ?: "") +
+                            (storageError?.let { "；紀錄寫入失敗：${it.message}" } ?: "；紀錄已刷新至手機")
+                        if (straightLineReleasePending) holdStatus += "；確認 RC 控制權前禁止重啟"
+                        render(holdStatus)
+                    }
+                }
+            }
+            if (release && stickOwned && !stickTransitionPending) {
+                releaseControlLink(::finish)
+            } else {
+                finish(null)
+            }
+            return
+        }
         if (!release || !stickOwned || stickTransitionPending) {
             render(message)
             return
@@ -4344,6 +4856,10 @@ class MainActivity : Activity() {
             "landing requested trigger=$trigger connected=$aircraftConnected flying=$flying " +
                 "owned=$stickOwned hold=$holdingHeight authority=${stickStatus.authority}",
         )
+        if (landingAuthorityWaitPending) {
+            render("正在等待已取消的控制權取得與回交收尾，請勿重複操作")
+            return
+        }
         if (!aircraftConnected) {
             render("飛機未連線，無法降落")
             return
@@ -4375,6 +4891,10 @@ class MainActivity : Activity() {
             stopMathematicalCircle("降落操作取消數學圓周", release = false)
         }
         holdStatus = ""
+        if (straightLineReleasePending || pendingAcquireCallbacks > 0) {
+            awaitCancelledAcquireBeforeLanding()
+            return
+        }
         if (!stickOwned) {
             awaitRemoteAuthority { sendLandingCommand() }
             return
@@ -4387,6 +4907,49 @@ class MainActivity : Activity() {
                 awaitRemoteAuthority { sendLandingCommand() }
             }
         }
+    }
+
+    private fun awaitCancelledAcquireBeforeLanding() {
+        landingAuthorityWaitPending = true
+        val deadline = System.nanoTime() +
+            (TRANSITION_TIMEOUT_MS + AUTHORITY_HANDOVER_TIMEOUT_MS) * 1_000_000L
+        var releaseRequested = false
+        fun poll() {
+            if (!landingAuthorityWaitPending || activityDestroying || !aircraftConnected || !flying) {
+                landingAuthorityWaitPending = false
+                return
+            }
+            if (System.nanoTime() >= deadline) {
+                landingAuthorityWaitPending = false
+                flightLog.write("landing withheld: cancelled acquire/release or RC authority unconfirmed")
+                render("控制權收尾或 RC 回交未確認；未送降落，請用實體遙控器降落")
+                return
+            }
+            if (pendingAcquireCallbacks == 0 && !stickTransitionPending) {
+                if (stickStatus.authority == "RC" && !stickOwned &&
+                    lastStickStatusAtNanos >= lastReleaseRequestedAtNanos
+                ) {
+                    landingAuthorityWaitPending = false
+                    sendLandingCommand()
+                    return
+                }
+                if (!releaseRequested) {
+                    releaseRequested = true
+                    releaseControlLink { error ->
+                        if (error != null) {
+                            landingAuthorityWaitPending = false
+                            render("交還控制權失敗，未送降落；請用實體遙控器降落：$error")
+                        } else {
+                            poll()
+                        }
+                    }
+                    return
+                }
+            }
+            render("等待取得控制權的取消收尾，再確認 RC 控制權…")
+            mainHandler.postDelayed(::poll, AUTHORITY_POLL_MS)
+        }
+        poll()
     }
 
     /** Polls until the aircraft reports the RC as authority owner, then proceeds. */
@@ -4508,7 +5071,7 @@ class MainActivity : Activity() {
      * and the aircraft's own authority report can stop the frames at any time.
      */
     private fun releaseIfNotFlying() {
-        if (registered && aircraftConnected && flying) return
+        if (registered && aircraftConnected && (flying || isStraightLineTest())) return
         if (headingTurn != null) {
             finishHeadingTurn("飛行狀態結束，旋轉已停止", release = false)
         }
@@ -4574,15 +5137,19 @@ class MainActivity : Activity() {
                 yawLapTestButton.text = "航向模式原地旋轉 360°"
             }
         }
+        lastReleaseRequestedAtNanos = System.nanoTime()
         virtualStick.disable { error ->
-            if (!endTransition(generation)) {
+            runOnUiThread {
+                if (!endTransition(generation)) {
+                    if (error == null && generation == transitionGeneration) stickOwned = false
+                    flightLog.write("late release callback ignored generation=$generation error=$error")
+                    if (!activityDestroying) render("控制權回交回應：${error ?: "已接受"}")
+                    return@runOnUiThread
+                }
                 if (error == null) stickOwned = false
-                flightLog.write("late release callback ignored generation=$generation error=$error")
-                return@disable
+                flightLog.write("release done error=$error")
+                onDone(error)
             }
-            stickOwned = false
-            flightLog.write("release done error=$error")
-            onDone(error)
         }
     }
 
@@ -4602,20 +5169,22 @@ class MainActivity : Activity() {
             onFailure?.invoke("取得控制權已取消")
             return
         }
+        if (pendingAcquireCallbacks > 0 || landingAuthorityWaitPending) {
+            onFailure?.invoke("先前的控制權操作尚未收尾，不重新取得")
+            return
+        }
         if (stickOwned) {
             onOwned()
             return
         }
-        if (!registered || !aircraftConnected || !flying) {
-            val reason = "飛機未在空中，不取得控制權"
+        if (!registered || !aircraftConnected || (!isStraightLineTest() && !flying)) {
+            val reason = "SDK 或飛機連線未就緒，或目前模式要求先起飛，無法取得控制權"
             flightLog.write("acquire refused: registered=$registered connected=$aircraftConnected flying=$flying")
             render(reason)
             onFailure?.invoke(reason)
             return
         }
         if (stickTransitionPending) {
-            // Never silent: a swallowed press is indistinguishable from a dead
-            // button, which is exactly how this looked to the operator.
             val reason = "控制權切換進行中，請稍候再試"
             flightLog.write("acquire ignored: transition already pending")
             render(reason)
@@ -4629,31 +5198,53 @@ class MainActivity : Activity() {
         landingRequested = false
         acquireAttempts += 1
         val attempt = acquireAttempts
+        pendingAcquireCallbacks += 1
         virtualStick.enable { error ->
-            if (!endTransition(generation)) {
-                flightLog.write("late acquire callback ignored generation=$generation error=$error")
-                if (error == null) virtualStick.disable {}
-                return@enable
-            }
-            stickOwned = error == null
-            flightLog.write("acquire attempt=$attempt owned=$stickOwned error=$error")
-            when {
-                stickOwned -> {
-                    acquireAttempts = 0
-                    onOwned()
+            runOnUiThread {
+                val currentTransition = endTransition(generation)
+                if (!currentTransition || !shouldContinue() || activityDestroying || landingAuthorityWaitPending) {
+                    if (error == null) {
+                        stickOwned = true
+                        // Keep the pending count until the compensating disable really answers.
+                        lastReleaseRequestedAtNanos = System.nanoTime()
+                        virtualStick.disable { releaseError ->
+                            runOnUiThread {
+                                pendingAcquireCallbacks -= 1
+                                if (releaseError == null) stickOwned = false
+                                if (!activityDestroying) {
+                                    render(releaseError?.let { "取消收尾失敗：$it，請用實體遙控器接管" }
+                                        ?: "已取消取得控制權；等待 RC 回交確認")
+                                }
+                            }
+                        }
+                    } else {
+                        pendingAcquireCallbacks -= 1
+                        if (!activityDestroying) render("取得控制權的取消已完成")
+                    }
+                    if (currentTransition && !activityDestroying) onFailure?.invoke("取得控制權已取消")
+                    return@runOnUiThread
                 }
-                attempt < MAX_ACQUIRE_ATTEMPTS && flying && shouldContinue() -> {
-                    render("等待起飛完成才能取得控制權（第 $attempt 次）：$error")
-                    mainHandler.postDelayed(
-                        { acquireControlLink(onFailure, shouldContinue, onOwned) },
-                        ACQUIRE_RETRY_MS,
-                    )
-                }
-                else -> {
-                    val reason = "取得控制權失敗 $attempt 次，請用遙控器操作：$error"
-                    acquireAttempts = 0
-                    render(reason)
-                    onFailure?.invoke(reason)
+                pendingAcquireCallbacks -= 1
+                stickOwned = error == null
+                flightLog.write("acquire attempt=$attempt owned=$stickOwned error=$error")
+                when {
+                    stickOwned -> {
+                        acquireAttempts = 0
+                        onOwned()
+                    }
+                    attempt < MAX_ACQUIRE_ATTEMPTS && flying && shouldContinue() -> {
+                        render("等待起飛完成才能取得控制權（第 $attempt 次）：$error")
+                        mainHandler.postDelayed(
+                            { acquireControlLink(onFailure, shouldContinue, onOwned) },
+                            ACQUIRE_RETRY_MS,
+                        )
+                    }
+                    else -> {
+                        val reason = "取得控制權失敗 $attempt 次，請用遙控器操作：$error"
+                        acquireAttempts = 0
+                        render(reason)
+                        onFailure?.invoke(reason)
+                    }
                 }
             }
         }
@@ -4702,6 +5293,7 @@ class MainActivity : Activity() {
     private fun evaluateBattery() {
         val percent = batteryPercent
         if (
+            !isStraightLineTest() &&
             batteryLandingGate.evaluate(
                 percent = percent,
                 flying = flying,
@@ -4717,7 +5309,7 @@ class MainActivity : Activity() {
         when {
             lowCellVoltage ->
                 render("電芯電壓過低：請立即使用實體遙控器降落")
-            percent != null && percent <= BATTERY_CRITICAL_PERCENT ->
+            percent != null && percent <= BATTERY_CRITICAL_PERCENT && !isStraightLineTest() ->
                 render("電量 $percent%：自動降落已啟動")
             percent != null && percent <= BATTERY_WARN_PERCENT ->
                 render("電量 $percent%：接近低電量，請準備降落")

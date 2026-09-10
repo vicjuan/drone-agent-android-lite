@@ -1,11 +1,9 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.sign
-import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -73,6 +71,8 @@ internal data class TapeTrackingObservation(
     val centerline: TapeCenterlinePath? = null,
     val actualTravelDirectionDegrees: Double? = null,
     val actualGroundSpeedMetersPerSecond: Double? = null,
+    val speedFeedbackSampleAtNanos: Long = 0L,
+    val speedFeedbackUnavailableReason: String? = null,
 ) {
     init {
         require(angleFromVerticalDegrees in -90.0..90.0)
@@ -122,6 +122,10 @@ internal data class TapeTrackingDecision(
     val speedFeedbackBoostMetersPerSecond: Double = 0.0,
     val commandTargetSpeedMetersPerSecond: Double = 0.0,
     val pathQuality: PathQuality = PathQuality.LOST,
+    val speedFeedbackSampleAtNanos: Long = 0L,
+    val speedFeedbackObservedAtNanos: Long = 0L,
+    val speedFeedbackUnavailableReason: String? = null,
+    val speedFeedbackDirectionErrorDegrees: Double? = null,
 )
 private data class PredictedLookahead(
     val xFraction: Double,
@@ -280,6 +284,27 @@ internal class TapeTrackingController {
         currentAircraftHeadingDegrees = validHeading?.let(::wrapToSignedHeading)
     }
 
+    fun updateVisualVelocity(
+        forwardMetersPerSecond: Double?,
+        rightMetersPerSecond: Double?,
+        sampleHeadingDegrees: Double?,
+        currentHeadingDegrees: Double?,
+        sampleAtNanos: Long,
+        nowNanos: Long,
+        unavailableReason: String?,
+    ) {
+        if (!enabled || mode != TapeTrackingMode.FIXED_HEADING) return
+        fixedHeadingLapController.updateVisualVelocity(
+            forwardMetersPerSecond = forwardMetersPerSecond,
+            rightMetersPerSecond = rightMetersPerSecond,
+            sampleHeadingDegrees = sampleHeadingDegrees,
+            currentHeadingDegrees = currentHeadingDegrees,
+            sampleAtNanos = sampleAtNanos,
+            nowNanos = nowNanos,
+            unavailableReason = unavailableReason,
+        )
+    }
+
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
         if (!enabled || phase == TapeTrackingPhase.TURNING) return
         if (mode == TapeTrackingMode.FIXED_HEADING) {
@@ -291,6 +316,9 @@ internal class TapeTrackingController {
                 capturedAtNanos = observation?.capturedAtNanos ?: 0L,
                 actualTravelDirectionDegrees = observation?.actualTravelDirectionDegrees,
                 actualGroundSpeedMetersPerSecond = observation?.actualGroundSpeedMetersPerSecond,
+                speedFeedbackSampleAtNanos = observation?.speedFeedbackSampleAtNanos ?: 0L,
+                speedFeedbackUnavailableReason =
+                    if (observation == null) "NO_OBSERVATION" else observation.speedFeedbackUnavailableReason,
             )
             return
         }
@@ -456,6 +484,10 @@ internal class TapeTrackingController {
                     fixedDecision.speedFeedbackBoostMetersPerSecond,
                 commandTargetSpeedMetersPerSecond =
                     fixedDecision.commandTargetSpeedMetersPerSecond,
+                speedFeedbackSampleAtNanos = fixedDecision.speedFeedbackSampleAtNanos,
+                speedFeedbackObservedAtNanos = fixedDecision.speedFeedbackObservedAtNanos,
+                speedFeedbackUnavailableReason = fixedDecision.speedFeedbackUnavailableReason,
+                speedFeedbackDirectionErrorDegrees = fixedDecision.speedFeedbackDirectionErrorDegrees,
                 pathQuality =
                     if (fixedDecision.tangentDegrees == null) PathQuality.LOST else PathQuality.FULL_PATH,
             )
@@ -571,41 +603,6 @@ internal class TapeTrackingController {
             )
         }
         if (phase == TapeTrackingPhase.ALIGNING_CURVE) {
-            val alignmentTurnDirection = trustedCurveAlignmentTurnDirection()
-            val tangentErrorDegrees = controlledAngleDegrees
-            if (
-                alignmentTurnDirection != null &&
-                tangentErrorDegrees != null &&
-                isCurveAlignmentTranslationSafe()
-            ) {
-                circularTurnDirection = alignmentTurnDirection
-                val travelSpeed = CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND
-                val tangentErrorRadians = Math.toRadians(tangentErrorDegrees)
-                val targetForwardSpeed = travelSpeed * cos(tangentErrorRadians)
-                val targetRightSpeed = travelSpeed * sin(tangentErrorRadians)
-                val feedforwardYawRate =
-                    alignmentTurnDirection *
-                        Math.toDegrees(
-                            travelSpeed * SCHEME_C_PLANNED_CURVATURE_PER_METER,
-                        )
-                val targetYawRate = visualCurvatureYawRate(feedforwardYawRate)
-                profileForwardSpeedMetersPerSecond = travelSpeed
-                accelerationLimitedForwardSpeedMetersPerSecond = travelSpeed
-                applyMovingCurveAlignmentOutputLimits(
-                    targetYawRate = targetYawRate,
-                    targetForwardSpeed = targetForwardSpeed,
-                    targetRightSpeed = targetRightSpeed,
-                    nowNanos = nowNanos,
-                )
-                return decision(
-                    phase = phase,
-                    yawRateDegreesPerSecond = appliedYawRateDegreesPerSecond,
-                    forwardSpeedMetersPerSecond = appliedForwardSpeedMetersPerSecond,
-                    rightSpeedMetersPerSecond = appliedRightSpeedMetersPerSecond,
-                    circularFeedforwardYawRateDegreesPerSecond = feedforwardYawRate,
-                    pathBearingDegrees = tangentErrorDegrees,
-                )
-            }
             appliedForwardSpeedMetersPerSecond = 0.0
             appliedForwardAccelerationMetersPerSecondSquared = 0.0
             accelerationLimitedForwardSpeedMetersPerSecond = 0.0
@@ -617,10 +614,16 @@ internal class TapeTrackingController {
                 targetRightSpeed = 0.0,
                 nowNanos,
             )
+            val pathBearingDegrees =
+                if (mode == TapeTrackingMode.CIRCULAR && directedHeadingEnabled) {
+                    directedPathHeadingErrorDegrees()
+                } else {
+                    controlledAngleDegrees
+                }
             return decision(
                 phase = phase,
                 yawRateDegreesPerSecond = yawRate,
-                pathBearingDegrees = directedPathHeadingErrorDegrees(),
+                pathBearingDegrees = pathBearingDegrees,
             )
         }
 
@@ -1110,25 +1113,13 @@ internal class TapeTrackingController {
             }
 
             TapeTrackingPhase.ALIGNING_CURVE -> {
-                val alignmentTurnDirection = trustedCurveAlignmentTurnDirection()
-                val movingAlignmentAngle =
-                    if (
-                        alignmentTurnDirection != null &&
-                        isCurveAlignmentTranslationSafe()
-                    ) {
-                        circularTurnDirection = alignmentTurnDirection
-                        controlledAngleDegrees
-                    } else {
-                        null
-                    }
                 val exitAngle =
-                    if (movingAlignmentAngle != null || aligningToDirectedTangent) {
+                    if (aligningToDirectedTangent) {
                         DIRECTED_PATH_ALIGNMENT_EXIT_ANGLE_DEGREES
                     } else {
                         CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES
                     }
-                val alignmentError = movingAlignmentAngle ?: angle
-                if (abs(alignmentError) <= exitAngle) {
+                if (abs(angle) <= exitAngle) {
                     if (curveAlignmentSinceNanos == 0L) {
                         curveAlignmentSinceNanos = nowNanos
                     }
@@ -1141,9 +1132,7 @@ internal class TapeTrackingController {
                         circularDirectionConfirmed = true
                         curveAlignmentSinceNanos = 0L
                         disableCircularLateralCorrection()
-                        if (movingAlignmentAngle == null) {
-                            resetAppliedCommands()
-                        }
+                        resetAppliedCommands()
                     }
                 } else {
                     curveAlignmentSinceNanos = 0L
@@ -1618,22 +1607,7 @@ internal class TapeTrackingController {
         )
     }
 
-    private fun trustedCurveAlignmentTurnDirection(): Double? {
-        if (!usesVisualCurvatureControl() || pathQuality != PathQuality.FULL_PATH) return null
-        if (circularCenterlineMeasurement == null) return null
-        val curvature = trustedCurvaturePerMeter ?: return null
-        if (abs(curvature) < CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER) return null
-        val trustedDirection = sign(curvature)
-        return trustedDirection.takeIf {
-            circularTurnDirection == 0.0 || circularTurnDirection == trustedDirection
-        }
-    }
 
-    private fun isCurveAlignmentTranslationSafe(): Boolean {
-        val offset = controlledHorizontalOffsetFraction ?: return false
-        return projectedCrossTrackMagnitude(offset) <
-            CIRCULAR_FORWARD_STOP_OFFSET_FRACTION
-    }
 
     private fun updateDirectedPathHeading() {
         if (
@@ -2152,35 +2126,6 @@ internal class TapeTrackingController {
         return appliedYawRateDegreesPerSecond to appliedRightSpeedMetersPerSecond
     }
 
-    private fun applyMovingCurveAlignmentOutputLimits(
-        targetYawRate: Double,
-        targetForwardSpeed: Double,
-        targetRightSpeed: Double,
-        nowNanos: Long,
-    ) {
-        val elapsedSeconds = outputIntervalSeconds(nowNanos)
-        appliedYawRateDegreesPerSecond = moveToward(
-            appliedYawRateDegreesPerSecond,
-            targetYawRate,
-            CIRCULAR_FAST_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED * elapsedSeconds,
-        )
-
-        val forwardDelta = targetForwardSpeed - appliedForwardSpeedMetersPerSecond
-        val rightDelta = targetRightSpeed - appliedRightSpeedMetersPerSecond
-        val requestedVelocityDelta = hypot(forwardDelta, rightDelta)
-        val maximumVelocityDelta =
-            CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds
-        val appliedFraction =
-            if (requestedVelocityDelta <= maximumVelocityDelta) {
-                1.0
-            } else {
-                maximumVelocityDelta / requestedVelocityDelta
-            }
-        appliedForwardSpeedMetersPerSecond += forwardDelta * appliedFraction
-        appliedRightSpeedMetersPerSecond += rightDelta * appliedFraction
-        appliedForwardAccelerationMetersPerSecondSquared = 0.0
-        lastCommandAtNanos = nowNanos
-    }
 
     private fun outputIntervalSeconds(nowNanos: Long): Double =
         boundedControlIntervalSeconds(
@@ -2340,9 +2285,9 @@ internal class TapeTrackingController {
         const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.24
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.20
         const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.04
-        const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.18
+        const val CIRCULAR_LATERAL_PROPORTIONAL_GAIN = 0.50
         const val CIRCULAR_LATERAL_DERIVATIVE_GAIN = 0.05
-        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.06
+        const val CIRCULAR_MAX_CENTERING_SPEED_METERS_PER_SECOND = 0.15
         const val CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED = 0.60
         const val CIRCULAR_FAST_MAX_YAW_ACCELERATION_DEGREES_PER_SECOND_SQUARED = 50.0
         const val CIRCULAR_MAX_FORWARD_DECELERATION_METERS_PER_SECOND_SQUARED = 1.20
@@ -2364,7 +2309,6 @@ internal class TapeTrackingController {
         const val CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES = 45.0
         const val CURVE_ALIGNMENT_EXIT_ANGLE_DEGREES = 20.0
         const val CURVE_ALIGNMENT_CONFIRMATION_NANOS = 500_000_000L
-        const val CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND = 0.20
         const val CURVE_MISALIGNMENT_CONFIRMATION_NANOS = 250_000_000L
         const val DIRECTED_PATH_ALIGNMENT_EXIT_ANGLE_DEGREES = 8.0
         const val DIRECTED_PATH_ALIGNMENT_MAX_YAW_RATE_DEGREES_PER_SECOND = 12.0

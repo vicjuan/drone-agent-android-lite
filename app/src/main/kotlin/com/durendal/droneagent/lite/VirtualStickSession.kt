@@ -12,6 +12,7 @@ import dji.v5.common.error.IDJIError
 import dji.v5.manager.aircraft.virtualstick.VirtualStickManager
 import dji.v5.manager.aircraft.virtualstick.VirtualStickState
 import dji.v5.manager.aircraft.virtualstick.VirtualStickStateListener
+import dji.v5.manager.interfaces.IVirtualStickManager
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -87,9 +88,9 @@ class VirtualStickSession(
     private val onStatus: (VirtualStickStatus) -> Unit,
     private val onFrameSummary: (String) -> Unit = {},
     private val onFrameSent: (VirtualStickFrameProfile) -> Unit = {},
+    private val manager: IVirtualStickManager = VirtualStickManager.getInstance(),
 ) {
 
-    private val manager = VirtualStickManager.getInstance()
     private val sender = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "LiteVirtualStick").apply { isDaemon = true }
     }
@@ -99,7 +100,9 @@ class VirtualStickSession(
     @Volatile private var commandedClimbMetersPerSecond = 0.0
     @Volatile private var yawCommand: YawCommand = YawCommand.Rate(0.0)
     @Volatile private var horizontalCommandUpdatedAtNanos = 0L
+    private var horizontalCommandValidUntilNanos = 0L
     private var sendTask: ScheduledFuture<*>? = null
+    private var sendGeneration = 0L
     private var selectedFrameRate = VirtualStickFrameRate.EXPERIMENT_40
     @Volatile private var firstFrameSentAtNanos = 0L
 
@@ -208,6 +211,7 @@ class VirtualStickSession(
      * fail-closed obstacle gate; this class only converts accepted input to
      * aircraft units.
      */
+    @Synchronized
     fun setStick(side: StickSide, x: Double, y: Double) {
         when (side) {
             StickSide.LEFT -> {
@@ -216,6 +220,7 @@ class VirtualStickSession(
                 commandedClimbMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
             }
             StickSide.RIGHT -> {
+                horizontalCommandValidUntilNanos = 0L
                 commandedRightMetersPerSecond = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
                 commandedForwardMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
             }
@@ -263,16 +268,26 @@ class VirtualStickSession(
 
 
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
+    @Synchronized
     fun setForwardOnly(metersPerSecond: Double) {
+        horizontalCommandValidUntilNanos = 0L
         commandedForwardMetersPerSecond = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
         commandedRightMetersPerSecond = 0.0
     }
 
-    /** Body-frame horizontal velocity for autonomous tracking. */
+    /**
+     * Body-frame horizontal velocity for autonomous tracking. A positive deadline
+     * opts into sender-thread neutralisation even when the caller stops ticking.
+     * Zero keeps the legacy unbounded command lifetime.
+     */
+    @Synchronized
     fun setHorizontalVelocity(
         forwardMetersPerSecond: Double,
         rightMetersPerSecond: Double,
+        validUntilNanos: Long = 0L,
     ) {
+        require(validUntilNanos >= 0L)
+        horizontalCommandValidUntilNanos = validUntilNanos
         commandedForwardMetersPerSecond =
             forwardMetersPerSecond.coerceIn(
                 -AUTONOMOUS_MAX_HORIZONTAL_MPS,
@@ -297,20 +312,31 @@ class VirtualStickSession(
     /** Starts the frame stream; returns true when this call is what started it. */
     @Synchronized
     private fun startSending(): Boolean {
-        if (sendTask != null) return false
+        if (sender.isShutdown || sendTask != null) return false
         val activeFrameRate = selectedFrameRate
+        val generation = ++sendGeneration
         frameCount = 0
         frameFailures = 0
         firstFrameSentAtNanos = 0L
         sendTask = sender.scheduleAtFixedRate(
             {
-                val currentYawCommand = yawCommand
-                val currentHorizontalCommandUpdatedAtNanos = horizontalCommandUpdatedAtNanos
-                val sendStartedAtNanos = System.nanoTime()
-                if (firstFrameSentAtNanos == 0L) firstFrameSentAtNanos = sendStartedAtNanos
-                val sendResult =
-                    runCatching { manager.sendVirtualStickAdvancedParam(currentParam(currentYawCommand)) }
-                val sendCompletedAtNanos = System.nanoTime()
+                val currentYawCommand: YawCommand
+                val currentHorizontalCommandUpdatedAtNanos: Long
+                val param: VirtualStickFlightControlParam
+                val sendStartedAtNanos: Long
+                val sendCompletedAtNanos: Long
+                val sendResult: Result<Unit>
+                synchronized(this@VirtualStickSession) {
+                    if (sendTask == null || generation != sendGeneration) return@scheduleAtFixedRate
+                    currentYawCommand = yawCommand
+                    param = currentParam(currentYawCommand)
+                    currentHorizontalCommandUpdatedAtNanos = horizontalCommandUpdatedAtNanos
+                    sendStartedAtNanos = System.nanoTime()
+                    if (firstFrameSentAtNanos == 0L) firstFrameSentAtNanos = sendStartedAtNanos
+                    // A neutral update or cancellation must not overtake an older submission.
+                    sendResult = runCatching { manager.sendVirtualStickAdvancedParam(param) }
+                    sendCompletedAtNanos = System.nanoTime()
+                }
                 sendResult
                     .onSuccess { frameCount += 1 }
                     .onFailure {
@@ -326,9 +352,9 @@ class VirtualStickSession(
                                 currentHorizontalCommandUpdatedAtNanos,
                             configuredRateHz = activeFrameRate.hertz,
                             succeeded = sendResult.isSuccess,
-                            forwardMetersPerSecond = commandedForwardMetersPerSecond,
-                            rightMetersPerSecond = commandedRightMetersPerSecond,
-                            climbMetersPerSecond = commandedClimbMetersPerSecond,
+                            forwardMetersPerSecond = param.roll,
+                            rightMetersPerSecond = param.pitch,
+                            climbMetersPerSecond = param.verticalThrottle,
                             yawMode = currentYawCommand.mode.name,
                             yawValue = currentYawCommand.value,
                         ),
@@ -347,9 +373,9 @@ class VirtualStickSession(
                             is YawCommand.Heading -> true
                         }
                     val moving =
-                        commandedForwardMetersPerSecond != 0.0 ||
-                            commandedRightMetersPerSecond != 0.0 ||
-                            commandedClimbMetersPerSecond != 0.0 ||
+                        param.roll != 0.0 ||
+                            param.pitch != 0.0 ||
+                            param.verticalThrottle != 0.0 ||
                             yawActive
                     if (moving || frameFailures > 0) {
                         val elapsedNanos = sendStartedAtNanos - firstFrameSentAtNanos
@@ -363,9 +389,9 @@ class VirtualStickSession(
                             "frames=$frameCount fails=$frameFailures " +
                                 "configuredHz=${activeFrameRate.hertz} actualHz=%.3f ".format(actualRateHz) +
                                 "fwd=%.2f right=%.2f up=%.2f yawMode=%s yaw=%.1f".format(
-                                    commandedForwardMetersPerSecond,
-                                    commandedRightMetersPerSecond,
-                                    commandedClimbMetersPerSecond,
+                                    param.roll,
+                                    param.pitch,
+                                    param.verticalThrottle,
                                     currentYawCommand.mode.name,
                                     currentYawCommand.value,
                                 ),
@@ -383,21 +409,37 @@ class VirtualStickSession(
     /** Stops the frame stream; returns true when this call is what stopped it. */
     @Synchronized
     private fun stopSending(): Boolean {
+        // Do not revive an opted-in leg when aircraft authority later returns.
+        if (horizontalCommandValidUntilNanos != 0L) {
+            commandedForwardMetersPerSecond = 0.0
+            commandedRightMetersPerSecond = 0.0
+            horizontalCommandValidUntilNanos = 0L
+        }
         val task = sendTask ?: return false
         task.cancel(false)
         sendTask = null
         return true
     }
 
+    @Synchronized
     private fun zeroAxes() {
+        horizontalCommandValidUntilNanos = 0L
         commandedForwardMetersPerSecond = 0.0
         commandedRightMetersPerSecond = 0.0
         commandedClimbMetersPerSecond = 0.0
         yawCommand = YawCommand.Rate(0.0)
     }
 
-    private fun currentParam(currentYawCommand: YawCommand): VirtualStickFlightControlParam =
-        VirtualStickFlightControlParam().apply {
+    @Synchronized
+    private fun currentParam(currentYawCommand: YawCommand): VirtualStickFlightControlParam {
+        val nowNanos = System.nanoTime()
+        if (horizontalCommandValidUntilNanos != 0L && nowNanos >= horizontalCommandValidUntilNanos) {
+            commandedForwardMetersPerSecond = 0.0
+            commandedRightMetersPerSecond = 0.0
+            horizontalCommandValidUntilNanos = 0L
+            horizontalCommandUpdatedAtNanos = nowNanos
+        }
+        return VirtualStickFlightControlParam().apply {
             roll = commandedForwardMetersPerSecond
             pitch = commandedRightMetersPerSecond
             verticalThrottle = commandedClimbMetersPerSecond
@@ -407,6 +449,7 @@ class VirtualStickSession(
             yawControlMode = currentYawCommand.mode
             rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
         }
+    }
 
     companion object {
         private const val NANOS_PER_SECOND = 1_000_000_000.0

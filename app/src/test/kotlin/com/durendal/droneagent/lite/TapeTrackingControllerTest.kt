@@ -2,6 +2,7 @@ package com.durendal.droneagent.lite
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -104,106 +105,38 @@ class TapeTrackingControllerTest {
     }
 
     @Test
-    fun `scheme C moves along a trusted tangent instead of an opposite lookahead chord`() {
+    fun `scheme C turns toward a right tangent before applying left curve feedforward`() {
         val controller = circularTrackingController()
         controller.updateAircraftHeading(0.0)
-        val directedCurve =
+        val rightTangentLeftCurve =
             observation(
-                angleDegrees = -45.0,
+                angleDegrees = 70.0,
                 longSideFraction = 1.2,
                 nearFieldOffsetFraction = 0.05,
                 lookahead = TapeLookahead(xFraction = 0.80, yFraction = 0.50),
                 heightAboveGroundMeters = 1.2,
                 centerline =
                     metricCurvedPath(
-                        curvaturePerMeter = -1.0,
-                        tangentDegrees = -45.0,
+                        curvaturePerMeter = -2.0,
+                        tangentDegrees = 12.0,
                     ),
             )
         var decision = controller.tick(seconds(2))
         listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
-            controller.observe(directedCurve.copy(capturedAtNanos = now), now)
+            controller.observe(rightTangentLeftCurve.copy(capturedAtNanos = now), now)
             decision = controller.tick(now)
         }
 
         assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
-        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
-        assertTrue(checkNotNull(decision.pathBearingDegrees) < 0.0)
-        assertTrue(decision.circularFeedforwardYawRateDegreesPerSecond < 0.0)
-        assertTrue(decision.yawRateDegreesPerSecond < 0.0)
-        assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
-        assertTrue(decision.rightSpeedMetersPerSecond < 0.0)
-        assertTrue(
-            kotlin.math.hypot(
-                decision.forwardSpeedMetersPerSecond,
-                decision.rightSpeedMetersPerSecond,
-            ) <= TapeTrackingController.CIRCULAR_ALIGNMENT_TRAVEL_SPEED_METERS_PER_SECOND,
-        )
-    }
-
-    @Test
-    fun `scheme C does not translate during alignment beyond the offset safety gate`() {
-        val controller = circularTrackingController()
-        controller.updateAircraftHeading(0.0)
-        val displacedCurve =
-            observation(
-                angleDegrees = -45.0,
-                longSideFraction = 1.2,
-                nearFieldOffsetFraction = 0.32,
-                lookahead = TapeLookahead(xFraction = 0.80, yFraction = 0.50),
-                heightAboveGroundMeters = 1.2,
-                centerline =
-                    metricCurvedPath(
-                        curvaturePerMeter = -1.0,
-                        tangentDegrees = -45.0,
-                    ),
-            )
-        var decision = controller.tick(seconds(2))
-        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
-            controller.observe(displacedCurve.copy(capturedAtNanos = now), now)
-            decision = controller.tick(now)
-        }
-
-        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
+        assertEquals(0.0, decision.circularTurnDirection, 0.0)
+        assertTrue(checkNotNull(decision.pathBearingDegrees) > 0.0)
+        assertEquals(0.0, decision.circularFeedforwardYawRateDegreesPerSecond, 0.0)
+        assertTrue(decision.yawRateDegreesPerSecond > 0.0)
         assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
         assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
     }
 
-    @Test
-    fun `scheme C stops moving alignment when trusted curvature reverses direction`() {
-        val controller = circularTrackingController()
-        controller.updateAircraftHeading(0.0)
-        fun directedCurve(curvaturePerMeter: Double) =
-            observation(
-                angleDegrees = -45.0,
-                longSideFraction = 1.2,
-                nearFieldOffsetFraction = 0.05,
-                heightAboveGroundMeters = 1.2,
-                centerline =
-                    metricCurvedPath(
-                        curvaturePerMeter = curvaturePerMeter,
-                        tangentDegrees = -45.0,
-                    ),
-            )
 
-        var decision = controller.tick(seconds(2))
-        listOf(3_000_000_000L, 3_250_000_000L, 3_500_000_000L).forEach { now ->
-            controller.observe(directedCurve(-1.0).copy(capturedAtNanos = now), now)
-            decision = controller.tick(now)
-        }
-        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
-        assertTrue(decision.forwardSpeedMetersPerSecond > 0.0)
-
-        listOf(3_750_000_000L, 4_000_000_000L, 4_250_000_000L).forEach { now ->
-            controller.observe(directedCurve(1.0).copy(capturedAtNanos = now), now)
-            decision = controller.tick(now)
-        }
-
-        assertEquals(TapeTrackingPhase.ALIGNING_CURVE, decision.phase)
-        assertEquals(-1.0, decision.circularTurnDirection, 0.0)
-        assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
-        assertEquals(0.0, decision.rightSpeedMetersPerSecond, 0.0)
-    }
 
     @Test
     fun `scheme C locks one turn direction when later visual curvature reverses`() {
@@ -376,6 +309,66 @@ class TapeTrackingControllerTest {
         assertFalse(result.stopRequested)
         assertEquals(TapeTrackingPhase.TRACKING, result.phase)
         assertTrue(result.forwardSpeedMetersPerSecond > 0.0)
+    }
+
+    @Test
+    fun `scheme B clears speed feedback on observation loss and round restart`() {
+        val controller = TapeTrackingController()
+        controller.start(
+            nowNanos = 1L,
+            mode = TapeTrackingMode.FIXED_HEADING,
+            fixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_16,
+        )
+        assertEquals("NO_OBSERVATION", controller.tick(1L).speedFeedbackUnavailableReason)
+        controller.observe(
+            observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                heightAboveGroundMeters = 1.2,
+                confidence = 0.9,
+                centerline = fixedHeadingPath(),
+            ).copy(
+                actualTravelDirectionDegrees = 0.0,
+                actualGroundSpeedMetersPerSecond = 0.60,
+                speedFeedbackSampleAtNanos = 80_000_001L,
+            ),
+            100_000_001L,
+        )
+        val accepted = controller.tick(150_000_001L)
+        assertEquals(80_000_001L, accepted.speedFeedbackSampleAtNanos)
+        assertEquals(100_000_001L, accepted.speedFeedbackObservedAtNanos)
+        assertNull(accepted.speedFeedbackUnavailableReason)
+        assertEquals(0.60, checkNotNull(accepted.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(1.70, accepted.commandTargetSpeedMetersPerSecond, 1e-9)
+
+        controller.observe(null, 200_000_001L)
+        val missing = controller.tick(250_000_001L)
+        assertEquals("NO_OBSERVATION", missing.speedFeedbackUnavailableReason)
+        assertEquals(0L, missing.speedFeedbackSampleAtNanos)
+        assertEquals(200_000_001L, missing.speedFeedbackObservedAtNanos)
+        assertNull(missing.speedFeedbackDirectionErrorDegrees)
+        assertNull(missing.measuredAlongTrackSpeedMetersPerSecond)
+
+        controller.stop()
+        val stopped = controller.tick(300_000_001L)
+        assertNull(stopped.speedFeedbackUnavailableReason)
+        assertEquals(0L, stopped.speedFeedbackSampleAtNanos)
+        assertEquals(0L, stopped.speedFeedbackObservedAtNanos)
+        assertNull(stopped.speedFeedbackDirectionErrorDegrees)
+        assertEquals(0.0, stopped.forwardSpeedMetersPerSecond, 0.0)
+        assertEquals(0.0, stopped.rightSpeedMetersPerSecond, 0.0)
+
+        controller.start(
+            nowNanos = 400_000_001L,
+            mode = TapeTrackingMode.FIXED_HEADING,
+            fixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_16,
+        )
+        val restarted = controller.tick(400_000_001L)
+        assertEquals("NO_OBSERVATION", restarted.speedFeedbackUnavailableReason)
+        assertEquals(0L, restarted.speedFeedbackSampleAtNanos)
+        assertEquals(0L, restarted.speedFeedbackObservedAtNanos)
+        assertNull(restarted.speedFeedbackDirectionErrorDegrees)
+        assertNull(restarted.measuredAlongTrackSpeedMetersPerSecond)
     }
 
 
@@ -1335,7 +1328,7 @@ class TapeTrackingControllerTest {
         val path = observation(
             angleDegrees = 15.0,
             longSideFraction = 1.1,
-            nearFieldOffsetFraction = 0.10,
+            nearFieldOffsetFraction = 0.06,
             lookahead = TapeLookahead(xFraction = 0.60, yFraction = 0.55),
             endpointCandidate = false,
             closedLoop = true,
@@ -1347,7 +1340,7 @@ class TapeTrackingControllerTest {
         val growingAt = firstAt + 100_000_000L
         controller.observe(
             path.copy(
-                nearFieldOffsetFraction = 0.20,
+                nearFieldOffsetFraction = 0.10,
                 capturedAtNanos = growingAt,
             ),
             growingAt,
@@ -1357,7 +1350,7 @@ class TapeTrackingControllerTest {
         val recoveringAt = growingAt + 100_000_000L
         controller.observe(
             path.copy(
-                nearFieldOffsetFraction = 0.10,
+                nearFieldOffsetFraction = 0.06,
                 capturedAtNanos = recoveringAt,
             ),
             recoveringAt,
@@ -1430,6 +1423,10 @@ class TapeTrackingControllerTest {
         }
         assertEquals(0.0, decision.forwardSpeedMetersPerSecond, 0.0)
         assertTrue(decision.rightSpeedMetersPerSecond > 0.0)
+        assertTrue(
+            "large offset right speed=${decision.rightSpeedMetersPerSecond}",
+            decision.rightSpeedMetersPerSecond >= 0.10,
+        )
     }
 
     @Test
