@@ -30,7 +30,9 @@ internal enum class FixedHeadingActuationPhaseLead(
     val usesSpeedScheduledActuation: Boolean = false,
 ) {
     DEGREES_0(0.0, 1.25),
-    LOW_SPEED_14(14.0, 0.60),
+    LOW_SPEED_080_16(16.0, 0.80),
+    LOW_SPEED_100_16(16.0, 1.00),
+    LOW_SPEED_125_16(16.0, 1.25),
     DEGREES_14(14.0, 1.25),
     DEGREES_16(
         degrees = 16.0,

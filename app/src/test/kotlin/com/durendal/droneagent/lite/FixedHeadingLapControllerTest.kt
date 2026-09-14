@@ -300,28 +300,36 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
-    fun `b0 reaches low speed cruise and keeps steering inside its command envelope`() {
+    fun `b0 cruises within its command envelope and advances steering by sixteen degrees`() {
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
             ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
         )
         val controller = FixedHeadingLapController()
-        controller.start(1L, FixedHeadingActuationPhaseLead.LOW_SPEED_14)
+        controller.start(1L, FixedHeadingActuationPhaseLead.LOW_SPEED_080_16)
         var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
         repeat(50) { index ->
             val now = (index + 1L) * 100_000_000L + 1L
             controller.observe(centerline, 1.2, 0.9, now)
             decision = controller.tick(now)
-            assertTrue(horizontalSpeed(decision) <= 0.60 + 1e-9)
+            assertTrue(horizontalSpeed(decision) <= 0.80 + 1e-9)
         }
-        assertEquals(0.60, horizontalSpeed(decision), 0.001)
+        assertEquals(0.80, horizontalSpeed(decision), 0.001)
 
         val now = 5_100_000_001L
         controller.observe(curvedPath(tangentDegrees = 0.0), 1.2, 0.9, now)
         decision = controller.tick(now)
         assertEquals(FixedHeadingLapPhase.TRACKING, decision.phase)
         assertTrue(decision.rightMetersPerSecond > 0.0)
-        assertTrue(horizontalSpeed(decision) <= 0.60 + 1e-9)
+        assertTrue(horizontalSpeed(decision) <= 0.80 + 1e-9)
+        val velocityHeading = Math.toDegrees(
+            kotlin.math.atan2(decision.rightMetersPerSecond, decision.forwardMetersPerSecond),
+        )
+        assertEquals(
+            16.0,
+            shortestAngularDelta(decision.virtualHeadingDegrees, velocityHeading),
+            1e-9,
+        )
     }
 
     @Test

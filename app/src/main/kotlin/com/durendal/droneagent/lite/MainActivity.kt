@@ -119,6 +119,7 @@ class MainActivity : Activity() {
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var angleCircularTapeTrackingButton: PillButton
     private lateinit var fixedHeadingLowSpeedButton: PillButton
+    private lateinit var fixedHeadingLowSpeedTargetButton: PillButton
     private lateinit var fixedHeadingFourteenPhaseLeadButton: PillButton
     private lateinit var fixedHeadingFasterPhaseLeadButton: PillButton
     private lateinit var fixedHeadingCurvatureFeedforwardButton: PillButton
@@ -447,6 +448,8 @@ class MainActivity : Activity() {
     private var activeCircularYawControlMode = CircularYawControlMode.RATE
     private var activeFixedHeadingActuationPhaseLead =
         FixedHeadingActuationPhaseLead.DEGREES_0
+    private var selectedFixedHeadingLowSpeedProfile =
+        FixedHeadingActuationPhaseLead.LOW_SPEED_080_16
     private var selectedFixedHeadingSpeedTarget = FixedHeadingSpeedTarget.STEP_075
     private var activeFixedHeadingSpeedTarget = FixedHeadingSpeedTarget.BASELINE
 
@@ -1085,8 +1088,12 @@ class MainActivity : Activity() {
                         toggleAngleCircularTapeTracking()
                     }
                 fixedHeadingLowSpeedButton =
-                    PillButton("B0：定向滑行・0.60 m/s", StickPadView.GREEN) {
-                        toggleFixedHeadingLap(FixedHeadingActuationPhaseLead.LOW_SPEED_14)
+                    PillButton(fixedHeadingLowSpeedLabel(), StickPadView.GREEN) {
+                        toggleFixedHeadingLap(selectedFixedHeadingLowSpeedProfile)
+                    }
+                fixedHeadingLowSpeedTargetButton =
+                    PillButton(fixedHeadingLowSpeedTargetLabel(), StickPadView.AMBER) {
+                        cycleFixedHeadingLowSpeedTarget()
                     }
                 fixedHeadingFourteenPhaseLeadButton =
                     PillButton("方案 B：定向滑行・相位超前 14°", StickPadView.GREEN) {
@@ -1130,6 +1137,7 @@ class MainActivity : Activity() {
                     PillButton(mathematicalCircleLabel(MathematicalCircleMode.RACING_FAST), StickPadView.RED) {
                         toggleMathematicalCircle(MathematicalCircleMode.RACING_FAST)
                     }
+                // Keep ANGLE controls initialized for status updates, but omit them from the row.
                 tiltStraightButton =
                     PillButton(tiltFlightLabel(TiltFlightMode.STRAIGHT), StickPadView.AMBER) {
                         toggleTiltFlight(TiltFlightMode.STRAIGHT)
@@ -1155,11 +1163,9 @@ class MainActivity : Activity() {
                         toggleFrameCapture()
                     }
                 addView(virtualStickFrameRateButton, actionParams(marginEnd = dp(4)))
-                addView(tiltStraightButton, actionParams(marginEnd = dp(4)))
-                addView(tiltCircleButton, actionParams(marginEnd = dp(4)))
-                addView(tiltSkatingCircleButton, actionParams(marginEnd = dp(4)))
                 addView(circularTapeTrackingButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingLowSpeedButton, actionParams(marginEnd = dp(4)))
+                addView(fixedHeadingLowSpeedTargetButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingFourteenPhaseLeadButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingFasterPhaseLeadButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingCurvatureFeedforwardButton, actionParams(marginEnd = dp(4)))
@@ -1582,6 +1588,33 @@ class MainActivity : Activity() {
     }
 
 
+    private fun fixedHeadingLowSpeedLabel(
+        profile: FixedHeadingActuationPhaseLead = selectedFixedHeadingLowSpeedProfile,
+    ): String =
+        "B0：定向滑行・%.2f m/s・超前 %.0f°".format(
+            profile.targetSpeedMetersPerSecond,
+            profile.degrees,
+        )
+
+    private fun fixedHeadingLowSpeedTargetLabel(): String =
+        "B0 速度：%.2f m/s".format(selectedFixedHeadingLowSpeedProfile.targetSpeedMetersPerSecond)
+
+    private fun cycleFixedHeadingLowSpeedTarget() {
+        if (!canSelectFixedHeadingSpeedTarget()) return
+        selectedFixedHeadingLowSpeedProfile = when (selectedFixedHeadingLowSpeedProfile) {
+            FixedHeadingActuationPhaseLead.LOW_SPEED_080_16 ->
+                FixedHeadingActuationPhaseLead.LOW_SPEED_100_16
+            FixedHeadingActuationPhaseLead.LOW_SPEED_100_16 ->
+                FixedHeadingActuationPhaseLead.LOW_SPEED_125_16
+            FixedHeadingActuationPhaseLead.LOW_SPEED_125_16 ->
+                FixedHeadingActuationPhaseLead.LOW_SPEED_080_16
+            else -> error("Not a B0 speed profile: $selectedFixedHeadingLowSpeedProfile")
+        }
+        fixedHeadingLowSpeedTargetButton.text = fixedHeadingLowSpeedTargetLabel()
+        fixedHeadingLowSpeedButton.text = fixedHeadingLowSpeedLabel()
+        render("${fixedHeadingLowSpeedTargetLabel()}（僅選擇，下次手動啟動 B0 時套用）")
+    }
+
     private fun fixedHeadingSpeedTargetLabel(
         target: FixedHeadingSpeedTarget = selectedFixedHeadingSpeedTarget,
     ): String =
@@ -1962,7 +1995,9 @@ class MainActivity : Activity() {
                                 val button =
                                     when (fixedHeadingActuationPhaseLead) {
                                         FixedHeadingActuationPhaseLead.DEGREES_0 -> null
-                                        FixedHeadingActuationPhaseLead.LOW_SPEED_14 ->
+                                        FixedHeadingActuationPhaseLead.LOW_SPEED_080_16,
+                                        FixedHeadingActuationPhaseLead.LOW_SPEED_100_16,
+                                        FixedHeadingActuationPhaseLead.LOW_SPEED_125_16 ->
                                             fixedHeadingLowSpeedButton
                                         FixedHeadingActuationPhaseLead.DEGREES_14 ->
                                             fixedHeadingFourteenPhaseLeadButton
@@ -2409,8 +2444,10 @@ class MainActivity : Activity() {
                 }
             TapeTrackingMode.FIXED_HEADING ->
                 when (fixedHeadingActuationPhaseLead) {
-                    FixedHeadingActuationPhaseLead.LOW_SPEED_14 ->
-                        "B0：定向滑行・0.60 m/s"
+                    FixedHeadingActuationPhaseLead.LOW_SPEED_080_16,
+                    FixedHeadingActuationPhaseLead.LOW_SPEED_100_16,
+                    FixedHeadingActuationPhaseLead.LOW_SPEED_125_16 ->
+                        fixedHeadingLowSpeedLabel(fixedHeadingActuationPhaseLead)
                     FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16 ->
                         "方案 B2：曲率前饋・巡航 1.60 m/s・最大 1.90 m/s"
                     FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL ->
@@ -2532,7 +2569,7 @@ class MainActivity : Activity() {
         }
         diagnosticTurnCycleTimer.reset()
         if (::fixedHeadingLowSpeedButton.isInitialized) {
-            fixedHeadingLowSpeedButton.text = "B0：定向滑行・0.60 m/s"
+            fixedHeadingLowSpeedButton.text = fixedHeadingLowSpeedLabel()
         }
         if (::fixedHeadingFourteenPhaseLeadButton.isInitialized) {
             fixedHeadingFourteenPhaseLeadButton.text = "方案 B：定向滑行・相位超前 14°"
@@ -2823,9 +2860,10 @@ class MainActivity : Activity() {
                 tapeTracking.enabled &&
                     activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
                     activeFixedHeadingActuationPhaseLead ==
-                    FixedHeadingActuationPhaseLead.LOW_SPEED_14
+                    selectedFixedHeadingLowSpeedProfile
                 ) ||
                 (!tapeTracking.enabled && tapeTrackingCanStart)
+        fixedHeadingLowSpeedTargetButton.available = canSelectFixedHeadingSpeedTarget()
         fixedHeadingFourteenPhaseLeadButton.available =
             (
                 tapeTracking.enabled &&
