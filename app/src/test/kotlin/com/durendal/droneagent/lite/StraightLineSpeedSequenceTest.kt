@@ -11,7 +11,7 @@ class StraightLineSpeedSequenceTest {
     @Test
     fun `zero baseline starts forward immediately and can stop on the same tick`() {
         val sequence = StraightLineSpeedSequence(
-            direction = DirectionalVelocityPulseDirection.FORWARD,
+            direction = StraightLineDirection.FORWARD,
             speedMetersPerSecond = 0.3,
             maximumCruiseNanos = 10L,
             baselineNanos = 0L,
@@ -116,7 +116,7 @@ class StraightLineSpeedSequenceTest {
 
     @Test
     fun `each selected direction holds its sign until neutral and never automatically reverses`() {
-        listOf(DirectionalVelocityPulseDirection.FORWARD, DirectionalVelocityPulseDirection.BACKWARD)
+        listOf(StraightLineDirection.FORWARD, StraightLineDirection.BACKWARD)
             .forEach { direction ->
                 val sequence = sequence(direction = direction)
                 assertNeutral(sequence.start(0L), StraightLineSpeedPhase.BASELINE)
@@ -136,7 +136,7 @@ class StraightLineSpeedSequenceTest {
     }
 
     private fun sequence(
-        direction: DirectionalVelocityPulseDirection = DirectionalVelocityPulseDirection.FORWARD,
+        direction: StraightLineDirection = StraightLineDirection.FORWARD,
         maximumTickGapNanos: Long = 20L,
         baselineNanos: Long = 2L,
     ) = StraightLineSpeedSequence(

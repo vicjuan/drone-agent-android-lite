@@ -351,7 +351,7 @@ internal class FixedCameraVelocityEstimator : AutoCloseable {
     }
 
     companion object {
-        const val CALIBRATION_ID = "yellow_pairs_22_23_24_25_measured_20cm_similarity"
+        const val CALIBRATION_ID = "yellow_isolated_pairs_measured_20cm_similarity"
         const val MARKER_DISTANCE_METERS = YellowMarkerScale.DISTANCE_METERS
         const val MAX_FRAME_GAP_NANOS = 500_000_000L
         private const val REFERENCE_WIDTH = 848.0

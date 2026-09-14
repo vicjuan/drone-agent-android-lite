@@ -126,6 +126,12 @@ internal data class TapeTrackingDecision(
     val speedFeedbackObservedAtNanos: Long = 0L,
     val speedFeedbackUnavailableReason: String? = null,
     val speedFeedbackDirectionErrorDegrees: Double? = null,
+    val appliedPhaseLeadDegrees: Double = 0.0,
+    val actuationGain: Double = 1.0,
+    val scheduledTurnRateRadiansPerSecond: Double = 0.0,
+    val desiredAlongTrackSpeedMetersPerSecond: Double? = null,
+    val maximumCommandSpeedMetersPerSecond: Double = 0.0,
+    val actuationCompensationActive: Boolean = false,
 )
 private data class PredictedLookahead(
     val xFraction: Double,
@@ -226,6 +232,7 @@ internal class TapeTrackingController {
         circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
         fixedHeadingActuationPhaseLead: FixedHeadingActuationPhaseLead =
             FixedHeadingActuationPhaseLead.DEGREES_0,
+        fixedHeadingSpeedTarget: FixedHeadingSpeedTarget = FixedHeadingSpeedTarget.BASELINE,
     ) {
         enabled = true
         this.mode = mode
@@ -238,6 +245,7 @@ internal class TapeTrackingController {
             fixedHeadingLapController.start(
                 nowNanos,
                 fixedHeadingActuationPhaseLead,
+                fixedHeadingSpeedTarget,
             )
         } else {
             beginRecentering(nowNanos)
@@ -488,6 +496,14 @@ internal class TapeTrackingController {
                 speedFeedbackObservedAtNanos = fixedDecision.speedFeedbackObservedAtNanos,
                 speedFeedbackUnavailableReason = fixedDecision.speedFeedbackUnavailableReason,
                 speedFeedbackDirectionErrorDegrees = fixedDecision.speedFeedbackDirectionErrorDegrees,
+                appliedPhaseLeadDegrees = fixedDecision.appliedPhaseLeadDegrees,
+                actuationGain = fixedDecision.actuationGain,
+                scheduledTurnRateRadiansPerSecond = fixedDecision.scheduledTurnRateRadiansPerSecond,
+                desiredAlongTrackSpeedMetersPerSecond =
+                    fixedDecision.desiredAlongTrackSpeedMetersPerSecond,
+                maximumCommandSpeedMetersPerSecond =
+                    fixedDecision.maximumCommandSpeedMetersPerSecond,
+                actuationCompensationActive = fixedDecision.actuationCompensationActive,
                 pathQuality =
                     if (fixedDecision.tangentDegrees == null) PathQuality.LOST else PathQuality.FULL_PATH,
             )

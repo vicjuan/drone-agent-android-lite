@@ -300,6 +300,31 @@ class FixedHeadingLapControllerTest {
     }
 
     @Test
+    fun `b0 reaches low speed cruise and keeps steering inside its command envelope`() {
+        val centerline = path(
+            xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
+            ys = floatArrayOf(1.00f, 0.80f, 0.60f, 0.40f, 0.20f, 0.00f),
+        )
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.LOW_SPEED_14)
+        var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        repeat(50) { index ->
+            val now = (index + 1L) * 100_000_000L + 1L
+            controller.observe(centerline, 1.2, 0.9, now)
+            decision = controller.tick(now)
+            assertTrue(horizontalSpeed(decision) <= 0.60 + 1e-9)
+        }
+        assertEquals(0.60, horizontalSpeed(decision), 0.001)
+
+        val now = 5_100_000_001L
+        controller.observe(curvedPath(tangentDegrees = 0.0), 1.2, 0.9, now)
+        decision = controller.tick(now)
+        assertEquals(FixedHeadingLapPhase.TRACKING, decision.phase)
+        assertTrue(decision.rightMetersPerSecond > 0.0)
+        assertTrue(horizontalSpeed(decision) <= 0.60 + 1e-9)
+    }
+
+    @Test
     fun `sixteen degree profile reaches its 1 point 60 meter per second target`() {
         val centerline = path(
             xs = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f),
@@ -1293,6 +1318,302 @@ class FixedHeadingLapControllerTest {
         assertEquals(-1.6, fixedHeadingHoldYawRate(-179.0, 179.0), 1e-6)
         assertEquals(10.0, fixedHeadingHoldYawRate(0.0, 90.0), 1e-6)
         assertEquals(-10.0, fixedHeadingHoldYawRate(0.0, -90.0), 1e-6)
+    }
+
+    @Test
+    fun `B4 mirrors applied turn compensation and schedules stronger turns from speed and curvature`() {
+        fun cruise(
+            curvature: Double,
+            speed: Double,
+            profile: FixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL,
+        ): FixedHeadingLapDecision {
+            val controller = FixedHeadingLapController()
+            controller.start(1L, profile, FixedHeadingSpeedTarget.STEP_085)
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(30) { index ->
+                decision = scheduledStep(controller, decision, (index + 1L) * 100_000_000L + 1L, curvature, speed)
+            }
+            assertEquals(FixedHeadingLapPhase.TRACKING, decision.phase)
+            assertAppliedCommandPhase(decision)
+            return decision
+        }
+
+        val right = cruise(0.8, 1.1)
+        val left = cruise(-0.8, 1.1)
+        val slow = cruise(0.8, 0.8)
+        val gentle = cruise(0.3, 1.1)
+        assertTrue(right.appliedPhaseLeadDegrees > 0.0)
+        assertEquals(-right.appliedPhaseLeadDegrees, left.appliedPhaseLeadDegrees, 1e-3)
+        assertEquals(right.actuationGain, left.actuationGain, 1e-4)
+        assertEquals(right.forwardMetersPerSecond, left.forwardMetersPerSecond, 1e-3)
+        assertEquals(-right.rightMetersPerSecond, left.rightMetersPerSecond, 1e-3)
+        assertTrue(right.appliedPhaseLeadDegrees > slow.appliedPhaseLeadDegrees)
+        assertTrue(right.actuationGain > slow.actuationGain)
+        assertTrue(right.appliedPhaseLeadDegrees > gentle.appliedPhaseLeadDegrees)
+        assertTrue(right.actuationGain > gentle.actuationGain)
+        assertTrue(horizontalSpeed(right) > horizontalSpeed(gentle))
+        val limited = cruise(1.0, 3.0)
+        assertEquals(Math.PI / 2.0, limited.scheduledTurnRateRadiansPerSecond, 1e-5)
+        assertTrue(limited.appliedPhaseLeadDegrees > 25.0)
+        assertTrue(limited.actuationGain > 1.1)
+        val b3 = cruise(0.8, 1.1, FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL)
+        assertEquals(16.0, b3.appliedPhaseLeadDegrees, 1e-9)
+        assertEquals(1.0, b3.actuationGain, 0.0)
+        assertTrue(kotlin.math.abs(b3.appliedPhaseLeadDegrees - right.appliedPhaseLeadDegrees) > .1)
+    }
+
+    @Test
+    fun `B4 uses this tick turn for gain and slews phase continuously through reversal`() {
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, FixedHeadingSpeedTarget.STEP_085)
+        var previous = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        repeat(60) { index ->
+            val curvature = if (index < 30) 0.7 else -0.7
+            val next = scheduledStep(controller, previous, (index + 1L) * 100_000_000L + 1L, curvature, 1.2)
+            if (index > 0) {
+                assertTrue(kotlin.math.abs(next.appliedPhaseLeadDegrees - previous.appliedPhaseLeadDegrees) <= 6.0 + 1e-9)
+                assertTrue(kotlin.math.abs(shortestAngularDelta(previous.virtualHeadingDegrees, next.virtualHeadingDegrees)) <= 9.0 + 1e-9)
+                assertAppliedCommandPhase(next)
+                val actualOmega = Math.toRadians(shortestAngularDelta(previous.virtualHeadingDegrees, next.virtualHeadingDegrees)) / 0.1
+                val filteredOmega = previous.scheduledTurnRateRadiansPerSecond +
+                    (1.0 - kotlin.math.exp(-0.1 / 0.15)) * (actualOmega - previous.scheduledTurnRateRadiansPerSecond)
+                val responseTime = kotlin.math.tan(Math.toRadians(16.0)) / 0.71
+                val expectedGain = (kotlin.math.hypot(1.0, filteredOmega * responseTime) /
+                    kotlin.math.hypot(1.0, 0.71 * responseTime)).coerceAtMost(1.2)
+                assertEquals(expectedGain, next.actuationGain, 1e-9)
+                assertEquals(1.6 * (0.85 / 0.70) * expectedGain, next.commandTargetSpeedMetersPerSecond, 1e-9)
+            }
+            previous = next
+        }
+        assertTrue(previous.appliedPhaseLeadDegrees < 0.0)
+    }
+
+    @Test
+    fun `B4 invalid feedback cannot step the direction of an existing lateral command`() {
+        val offset = path(FloatArray(6) { .55f }, floatArrayOf(1f, .8f, .6f, .4f, .2f, 0f))
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL)
+        var previous = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        var now = 1L
+        repeat(25) {
+            now += 100_000_000L
+            controller.observe(offset, 1.2, 0.9, now)
+            controller.updateVisualVelocity(.8, 0.0, 0.0, 0.0, now, now, null)
+            previous = controller.tick(now)
+        }
+        assertTrue(previous.lateralCorrectionMetersPerSecond > 0.0)
+        controller.updateVisualVelocity(null, null, 0.0, 0.0, now, now, "INSUFFICIENT_INLIERS")
+        val invalid = controller.tick(now)
+        assertEquals(previous.forwardMetersPerSecond, invalid.forwardMetersPerSecond, 1e-9)
+        assertEquals(previous.rightMetersPerSecond, invalid.rightMetersPerSecond, 1e-9)
+        now += 20_000_000L
+        controller.observe(offset, 1.2, 0.9, now)
+        val unwinding = controller.tick(now)
+        assertTrue(unwinding.lateralCorrectionMetersPerSecond < invalid.lateralCorrectionMetersPerSecond)
+        assertTrue(invalid.lateralCorrectionMetersPerSecond - unwinding.lateralCorrectionMetersPerSecond <= .032 + 1e-9)
+        assertFalse(unwinding.actuationCompensationActive)
+        assertAppliedCommandPhase(unwinding)
+    }
+
+    @Test
+    fun `B4 selected physical targets change straight commands without double inverse gain and B3 ignores selection`() {
+        val straight = path(FloatArray(6) { 0.5f }, floatArrayOf(1f, .8f, .6f, .4f, .2f, 0f))
+        fun cruise(profile: FixedHeadingActuationPhaseLead, target: FixedHeadingSpeedTarget): FixedHeadingLapDecision {
+            val controller = FixedHeadingLapController()
+            controller.start(1L, profile, target)
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(25) { index ->
+                val now = (index + 1L) * 100_000_000L + 1L
+                controller.observe(straight, 1.2, 0.9, now)
+                controller.updateVisualVelocity(1.0, 0.0, 0.0, 0.0, now, now, null)
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+        var previousSpeed = 0.0
+        FixedHeadingSpeedTarget.entries.forEach { target ->
+            val decision = cruise(FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, target)
+            val expectedSpeed = 1.60 * (target.desiredAlongTrackSpeedMetersPerSecond / 0.70) * kotlin.math.cos(Math.toRadians(16.0))
+            assertEquals(expectedSpeed, decision.forwardMetersPerSecond, 1e-9)
+            assertEquals(0.0, decision.rightMetersPerSecond, 1e-9)
+            assertTrue(decision.forwardMetersPerSecond > previousSpeed)
+            previousSpeed = decision.forwardMetersPerSecond
+        }
+        val b3 = cruise(FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL, FixedHeadingSpeedTarget.STEP_085)
+        assertEquals(1.60, b3.forwardMetersPerSecond, 1e-9)
+        assertEquals(0.0, b3.rightMetersPerSecond, 1e-9)
+        assertEquals(1.0, b3.actuationGain, 0.0)
+        val noVisual = FixedHeadingLapController()
+        noVisual.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, FixedHeadingSpeedTarget.STEP_085)
+        var fallback = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        repeat(25) { index ->
+            val now = (index + 1L) * 100_000_000L + 1L
+            noVisual.observe(
+                straight, 1.2, 0.9, now,
+                actualTravelDirectionDegrees = 0.0,
+                actualGroundSpeedMetersPerSecond = .1,
+            )
+            val next = noVisual.tick(now)
+            assertTrue(next.forwardMetersPerSecond - fallback.forwardMetersPerSecond <= .16 + 1e-9)
+            fallback = next
+        }
+        assertEquals(1.60, fallback.forwardMetersPerSecond, 1e-9)
+        assertNull(fallback.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(fallback.actuationCompensationActive)
+    }
+
+    @Test
+    fun `B4 selected caps bound resultant after lateral correction without negative feedback headroom`() {
+        val offset = path(FloatArray(6) { .55f }, floatArrayOf(1f, .8f, .6f, .4f, .2f, 0f))
+        FixedHeadingSpeedTarget.entries.forEach { target ->
+            val controller = FixedHeadingLapController()
+            controller.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, target)
+            var decision = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+            repeat(35) { index ->
+                val now = (index + 1L) * 100_000_000L + 1L
+                controller.observe(offset, 1.2, 0.9, now)
+                controller.updateVisualVelocity(0.1, 0.0, 0.0, 0.0, now, now, null)
+                decision = controller.tick(now)
+                assertTrue(horizontalSpeed(decision) <= target.maximumCommandSpeedMetersPerSecond + 1e-9)
+                assertTrue(decision.speedFeedbackBoostMetersPerSecond >= 0.0)
+            }
+            assertTrue(decision.lateralCorrectionMetersPerSecond > 0.0)
+            assertEquals(target.maximumCommandSpeedMetersPerSecond, horizontalSpeed(decision), 1e-6)
+            assertAppliedCommandPhase(decision)
+        }
+    }
+
+    @Test
+    fun `B4 stale invalid and zero speed remove boost but unwind applied phase with bounded decay`() {
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, FixedHeadingSpeedTarget.STEP_085)
+        var previous = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        var now = 1L
+        repeat(25) {
+            now += 100_000_000L
+            previous = scheduledStep(controller, previous, now, 1.0, 0.6)
+        }
+        assertTrue(previous.speedFeedbackBoostMetersPerSecond > 0.0)
+        assertTrue(previous.appliedPhaseLeadDegrees > 6.0)
+        val invalidInputs = listOf<Double?>(null, Double.NaN, Double.POSITIVE_INFINITY, 0.0)
+        invalidInputs.forEach { invalid ->
+            now += 20_000_000L
+            controller.observe(curvedPath(previous.virtualHeadingDegrees, 1.0), 1.2, 0.9, now)
+            controller.updateVisualVelocity(invalid, 0.0, 0.0, 0.0, now, now, null)
+            val next = controller.tick(now)
+            assertNull(next.measuredAlongTrackSpeedMetersPerSecond)
+            assertFalse(next.actuationCompensationActive)
+            assertEquals(1.0, next.actuationGain, 0.0)
+            assertEquals(0.0, next.speedFeedbackBoostMetersPerSecond, 0.0)
+            assertEquals(1.60, next.commandTargetSpeedMetersPerSecond, 0.0)
+            assertTrue(kotlin.math.abs(next.appliedPhaseLeadDegrees) <= kotlin.math.abs(previous.appliedPhaseLeadDegrees))
+            assertTrue(kotlin.math.abs(next.appliedPhaseLeadDegrees - previous.appliedPhaseLeadDegrees) <= 1.2 + 1e-9)
+            assertTrue(kotlin.math.abs(horizontalSpeed(next) - horizontalSpeed(previous)) <= .032 + 1e-3)
+            assertAppliedCommandPhase(next)
+            previous = next
+        }
+        repeat(20) {
+            now += 100_000_000L
+            previous = scheduledStep(controller, previous, now, 1.0, 0.6)
+        }
+        val sampleAt = now
+        now += 200_000_000L
+        controller.observe(curvedPath(previous.virtualHeadingDegrees, 1.0), 1.2, 0.9, now)
+        previous = controller.tick(now)
+        now = sampleAt + 250_000_001L
+        controller.observe(curvedPath(previous.virtualHeadingDegrees, 1.0), 1.2, 0.9, now)
+        val expired = controller.tick(now)
+        assertEquals("VISUAL_VELOCITY_STALE", expired.speedFeedbackUnavailableReason)
+        assertEquals(1.60, expired.commandTargetSpeedMetersPerSecond, 0.0)
+        assertFalse(expired.actuationCompensationActive)
+        assertEquals(0.0, expired.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertTrue(kotlin.math.abs(expired.appliedPhaseLeadDegrees - previous.appliedPhaseLeadDegrees) <= 3.000001)
+        assertAppliedCommandPhase(expired)
+    }
+
+    @Test
+    fun `B4 coasting and stream recovery discard compensation and restart cannot replay a prior sample`() {
+        val controller = FixedHeadingLapController()
+        controller.start(1L, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL)
+        var previous = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        var now = 1L
+        repeat(25) {
+            now += 100_000_000L
+            previous = scheduledStep(controller, previous, now, 0.8, 0.6)
+        }
+        assertTrue(previous.appliedPhaseLeadDegrees > 0.0)
+        val oldSampleAt = now
+        now += 50_000_000L
+        controller.observe(null, 1.2, 0.0, now)
+        val coast = controller.tick(now)
+        assertEquals(FixedHeadingLapPhase.COASTING, coast.phase)
+        assertEquals(0.0, coast.appliedPhaseLeadDegrees, 0.0)
+        assertEquals(0.0, coast.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.0, coast.actuationGain, 0.0)
+        assertFalse(coast.actuationCompensationActive)
+        assertEquals(coast.virtualHeadingDegrees, wrapDegrees(Math.toDegrees(kotlin.math.atan2(coast.rightMetersPerSecond, coast.forwardMetersPerSecond))), 1e-9)
+
+        controller.beginFrameStreamRecovery(now)
+        val held = controller.tick(now + 50_000_000L)
+        assertEquals(0.0, horizontalSpeed(held), 0.0)
+        val resumedPath = curvedPath(coast.virtualHeadingDegrees, 0.0)
+        controller.observe(resumedPath, 1.2, 0.9, now + 60_000_000L)
+        controller.observe(resumedPath, 1.2, 0.9, now + 80_000_000L)
+        controller.updateVisualVelocity(.1, 0.0, 0.0, 0.0, oldSampleAt, now + 80_000_000L, null)
+        val resumed = controller.tick(now + 100_000_000L)
+        assertEquals(FixedHeadingLapPhase.TRACKING, resumed.phase)
+        assertNull(resumed.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.0, resumed.appliedPhaseLeadDegrees, 0.0)
+        assertEquals(1.60, resumed.commandTargetSpeedMetersPerSecond, 0.0)
+        assertTrue(horizontalSpeed(resumed) > 0.0)
+
+        controller.stop()
+        assertEquals(0.0, horizontalSpeed(controller.tick(now + 110_000_000L)), 0.0)
+        now += 200_000_000L
+        controller.start(now, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, FixedHeadingSpeedTarget.STEP_080)
+        val clean = FixedHeadingLapController()
+        clean.start(now, FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL, FixedHeadingSpeedTarget.STEP_080)
+        var restarted = FixedHeadingLapDecision(FixedHeadingLapPhase.ACQUIRING)
+        var fresh = restarted
+        repeat(5) {
+            now += 100_000_000L
+            restarted = scheduledStep(controller, restarted, now, -0.7, 0.8)
+            fresh = scheduledStep(clean, fresh, now, -0.7, 0.8)
+            assertEquals(fresh.forwardMetersPerSecond, restarted.forwardMetersPerSecond, 1e-9)
+            assertEquals(fresh.rightMetersPerSecond, restarted.rightMetersPerSecond, 1e-9)
+        }
+    }
+
+    private fun scheduledStep(
+        controller: FixedHeadingLapController,
+        previous: FixedHeadingLapDecision,
+        now: Long,
+        curvature: Double,
+        visualSpeed: Double,
+    ): FixedHeadingLapDecision {
+        val heading = Math.toRadians(previous.virtualHeadingDegrees)
+        controller.updateVisualVelocity(
+            visualSpeed * kotlin.math.cos(heading),
+            visualSpeed * kotlin.math.sin(heading),
+            0.0, 0.0, now, now, null,
+        )
+        controller.observe(curvedPath(previous.virtualHeadingDegrees, curvature), 1.2, 0.9, now)
+        return controller.tick(now)
+    }
+
+    private fun horizontalSpeed(decision: FixedHeadingLapDecision): Double =
+        kotlin.math.hypot(decision.forwardMetersPerSecond, decision.rightMetersPerSecond)
+
+    private fun assertAppliedCommandPhase(decision: FixedHeadingLapDecision) {
+        // Remove the reported, post-cap lateral component to observe the actual
+        // longitudinal velocity heading rather than mistaking correction for lead.
+        val correctionHeading = Math.toRadians(checkNotNull(decision.tangentDegrees) + decision.appliedPhaseLeadDegrees)
+        val forward = decision.forwardMetersPerSecond + decision.lateralCorrectionMetersPerSecond * kotlin.math.sin(correctionHeading)
+        val right = decision.rightMetersPerSecond - decision.lateralCorrectionMetersPerSecond * kotlin.math.cos(correctionHeading)
+        val commandHeading = Math.toDegrees(kotlin.math.atan2(right, forward))
+        assertEquals(decision.appliedPhaseLeadDegrees, shortestAngularDelta(decision.virtualHeadingDegrees, commandHeading), 1e-7)
+        assertTrue(kotlin.math.abs(decision.appliedPhaseLeadDegrees) <= 35.0)
+        assertTrue(decision.actuationGain <= 1.2)
     }
 
     private fun curvedPath(

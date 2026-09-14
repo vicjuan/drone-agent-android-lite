@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="B4 第二階段改了什麼：固定機頭不變，依視覺速度與轉彎需求調整提前方向及命令大小。已安裝，待實飛。">
+<title>B4 第二階段｜改了什麼</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fbfaf7;
+  --ink: #252b2b;
+  --muted: #606969;
+  --line: #dcd8d0;
+  --card: #fff;
+  --teal: #087b70;
+  --teal-soft: #e5f3ef;
+  --amber: #835b15;
+  --amber-soft: #fff5dd;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.7 -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
+main { max-width: 1000px; margin: auto; padding: 32px 24px; }
+h1, h2, p { margin: 0; }
+h1 { font-size: clamp(28px, 4vw, 38px); line-height: 1.3; letter-spacing: -.03em; }
+h2 { font-size: 19px; line-height: 1.5; margin-bottom: 10px; }
+header { margin-bottom: 20px; }
+.eyebrow { color: var(--teal); font-size: 13px; font-weight: 700; letter-spacing: .08em; margin-bottom: 8px; }
+.title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.status { color: var(--amber); background: var(--amber-soft); border: 1px solid #eadbb8; border-radius: 8px; padding: 5px 12px; font-weight: 700; }
+.lead { margin-top: 12px; max-width: 52em; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; min-width: 0; }
+section + section, .columns, .proof { margin-top: 16px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+caption { text-align: left; color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 9px 10px; overflow-wrap: anywhere; }
+thead th { color: var(--muted); font-size: 14px; font-weight: 600; }
+tr:last-child > * { border-bottom: 0; }
+.compare { table-layout: fixed; }
+.compare th:first-child { width: 19%; }
+.compare th:nth-child(2) { width: 31%; }
+.compare td:last-child strong { color: var(--teal); }
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; list-style: none; padding: 0; margin: 0; }
+.flow li { position: relative; padding: 12px; background: var(--teal-soft); border-radius: 8px; text-align: center; }
+.flow li + li::before { content: "→"; position: absolute; left: -20px; top: 12px; color: var(--teal); font-weight: 700; }
+.flow strong, .flow span { display: block; }
+.flow span { font-size: 13px; color: var(--muted); }
+.columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.columns > section { margin: 0; }
+.default { background: var(--teal-soft); }
+.default th, .default td { color: #075f57; font-weight: 700; }
+.small { font-size: 14px; color: var(--muted); }
+.note { margin-top: 10px; }
+ul { padding-left: 1.25em; margin: 0; }
+li + li { margin-top: 8px; }
+.flow li + li { margin-top: 0; }
+.proof { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.proof section { margin: 0; }
+.done { border-top: 4px solid var(--teal); }
+.pending { background: var(--amber-soft); border-color: #eadbb8; border-top: 4px solid var(--amber); }
+.pending h2 { color: var(--amber); }
+footer { margin-top: 14px; font-size: 13px; color: var(--muted); }
+a { color: #075f57; text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--teal); outline-offset: 4px; }
+@media (max-width: 680px) {
+  main { padding: 24px 16px; }
+  .columns, .proof { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: 1fr; gap: 22px; }
+  .flow li + li::before { content: "↓"; left: calc(50% - 8px); top: -24px; }
+  .flow li { padding: 9px 12px; }
+  .flow strong, .flow span { display: inline; }
+  .flow span { margin-left: 8px; }
+}
+@media (max-width: 420px) {
+  main { padding: 20px 12px; }
+  .card { padding: 16px 12px; }
+  .compare { font-size: 14px; }
+  .compare th:first-child { width: 18%; }
+  th, td { padding: 8px 6px; }
+}
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: white; font-size: 9.5pt; line-height: 1.55; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  main { max-width: none; padding: 0; }
+  header { margin-bottom: 12px; }
+  h1 { font-size: 24pt; }
+  h2 { font-size: 12pt; margin-bottom: 6px; }
+  .eyebrow, .small, caption, thead th { font-size: 9pt; }
+  .lead { margin-top: 8px; }
+  .card { padding: 12px; break-inside: avoid; }
+  section + section, .columns, .proof { margin-top: 10px; }
+  .columns, .proof { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .flow { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
+  .flow li { padding: 8px 4px; }
+  .flow strong, .flow span { display: block; }
+  .flow span { margin: 0; font-size: 8pt; }
+  .flow li + li::before { content: "→"; left: -18px; top: 8px; }
+  th, td { padding: 5px 7px; }
+  .compare { font-size: inherit; }
+  .note { margin-top: 6px; }
+  li + li { margin-top: 5px; }
+  footer { margin-top: 10px; font-size: 8pt; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">B4 · 第二階段 · <time datetime="2026-09-10">2026 / 09 / 10</time></p>
+    <div class="title-row">
+      <h1>提前角與命令大小，改成動態調整</h1>
+      <p class="status">已安裝，待實飛</p>
+    </div>
+    <p class="lead"><strong>機頭仍固定，不改飛行方式。</strong>B4 依實際視覺速度與轉彎需求，同時調整命令方向的提前量及命令大小；不是只把速度數字調高。</p>
+  </header>
+
+  <section class="card" aria-labelledby="changes-heading">
+    <h2 id="changes-heading">本次修改：方向、大小與送出限制</h2>
+    <table class="compare">
+      <thead><tr><th scope="col">項目</th><th scope="col">原本</th><th scope="col">B4 現在</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">方向提前</th><td>固定 ±16°</td><td><strong>同一個圓，提速時也調整提前量</strong>；在目前模型下，等速穩態時的提前角應近似固定。</td></tr>
+        <tr><th scope="row">命令大小</th><td>固定經驗基準<br>再加速度誤差補償</td><td><strong>沿線目標＋相對增益</strong>調整基準，再補速度差，不盲目放大。</td></tr>
+        <tr><th scope="row">最後送出</th><td>每軸各限 2.0 m/s</td><td><strong>僅 B4 改用所選合成上限</strong>；超限等比例縮小，保留方向。</td></tr>
+      </tbody>
+    </table>
+    <p class="small note">圓的彎度雖然不變，飛得越快，移動方向每秒仍要轉得越多；動態補償是配合這個變化，不是把正圓當成忽急忽緩的彎。起步與循跡修正也會影響轉率。</p>
+  </section>
+
+  <section class="card" aria-labelledby="flow-heading">
+    <h2 id="flow-heading">視覺量測真的進入控制</h2>
+    <ol class="flow">
+      <li><strong>視覺速度＋路徑</strong><span>知道多快、怎麼轉</span></li>
+      <li><strong>動態補償</strong><span>調提前角與大小</span></li>
+      <li><strong>既有保護限幅</strong><span>限制變化與上限</span></li>
+      <li><strong>DJI 速度命令</strong><span>仍非 ANGLE 控制</span></li>
+    </ol>
+  </section>
+
+  <div class="columns">
+    <section class="card" aria-labelledby="targets-heading">
+      <h2 id="targets-heading">四檔可選，預設 0.75</h2>
+      <table>
+        <caption>左欄是期望實速；右欄是命令限制，不是已飛到的速度。</caption>
+        <thead><tr><th scope="col">沿線實速目標（m/s）</th><th scope="col">合成命令上限（m/s）</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">0.70</th><td>1.90</td></tr>
+          <tr class="default"><th scope="row">0.75 · 預設</th><td>2.05</td></tr>
+          <tr><th scope="row">0.80</th><td>2.20</td></tr>
+          <tr><th scope="row">0.85</th><td>2.35</td></tr>
+        </tbody>
+      </table>
+      <p class="small note">命令上限只是允許送出的大小；飛機能否達到左欄目標，仍取決於機體反應、彎道及視覺品質，必須實測確認。</p>
+      <p class="small note">選檔不會起飛；運行或等待控權時不能改。每趟鎖定選擇，<strong>不會自動升檔</strong>。</p>
+    </section>
+    <section class="card" aria-labelledby="guards-heading">
+      <h2 id="guards-heading">加補償，不拆保護</h2>
+      <ul>
+        <li><strong>轉向有界：</strong>虛擬轉率上限由 60 提至 90°/s，鬆開原本至少 6 秒的命令方向週期限制；這不是機頭轉速。</li>
+        <li><strong>視覺無效就退補償：</strong>名目命令回到 1.60 m/s、加成歸零、增益歸一，提前角平滑退零；不拿 DJI 速度補缺值。</li>
+        <li><strong>原保護保留：</strong>速度漸變、低信心及偏線減速、失線停止與接管不變；B2／B3 仍可作基準對照。</li>
+      </ul>
+    </section>
+  </div>
+
+  <div class="proof">
+    <section class="card done" aria-labelledby="done-heading">
+      <h2 id="done-heading">已完成：程式與地面核對</h2>
+      <p><strong>129 項控制器＋8 項原生測試、10 組合成情境通過。</strong>新版已安裝手機。鎖屏下以真實 View 離屏渲染及四次選檔核對 UI；不是解鎖後手指操作，也不是實飛。</p>
+    </section>
+    <section class="card pending" aria-labelledby="pending-heading">
+      <h2 id="pending-heading">未完成：實飛證明更快</h2>
+      <p><strong>5.5–6.5 秒／圈仍是待驗證目標。</strong>模型只是經驗工作點的初始設定，不是辨識出的飛機模型；沒有圓擬合或 EKF。仍須同跑道地標計時、比較偏線，再調參。</p>
+    </section>
+  </div>
+  <footer>參數與操作細節：<a href="windows-dji-log-export-and-profiling.md">開發紀錄 §6.8</a>。</footer>
+</main>
+</body>
+</html>

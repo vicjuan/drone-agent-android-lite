@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>為什麼飛機會頓挫，以及怎麼繞過去</title>
+<style>
+  :root{--bg:#fbfaf7;--ink:#1f1f1f;--muted:#6b6b6b;--accent:#b5451b;--soft:#fbe9e0;--line:#dcd8d0;--card:#fff;--ok:#2e7d4f;--oksoft:#e3f2e8;--warn:#8a6d00;--warnsoft:#fff6d6}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;line-height:1.8;font-size:17px}
+  main{max-width:860px;margin:0 auto;padding:48px 24px 96px}
+  h1{font-size:34px;line-height:1.25;margin:0 0 8px}
+  .lede{font-size:19px;color:#3a3a3a;margin:0 0 36px}
+  h2{font-size:24px;margin:56px 0 12px;padding-top:24px;border-top:1px solid var(--line)}
+  h2 .n{font-family:Menlo,monospace;color:var(--accent);font-size:14px;margin-right:10px}
+  p{margin:0 0 16px}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin:20px 0}
+  .fig svg{width:100%;height:auto;display:block}
+  .cap{font-size:14px;color:var(--muted);margin-top:10px}
+  .box{border-left:4px solid var(--accent);background:var(--soft);padding:14px 18px;border-radius:0 8px 8px 0;margin:22px 0}
+  .box.ok{border-color:var(--ok);background:var(--oksoft)}
+  .box.warn{border-color:var(--warn);background:var(--warnsoft)}
+  .box b{display:block;margin-bottom:4px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .card h3{margin:0 0 8px;font-size:17px}
+  .card.bad h3{color:var(--accent)} .card.good h3{color:var(--ok)}
+  ul{padding-left:22px} li{margin-bottom:8px}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:15px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;letter-spacing:.08em;color:var(--muted);font-family:Menlo,monospace}
+  @media (max-width:640px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+
+<h1>為什麼飛機會頓挫，以及怎麼繞過去</h1>
+<p class="lede">前提：假設空曠場地的測試證實震盪來自飛控自己的速度迴路。這一頁解釋那個迴路為什麼會震、為什麼我們調不到它、以及「改送傾角」為什麼能繞過去。</p>
+
+<h2><span class="n">01</span>飛機現在是怎麼被控制的</h2>
+<p>我們的 App 每 25 毫秒告訴飛機一個「速度」，例如「往前 0.5 公尺／秒」。飛機收到後，不是直接飛，而是由飛控裡的一個<strong>速度迴路</strong>接手：它量自己現在多快、跟命令比、太慢就往前傾、太快就往後傾。傾多少角度，再交給更底層的<strong>姿態迴路</strong>去執行。</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang TC,sans-serif" font-size="15">
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#555"/></marker></defs>
+  <rect x="20" y="60" width="150" height="70" rx="10" fill="#e8f0fb" stroke="#4a6fa5"/>
+  <text x="95" y="90" text-anchor="middle" font-weight="600">我們的 App</text>
+  <text x="95" y="112" text-anchor="middle" fill="#555">送「速度」</text>
+  <line x1="170" y1="95" x2="240" y2="95" stroke="#555" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="240" y="40" width="380" height="120" rx="12" fill="none" stroke="#999" stroke-dasharray="6 5"/>
+  <text x="430" y="32" text-anchor="middle" fill="#777" font-size="13">DJI 飛控韌體（我們碰不到的部分）</text>
+  <rect x="260" y="60" width="150" height="70" rx="10" fill="#fbe9e0" stroke="#b5451b"/>
+  <text x="335" y="90" text-anchor="middle" font-weight="600" fill="#b5451b">速度迴路</text>
+  <text x="335" y="112" text-anchor="middle" fill="#555">量速度→算傾角</text>
+  <line x1="410" y1="95" x2="450" y2="95" stroke="#555" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="450" y="60" width="150" height="70" rx="10" fill="#e3f2e8" stroke="#2e7d4f"/>
+  <text x="525" y="90" text-anchor="middle" font-weight="600" fill="#2e7d4f">姿態迴路</text>
+  <text x="525" y="112" text-anchor="middle" fill="#555">維持傾角</text>
+  <line x1="620" y1="95" x2="690" y2="95" stroke="#555" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="690" y="60" width="150" height="70" rx="10" fill="#f1f1f1" stroke="#888"/>
+  <text x="765" y="90" text-anchor="middle" font-weight="600">馬達</text>
+  <text x="765" y="112" text-anchor="middle" fill="#555">飛機真的動</text>
+  <path d="M765,130 L765,175 L335,175 L335,132" fill="none" stroke="#b5451b" stroke-width="2" marker-end="url(#a)"/>
+  <text x="550" y="192" text-anchor="middle" fill="#b5451b" font-size="13">量到的速度回來比較（這段來回有 0.33 秒延遲）</text>
+</svg>
+<div class="cap">紅色那一圈就是會震的地方。它在 DJI 的韌體裡，我們送再多命令也改不了它的參數。</div>
+</div>
+
+<h2><span class="n">02</span>為什麼有延遲的回饋會自己震</h2>
+<p>想像一個熱水器，轉了水龍頭要等 3 秒水溫才變。你覺得冷，往熱轉；3 秒內沒感覺，再轉；等水熱了，已經太燙。你往冷轉，同樣的事又來一次。水溫就在燙和冷之間來回擺，怎麼調都停不下來。</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang TC,sans-serif" font-size="14">
+  <line x1="60" y1="130" x2="820" y2="130" stroke="#bbb" stroke-dasharray="4 4"/>
+  <text x="825" y="134" fill="#777" font-size="12">目標</text>
+  <path d="M60,130 C110,60 160,60 210,130 S310,200 360,130 S460,60 510,130 S610,200 660,130 S760,60 810,130" fill="none" stroke="#b5451b" stroke-width="3"/>
+  <line x1="60" y1="130" x2="60" y2="215" stroke="#555"/>
+  <line x1="360" y1="130" x2="360" y2="215" stroke="#555"/>
+  <path d="M60,210 L360,210" stroke="#555" stroke-width="2" marker-end="url(#a)"/>
+  <text x="210" y="240" text-anchor="middle">一個完整來回 ≈ 延遲的 3 到 4 倍</text>
+  <text x="135" y="50" text-anchor="middle" fill="#b5451b">太快 → 往後傾</text>
+  <text x="285" y="222" text-anchor="middle" fill="#b5451b">太慢 → 往前傾</text>
+  <text x="435" y="50" text-anchor="middle" fill="#b5451b">又太快</text>
+  <text x="585" y="222" text-anchor="middle" fill="#b5451b">又太慢</text>
+</svg>
+<div class="cap">飛機的速度迴路就是那個調水溫的人。延遲 0.33 秒，來回一次就落在 1 秒上下。實際量到 0.9 秒。</div>
+</div>
+
+<div class="box">
+<b>這就是「時鐘」而不是「事件」的意思</b>
+飛過桌邊煞一下、靠近牆晃一下，這些是事件，發生的時間點跟飛機在哪裡有關，換條路線節奏就變。但我們看到不管直線、圓、機頭轉不轉，節奏都是 0.9 到 1 秒。這是時鐘，時鐘的快慢由延遲決定，跟房間無關。
+</div>
+
+<div class="box warn">
+<b>這個推論的限度</b>
+「週期是延遲的三倍」只能說跟迴路失穩的樣子相符，不能證明就是它。延遲也可能來自飛控用來估計自己速度的下視感測器，而那個東西的表現又跟地面有關。所以要先做空曠場地的直線測試，這一頁的解法才有意義。
+</div>
+
+<h2><span class="n">03</span>解法的核心：不要用那個迴路</h2>
+<p>既然會震的迴路在韌體裡調不到，唯一的辦法是<strong>不經過它</strong>。Virtual Stick 允許我們不送「速度」，改送「傾角」。這樣飛控收到的是「往前傾 3.5 度」，它只需要底層那個又快又穩的姿態迴路去維持角度，中間那個會震的速度迴路整個被跳過。</p>
+
+<div class="grid">
+<div class="card bad">
+<h3>現在：送速度</h3>
+<p>App → 速度迴路（會震） → 姿態迴路 → 馬達</p>
+<p>優點：飛控幫你保持速度，有風有漂移它自己修。<br>缺點：那個迴路在室內會自己衝停。</p>
+</div>
+<div class="card good">
+<h3>改後：送傾角</h3>
+<p>App → 姿態迴路 → 馬達</p>
+<p>優點：跳過會震的迴路，姿態迴路是 DJI 最穩的部分。<br>缺點：沒有人幫你保持速度了，漂移要自己修。</p>
+</div>
+</div>
+
+<h2><span class="n">04</span>傾角從哪裡來：算出來的，不是量出來的</h2>
+<p>這是「預言」真正的意思。繞一個半徑 0.75 公尺的圓、每圈 7 秒，物理上需要多少傾角是固定的，用公式就能算：</p>
+
+<table>
+<tr><th>項目</th><th>數值</th><th>怎麼來的</th></tr>
+<tr><td>切線速度</td><td>0.67 m/s</td><td>圓周 4.71 m ÷ 7 s</td></tr>
+<tr><td>向心加速度</td><td>0.60 m/s²</td><td>速度² ÷ 半徑</td></tr>
+<tr><td>需要的傾角</td><td>約 3.5°</td><td>atan(0.60 ÷ 9.8)</td></tr>
+<tr><td>傾角方向的轉速</td><td>51°/s</td><td>360° ÷ 7 s</td></tr>
+</table>
+
+<div class="fig">
+<svg viewBox="0 0 860 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang TC,sans-serif" font-size="14">
+  <circle cx="230" cy="160" r="110" fill="none" stroke="#999" stroke-width="6" stroke-opacity=".35"/>
+  <circle cx="230" cy="160" r="4" fill="#999"/>
+  <text x="230" y="150" text-anchor="middle" fill="#777" font-size="12">圓心</text>
+  <g stroke-width="3">
+    <g transform="translate(340,160)"><circle r="9" fill="#4a6fa5"/><line x1="0" y1="0" x2="-55" y2="0" stroke="#b5451b" marker-end="url(#a)"/><line x1="0" y1="0" x2="0" y2="-45" stroke="#2e7d4f" marker-end="url(#a)"/></g>
+    <g transform="translate(230,50)"><circle r="9" fill="#4a6fa5" fill-opacity=".5"/><line x1="0" y1="0" x2="0" y2="55" stroke="#b5451b" marker-end="url(#a)"/><line x1="0" y1="0" x2="-45" y2="0" stroke="#2e7d4f" marker-end="url(#a)"/></g>
+    <g transform="translate(120,160)"><circle r="9" fill="#4a6fa5" fill-opacity=".5"/><line x1="0" y1="0" x2="55" y2="0" stroke="#b5451b" marker-end="url(#a)"/><line x1="0" y1="0" x2="0" y2="45" stroke="#2e7d4f" marker-end="url(#a)"/></g>
+    <g transform="translate(230,270)"><circle r="9" fill="#4a6fa5" fill-opacity=".5"/><line x1="0" y1="0" x2="0" y2="-55" stroke="#b5451b" marker-end="url(#a)"/><line x1="0" y1="0" x2="45" y2="0" stroke="#2e7d4f" marker-end="url(#a)"/></g>
+  </g>
+  <g transform="translate(470,70)">
+    <line x1="0" y1="10" x2="40" y2="10" stroke="#b5451b" stroke-width="3"/><text x="50" y="15">傾角方向：永遠指向圓心，幅度固定 3.5°</text>
+    <line x1="0" y1="45" x2="40" y2="45" stroke="#2e7d4f" stroke-width="3"/><text x="50" y="50">飛行方向：沿切線</text>
+    <circle cx="20" cy="82" r="9" fill="#4a6fa5"/><text x="50" y="87">飛機在圓上的四個位置</text>
+    <text x="0" y="135" fill="#555">傾角向量只是一直繞著轉，</text>
+    <text x="0" y="160" fill="#555">每秒轉 51°，不需要量任何東西。</text>
+    <text x="0" y="185" fill="#555">這就是「前饋」：先算好、直接給。</text>
+  </g>
+</svg>
+<div class="cap">飛機在圓上任何一點，需要的傾角都是「朝圓心 3.5°」。整條軌跡需要的動作可以提前全部算好。</div>
+</div>
+
+<h2><span class="n">05</span>但沒有人保持速度了，怎麼辦</h2>
+<p>送傾角之後，飛控不再幫你修漂移。有風、或者地板讓下視定位飄一下，圓心就會慢慢跑掉。所以 App 要自己補一個回饋迴路。這裡的關鍵不是「要不要回饋」，而是<strong>回饋要故意調得很慢</strong>。</p>
+
+<div class="grid">
+<div class="card">
+<h3>前饋層：負責畫圓</h3>
+<p>算好的旋轉傾角。快、準、不看任何量測。圓的形狀 95% 靠它。</p>
+</div>
+<div class="card">
+<h3>回饋層：只負責修漂移</h3>
+<p>用 DJI 回報或視覺的速度，慢慢把圓心拉回來。反應速度壓在延遲的倒數以下，大約每 2 秒才修一點。因為慢，所以不會像飛控那樣跟延遲打架。</p>
+</div>
+</div>
+
+<div class="box ok">
+<b>為什麼這樣就不會重蹈覆轍</b>
+飛控的迴路會震，是因為它「急」：想在 0.3 秒內把速度誤差修掉，但訊號要 0.33 秒才回來。我們的回饋層故意「慢」：花 2 秒才修一點，0.33 秒的延遲對它來說微不足道。畫圓這個需要快的工作，交給不需要回饋的前饋層去做。快的不用回饋，用回饋的不求快。
+</div>
+
+<h2><span class="n">06</span>實際要走的順序</h2>
+<table>
+<tr><th>步驟</th><th>做什麼</th><th>看什麼</th></tr>
+<tr><td>0</td><td>空曠場地直線 0.5 m/s（現有按鈕，不改程式）</td><td>還震，這一頁才成立；不震，改換場地就好</td></tr>
+<tr><td>1</td><td>直線、傾角模式、固定 3° 維持 2 秒後歸零</td><td>速度曲線是否平順，沒有 1 秒一次的衝停</td></tr>
+<tr><td>2</td><td>數學圓改用旋轉傾角前饋，不接視覺</td><td>圈速是否仍約 7 秒；圓心漂移多快</td></tr>
+<tr><td>3</td><td>加上慢速回饋層修漂移</td><td>圓心能不能穩住</td></tr>
+<tr><td>4</td><td>接回循線視覺</td><td>整套跑起來</td></tr>
+</table>
+
+<div class="box warn">
+<b>安全上要先想好的</b>
+傾角模式下「歸零」不等於停下，飛機會滑行。停止要切回速度模式送零速度。第一次試要在空曠處、離人 5 公尺以上、傾角從 3° 開始、時間限制 2 秒。
+</div>
+
+<h2><span class="n">07</span>備援查證結果（2026-09-12 查 DJI 官方文件與 GitHub）</h2>
+<p>前一版說兩條備援「要查文件」。查完了，兩條都走不通，理由如下。</p>
+
+<div class="card bad" style="margin:16px 0">
+<h3>備援一：換 Sport 模式 → 不可行</h3>
+<p>MSDK V5 的 Virtual Stick 只在遙控器撥到 N（Normal）檔時有效。官方 API 列出控制權被收回的原因，其中一條是 <code>RC_NOT_P_MODE</code>：「飛機不在 P 模式，控制權交還遙控器」；另一條 <code>RC_SWITCH</code>：「飛行模式被切換，控制權交還遙控器」。教學頁也寫明遙控器要在 normal position（N 檔）。所以撥到 S 檔的瞬間，App 就失去控制權，Virtual Stick 停止。網路上「Virtual Stick 在所有模式含 Sport 都能用」的說法來自舊版 SDK v4 對老機型的文件，不適用 V5 與 Mini 4 Pro。</p>
+</div>
+
+<div class="card bad" style="margin:16px 0">
+<h3>備援二：用 DJI 自己的繞圈或任務功能 → 不適用這個題目</h3>
+<p><strong>POI 環繞。</strong>官方支援表（2025-08-01）寫 Mini 4 Pro 支援 POI、SpotLight、SmartTrack，不支援 FlyTo；DJI 客服也在 GitHub 確認 Mini 4 Pro 沒有 FlyTo。但消費級機型的 POI 有前提：教學頁寫「以下功能需先啟用 AutoSensing」，包含 Consumer POI。AutoSensing 是相機自動辨識人、車等主體；<code>POITarget</code> 的欄位是 <code>index</code>（AutoSensing 抓到的目標編號）與 <code>targetLocation</code>，<code>POIParam</code> 只有 <code>circleSpeed</code>，沒有半徑。也就是說它繞的是相機認出來的「主體」，半徑由飛機自己決定。我們的題目是繞一條地上的黑膠帶、半徑固定 0.75 公尺，沒有主體可以給它認。</p>
+<p><strong>航點任務。</strong>DJI 客服說 Mini 4 Pro 支援航點任務（2025-03-18），但 2026-06 仍有開發者回報上傳成功後 <code>startMission</code> 立刻失敗，DJI 的回覆是要照 DJI Fly 產生的航線格式。更根本的問題：航線用經緯度描述，需要 GNSS 定位，室內沒有；而且航點間距與精度是公尺級，畫不出 1.5 公尺的圓。</p>
+</div>
+
+<div class="box warn">
+<b>順便查到的兩件事</b>
+<p>1. DJI 客服在 2025-07-10 承認：Mini 4 Pro 在狹窄環境下，即使已關閉避障，仍可能被觸發而「停止移動或晃動」，建議在開闊環境使用 Virtual Stick，並說只能等未來韌體修正。有使用者在 2025-11 回報新韌體（01.00.1100）似乎修好了；DJI 在 2025-11-19 的說法是這版「會減少」抖動，不是消除。你們的飛機已經是 01.00.1100。</p>
+<p>2. 官方建議的發送頻率是 5 到 25 Hz。目前的 40 Hz 在範圍外；資料顯示 20 與 40 Hz 沒差，但把它降回範圍內是應該做的。</p>
+</div>
+
+<p><strong>結論：</strong>兩條備援都關掉之後，「改送傾角、繞過速度迴路」是唯一不依賴 DJI 開放什麼的路。前提仍然是先做空曠場地的直線測試。</p>
+
+<p class="cap" style="margin-top:32px">來源：DJI MSDK V5 API 參考 IVirtualStickManager（FlightControlAuthorityChangeReason、sendVirtualStickAdvancedParam、VirtualStickRange）；MSDK V5 教學 Virtual Stick Sample（2024-05-17）與 Intelligent Flight Sample（2025-08-01）；API 參考 IPOIMissionManager、POITarget、POIParam；GitHub dji-sdk/Mobile-SDK-Android-V5 issues #594、#670、#573、#523、#791。</p>
+
+</main>
+</body>
+</html>

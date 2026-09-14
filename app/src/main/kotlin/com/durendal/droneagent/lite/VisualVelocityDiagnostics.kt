@@ -396,7 +396,7 @@ internal class VisualVelocityDiagnostics(
                 "fixedCamera" to true, "rotationEstimated" to true,
                 "calibrationId" to FixedCameraVelocityEstimator.CALIBRATION_ID,
                 "markerDistanceMeters" to FixedCameraVelocityEstimator.MARKER_DISTANCE_METERS,
-                "calibrationMeaning" to "scene_yellow_pair_22_23_or_24_25_center_to_center_0p20m",
+                "calibrationMeaning" to "isolated_yellow_pairs_center_to_center_0p20m",
                 "motionModel" to "ransac_planar_similarity_about_image_center",
                 "modelLimitation" to "in_plane_rotation_isotropic_zoom_not_calibrated_camera_pose_or_perspective",
                 "metricScaleMeaning" to "marker_observed_or_short_term_similarity_propagated_no_height_fallback",

@@ -194,12 +194,18 @@ class VisualVelocityDiagnosticsInstrumentedTest {
             assertEquals("true", motion["controlSampleOffered"])
             assertNull(diagnostic.controlSample("b2"))
 
-            val controller = TapeTrackingController().apply {
-                start(
-                    baseline.frameNanos,
-                    TapeTrackingMode.FIXED_HEADING,
-                    fixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL,
-                )
+            val controllers = listOf(
+                FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL to 1.90,
+                FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL to 2.35,
+            ).map { (profile, expectedTarget) ->
+                TapeTrackingController().apply {
+                    start(
+                        baseline.frameNanos,
+                        TapeTrackingMode.FIXED_HEADING,
+                        fixedHeadingActuationPhaseLead = profile,
+                        fixedHeadingSpeedTarget = FixedHeadingSpeedTarget.STEP_085,
+                    )
+                } to expectedTarget
             }
             val path = TapeCenterlinePath(
                 sourceWidth = 640,
@@ -232,7 +238,10 @@ class VisualVelocityDiagnosticsInstrumentedTest {
                 actualGroundSpeedMetersPerSecond = 0.70,
                 speedFeedbackSampleAtNanos = sample.frameNanos,
             )
-            fun consume(input: VisualVelocityDiagnostics.ControlSample): TapeTrackingDecision {
+            fun consume(
+                controller: TapeTrackingController,
+                input: VisualVelocityDiagnostics.ControlSample,
+            ): TapeTrackingDecision {
                 val now = input.frameNanos + 1L
                 controller.updateVisualVelocity(
                     input.forwardMps, input.rightMps, input.aircraftHeadingDegrees,
@@ -241,15 +250,22 @@ class VisualVelocityDiagnosticsInstrumentedTest {
                 controller.observe(observation, now)
                 return controller.tick(now)
             }
-            controller.observe(observation, sample.frameNanos)
-            val unmeasured = controller.tick(sample.frameNanos)
-            assertEquals(1.60, unmeasured.commandTargetSpeedMetersPerSecond, 1e-9)
-            val driven = consume(sample)
-            assertEquals(0.12, checkNotNull(driven.measuredAlongTrackSpeedMetersPerSecond), 0.01)
-            assertEquals(1.90, driven.commandTargetSpeedMetersPerSecond, 1e-9)
-            assertTrue(driven.commandTargetSpeedMetersPerSecond > unmeasured.commandTargetSpeedMetersPerSecond)
+            controllers.forEach { (controller, expectedTarget) ->
+                controller.observe(observation, sample.frameNanos)
+                val unmeasured = controller.tick(sample.frameNanos)
+                assertEquals(1.60, unmeasured.commandTargetSpeedMetersPerSecond, 1e-9)
+                val driven = consume(controller, sample)
+                assertEquals(0.12, checkNotNull(driven.measuredAlongTrackSpeedMetersPerSecond), 0.01)
+                assertEquals(expectedTarget, driven.commandTargetSpeedMetersPerSecond, 1e-9)
+                assertTrue(driven.commandTargetSpeedMetersPerSecond > unmeasured.commandTargetSpeedMetersPerSecond)
+            }
 
-            val invalid = observe(diagnostic, translated, results) {
+            // Controller class loading must not turn a context-rejection test into
+            // a frame-gap test; keep the image timestamps independent of wall time.
+            val invalid = observe(
+                diagnostic, translated, results,
+                frameNanos = sample.frameNanos + 100_000_000L,
+            ) {
                 it.copy(cameraPitchCommandPending = true)
             }
             val revoked = checkNotNull(diagnostic.controlSample("b3"))
@@ -258,10 +274,12 @@ class VisualVelocityDiagnosticsInstrumentedTest {
             assertNull(revoked.rightMps)
             assertEquals("CAMERA_PITCH_PENDING", revoked.reason)
             assertEquals("false", invalid["controlSampleOffered"])
-            val withoutFeedback = consume(revoked)
-            assertNull(withoutFeedback.measuredAlongTrackSpeedMetersPerSecond)
-            assertEquals(0.0, withoutFeedback.speedFeedbackBoostMetersPerSecond, 0.0)
-            assertEquals(1.60, withoutFeedback.commandTargetSpeedMetersPerSecond, 1e-9)
+            controllers.forEach { (controller, _) ->
+                val withoutFeedback = consume(controller, revoked)
+                assertNull(withoutFeedback.measuredAlongTrackSpeedMetersPerSecond)
+                assertEquals(0.0, withoutFeedback.speedFeedbackBoostMetersPerSecond, 0.0)
+                assertEquals(1.60, withoutFeedback.commandTargetSpeedMetersPerSecond, 1e-9)
+            }
 
             repeat(5) { observe(diagnostic, translated, results) }
             assertEquals(0.0, checkNotNull(diagnostic.controlSample("b3")?.forwardMps), 0.005)
@@ -360,11 +378,12 @@ class VisualVelocityDiagnosticsInstrumentedTest {
         diagnostic: VisualVelocityDiagnostics,
         frame: Mat,
         results: LinkedBlockingQueue<Map<String, String>>,
+        frameNanos: Long? = null,
         changeContext: (VisualVelocityDiagnostics.FrameContext) -> VisualVelocityDiagnostics.FrameContext = { it },
     ): Map<String, String> {
         Thread.sleep(100)
         val currentContext = changeContext(context())
-        diagnostic.submitRgba(frame, System.nanoTime(), currentContext)
+        diagnostic.submitRgba(frame, frameNanos ?: System.nanoTime(), currentContext)
         return checkNotNull(results.poll(10, TimeUnit.SECONDS)) { "visual velocity result did not arrive" }
     }
 

@@ -304,18 +304,30 @@ commandSpeed = sqrt(forward^2 + right^2)
 - 直線測試另以最多 5 Hz 呼叫非同步 `getValue(KeyAircraftVelocity, callback)`，從取得控權期間持續到歸零續錄結束；同時最多一個請求。停止、斷線或離開前景後不再發起讀取。未返回的請求不因換趟而清空其在途名額；若 SDK 一直不回覆，只暫停診斷取樣，不阻擋飛行控制。
 - `velocity_read_request`／`velocity_read_result` 使用 `source=async_get`、`attemptId` 與 `requestId` 配對，保存請求／回覆時間、`roundTripMs`、請求與回覆階段、原始 XYZ、地速與沿向投影，以及當時 listener 快取值／接收時間。遲到回覆仍屬原趟並標記 `scopeActive=false`；失敗或非有限數值不能當成有效零速。`success` 只表示 API 回覆未報錯，`valueValid` 只表示數值有限，兩者均不保證感測資料新鮮或準確；往返時間也不是感測器延遲。
 - 既有 `velocity` 事件明確標記 `source=listener`。主動讀取結果只記錄，不呼叫 `publishAircraftVelocity`、不刷新控制器的速度時間、不加倍率或改飛行命令。SDK 主動讀取是否也觸發 listener，須由兩路紀錄比對，不能預先假定兩路互不影響。按鈕與起停操作不變。
-- 兩個直線實驗及 B2／B3 固定機頭模式會同時啟停影像測速，記錄 `visual_velocity_session`／`visual_velocity_result`／`visual_velocity_error`。直線沿用測試 `attemptId`，B2／B3 分別使用獨立的 `session-b2-startNanos`／`session-b3-startNanos`；停止、接管、斷線或離開前景即結束，舊趟收尾不會停止新趟。使用解碼後的原始 RGBA，不讀畫面截圖；獨立工作執行緒只容許一張在途影像、最長邊 848 像素、接納上限 15 Hz。忙碌影像直接略過、不排隊，並記錄丟棄計數。
-- **B3 改為「視覺速度回饋」**（`CURVATURE_FEEDFORWARD_16_VISUAL`），不再是只調高指令的快檔。B2 與 B3 的巡航指令／合成速度上限均為 **1.60／1.90 m/s**，保留沿線速度目標 0.70 m/s、相位超前 16°、速度斜率 1.60 m/s²、接管及失線處理；B2 保留 DJI 速度回饋作對照，B3 僅以視覺沿線速度計算既有加速補償，不接受 DJI 速度覆蓋。每次控制 tick 讀取本趟最新影像結果，依取樣及當前機頭方向轉換機體座標，再沿控制方向投影；樣本須不早於本趟、無未來時戳且不超過 250 ms，數值／機頭有效、地速至少 0.05 m/s，並保留原 45° 方向相容檢查。失效、過期或缺值立即撤掉額外速度補償，基礎循線及原有減速斜率仍在，不把缺值當零速、不回退到 DJI 速度冒充視覺回饋。這證明控制輸入來源已切換，不是實體提速或圈速改善的保證。
+- 兩個直線實驗及 B2／B3／B4 固定機頭模式會同時啟停影像測速，記錄 `visual_velocity_session`／`visual_velocity_result`／`visual_velocity_error`。直線沿用測試 `attemptId`，B2／B3／B4 分別使用獨立的 `session-b2-startNanos`／`session-b3-startNanos`／`session-b4-startNanos`；停止、接管、斷線或離開前景即結束，舊趟收尾不會停止新趟。使用解碼後的原始 RGBA，不讀畫面截圖；獨立工作執行緒只容許一張在途影像、最長邊 848 像素、接納上限 15 Hz。忙碌影像直接略過、不排隊，並記錄丟棄計數。
+- **B3 為「視覺速度回饋」**（`CURVATURE_FEEDFORWARD_16_VISUAL`），不再是只調高指令的快檔。B2 與 B3 的巡航指令／合成速度上限均為 **1.60／1.90 m/s**，保留沿線速度目標 0.70 m/s、相位超前 16°、速度斜率 1.60 m/s²、接管及失線處理；B2 保留 DJI 速度回饋作對照，B3 僅接受視覺沿線速度，供既有曲率前饋與加速補償使用，不接受 DJI 速度覆蓋。每次控制 tick 讀取本趟最新影像結果，依取樣及當前機頭方向轉換機體座標，再沿控制方向投影；樣本須不早於本趟、無未來時戳且不超過 250 ms，數值／機頭有效、地速至少 0.05 m/s，並保留原 45° 方向相容檢查。失效、過期或缺值立即撤掉額外速度補償，基礎循線及原有減速斜率仍在，不把缺值當零速、不回退到 DJI 速度冒充視覺回饋。這證明控制輸入來源已切換，不是實體提速或圈速改善的保證。
 - 測速使用前後向 KLT 與 RANSAC 相似變換，在影像中心分離平移、平面旋轉與等向縮放；另檢查仿射變形，明顯異向縮放／剪切以 `NON_SIMILARITY_MOTION` 拒絕。這不是完整相機姿態或透視補償；地板濾色及黃色圓貼紙篩選是本場地規則，不是通用辨識或編號 OCR。
 - 公尺尺度採用使用者已確認的 **22–23、24–25 圓心距離各 0.20 m**，不再使用 75° 名目視角、舊倍率或高度備援。只有孤立近鄰、尺寸相容的貼紙對可作尺度參考，不使用未知跨組距離；兩次連續相容觀察才能建立尺度。貼紙離開畫面時只在有效影像配準下傳播尺度，最長 10 秒；配準失敗即清除尺度，重新看到貼紙後再建立。重見貼紙時與預測尺度差異超過 8% 會失效，不把錯誤比例硬套到速度。
+- **貼紙數量修正（2026-09-10）：** 已取消「同畫面超過四張就不採用貼紙校準」的限制，候選點緩衝區按需擴充並重複使用，不改成另一個固定張數上限。多組貼紙仍須符合互為近鄰、尺寸相容及配對距離一致性；新增尺標應維持每組圓心距離 0.20 m、組間分離，不能把任意兩張當成已知尺度。校準識別改為 `yellow_isolated_pairs_measured_20cm_similarity`，不再以 22–25 編號暗示程式會讀取編號。手機原生回歸已確認同畫面七組有效配對加一張未配對貼紙可測速、重置後減為一組不混入舊候選、互相矛盾的配對不能建立尺度；新增實體貼紙後的恢復時間與圈速仍待實測。
 - `visual_velocity_result` 保存位移、`forwardMps`／`rightMps`、`rotationDegrees`、`imageScale`、`metersPerPixel`、`scaleSource`、`scaleAgeMs`、`markerDistancePixels`、`markerScaleErrorPercent`，以及追蹤點、殘差與處理時間。`motionValid` 代表像素位移有效；`valueValid` 另要求有效尺度與上下文。無尺度／尺度過期時保留像素位移，但公尺速度失效，不當成有效零速。換趟、影像尺寸改變或間隔超過 500 ms 會重建基準；遲到結果不得改標成新趟。
-- 主執行緒於起始建立不可變上下文快取，直線使用既有 100 ms watchdog、B2／B3 使用既有 50 ms 控制週期更新。上下文超過 250 ms、機頭資料超過 1 秒、鏡頭命令尚未完成或非向下時，公尺速度失效；恢復支援條件時重建影像基準。鏡頭角度是已接受的命令，不是實測姿態；高度只供對照。`frameNanos` 是 App 接納解碼影像的時間，不是曝光時間。直線及 B2 的影像測速仍為唯讀；B3 的 `visual_velocity_*` 以 `controlFeedback=true` 表示該趟啟用，`controlSampleOffered` 表示提供了有效樣本，兩者都不是實際採用的證明。真正採用須看 `control` 的 `speedFeedbackSource=visual_velocity`、`controlFeedback=true`、`alongTrackSpeed`、樣本時間及 `speedFeedbackBoost`；控制採用前仍會檢查新鮮度及方向。視覺結果不回寫 DJI listener、不偽造其時間，失效結果會取代舊有效值。遮擋錄影的離線回放不等同原始影像串流，尺標重現的一致性也不等同已驗證整圈實速。
+- 主執行緒於起始建立不可變上下文快取，直線使用既有 100 ms watchdog、B2／B3／B4 使用既有 50 ms 控制週期更新。上下文超過 250 ms、機頭資料超過 1 秒、鏡頭命令尚未完成或非向下時，公尺速度失效；恢復支援條件時重建影像基準。鏡頭角度是已接受的命令，不是實測姿態；高度只供對照。`frameNanos` 是 App 接納解碼影像的時間，不是曝光時間。直線及 B2 的影像測速仍為唯讀；B3／B4 的 `visual_velocity_*` 以 `controlFeedback=true` 表示該趟啟用，`controlSampleOffered` 表示提供了有效樣本，兩者都不是實際採用的證明。`control` 的 `speedFeedbackSource=visual_velocity`、`controlFeedback=true`、`alongTrackSpeed` 及樣本時間表示控制器接受該筆投影，不保證每個 tick 都重新補償（例如 B3 的 COASTING 會沿用既有命令）。須再比對補償值、實際送出軸值；B4 另有下節的動態補償欄位。視覺結果不回寫 DJI listener、不偽造其時間，失效結果會取代舊有效值。遮擋錄影的離線回放不等同原始影像串流，尺標重現的一致性也不等同已驗證整圈實速。
 - `virtual_stick` 記錄實際交給 MSDK 的軸值。直線測試另有 500 ms 命令效期，送幀器檢查到過期即歸零；Android／MSDK 不是硬即時系統，這不是機體在 500 ms 內停住的保證。
 - 既有循線 `control` 新增 `speedFeedbackSampleNanos`、`speedFeedbackObservedNanos`、`speedFeedbackSampleAgeMs`、`speedFeedbackUnavailableReason`、`speedFeedbackDirectionError`，用來辨別當時 observe 接受／拒絕的速度樣本與後續沿用的快取；未改 B2／C 控制參數。
 - 實速仍以影片中 A、B 記號通過同一影像基準的位置及時間差計算，不用按鈕按下至停止的總時間代替。`session_start.wallTimeMillis` 只供定位檔案；App 時戳不是相機曝光時間。
 - 每趟停止後會等待 trace flush；交還控權未確認時禁止新趟，可按「重試交還控制權」或使用實體 RC 接管。Flush 不等同斷電安全的 fsync；仍應按第四節將 trace、Flight Log 及影片複製到電腦。
 
 **裝置驗證注意：** 本專案的 `connectedDebugAndroidTest` 在實際執行後會卸載 App。持有飛行資料的 Pixel 必須先完整備份；若使用測試 APK 手動執行 `adb shell am instrument`，不要額外卸載主 App。完成後確認正式使用的 APK 已裝回，並核對原始 trace 的 SHA-256。
+
+### 6.8 第二階段 B4：動態提前＋增益
+
+- **操作：** 實驗列保留 B2／B3，旁邊新增「方案 B4：動態提前＋增益」與獨立的「B4 沿線目標」選擇按鈕。預設沿線目標 **0.75 m/s**、合成命令上限 **2.05 m/s**；可循環選擇 `0.70→0.75→0.80→0.85 m/s`，對應上限 `1.90→2.05→2.20→2.35 m/s`。選擇本身不啟動飛行，運行／等待控權／其他實驗期間不能變更；每趟鎖定起始選擇，不會自動升級。這兩組數字分別是期望實速與命令限制，不是已量到的飛行速度。
+- **控制：** `SPEED_SCHEDULED_VISUAL` 與 B3 共用實際視覺輸入及失效檢查。以本 tick 的「速度×曲率前饋＋導引殘差」經限幅後的虛擬轉率排程，經 0.15 s 時間常數濾波後，提前角為 `atan(ωT)`，相對增益為 `sqrt(1+(ωT)²) / sqrt(1+(0.71T)²)`。名目命令為 `1.60 × (沿線目標/0.70) × 相對增益`，再於剩餘命令額度內加入速度誤差補償；不在原有經驗基準上再疊一個 `1/K`。
+- **模型限制：** `T=tan(16°)/0.71≈0.404 s` 是由已飛的 16° 與約 8.85 s／圈參考工作點初始化的**有界經驗模型**，不是辨識出的飛機時間常數，也不是已量到的影像延遲。沒有另加第二段延遲。18:20 B3 命令與視覺向量的一階擬合，向量 RMSE 約 0.217 m/s，且通道延遲與機體響應不可分，因此沒有把其約 0.265 的增益直接取倒數套入飛控。
+- **限制：** B4 虛擬轉率上限為 90°/s（避免旧 60°/s 將指令方向週期限制在至少 6 s）；提前角最多 ±35°、變化率最多 60°/s、相對增益最多 1.20。保留 1.60 m/s² 命令速度斜率與路徑信心／前視距離／偏移減速，側向修正合成後再限幅。送幀器只有 B4 逐命令明確套用所選合成上限、最高 2.35 m/s，超限時等比例縮放以保持方向；其他模式仍使用原各軸 2.0 m/s 限制，手動搖桿仍為 0.5 m/s。
+- **失效與停止：** 缺失／失效／過期視覺速度使名目目標回到 1.60 m/s 基準、速度加成歸零、模型增益歸一，提前角平滑退回零；不以 SDK 備援、不把缺值當有效零速。COASTING 仍依舊有保持方向／減速處理，但不沿用 B4 模型補償；重啟、影格恢復與離開 COASTING 不接受恢復前的舊視覺樣本。接管、失線停止與控權規則不變。
+- **紀錄：** `tracking_start` 保存 `fixedHeadingSpeedTarget`、`fixedHeadingDesiredAlongTrackSpeed`、命令上限與 `actuationModelSeed` 等模型參數。每筆 `control` 保存 `appliedPhaseLeadDegrees`、`actuationGain`、`scheduledTurnRateRadiansPerSecond`、`desiredAlongTrackSpeedMetersPerSecond`、`maximumCommandSpeedMetersPerSecond`、`actuationCompensationActive`。最後一欄表示本 tick 有有效視覺輸入參與排程；失效退場時可能仍有正在退回零的提前角，應讀取實際角度與送出向量，不能只看旗標。
+- **地面驗證／待實飛：** 129 項控制器測試、8 項手機原生測試與 10 組實際編譯控制器的合成輸入 smoke scenario 通過；影像測速→B4 輸入及送幀限幅皆有覆蓋。手機鎖屏，另以真正 MainActivity View 的離屏渲染與四次選擇按鈕操作核對畫面；未驗證解鎖後的手指操作，未啟動任何飛行。證據保存在 `/Users/vic/drone-flights/2026-09-10-circle/stage-two-development/`。**5.5–6.5 s／圈仍待同跑道實體地標計時與偏線比較，不能以程式通過測試宣稱達標。** 未加入圓擬合、EKF 或 ANGLE 模式。
+
 
 ## 七、若 DJI 紀錄可以解析：跨時鐘對齊
 

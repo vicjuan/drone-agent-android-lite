@@ -1,5 +1,13 @@
 package com.durendal.droneagent.lite
 
+internal enum class StraightLineDirection(
+    val displayName: String,
+    val forwardSign: Double,
+) {
+    FORWARD("前", 1.0),
+    BACKWARD("後", -1.0),
+}
+
 internal enum class StraightLineSpeedPhase {
     BASELINE,
     CRUISE,
@@ -16,7 +24,7 @@ internal enum class StraightLineStopReason {
 
 internal data class StraightLineSpeedStep(
     val phase: StraightLineSpeedPhase,
-    val direction: DirectionalVelocityPulseDirection,
+    val direction: StraightLineDirection,
     override val forwardMetersPerSecond: Double,
     override val rightMetersPerSecond: Double,
 ) : HorizontalPulseStep {
@@ -33,7 +41,7 @@ internal data class StraightLineSpeedStep(
  * BRAKING is a real neutral-command interval, not evidence that the aircraft stopped.
  */
 internal class StraightLineSpeedSequence(
-    private val direction: DirectionalVelocityPulseDirection,
+    private val direction: StraightLineDirection,
     private val speedMetersPerSecond: Double,
     private val maximumCruiseNanos: Long,
     private val baselineNanos: Long = 2_000_000_000L,
@@ -52,10 +60,6 @@ internal class StraightLineSpeedSequence(
     private var nextTransitionAtNanos = 0L
 
     init {
-        require(
-            direction == DirectionalVelocityPulseDirection.FORWARD ||
-                direction == DirectionalVelocityPulseDirection.BACKWARD,
-        )
         require(speedMetersPerSecond.isFinite() && speedMetersPerSecond > 0.0 && speedMetersPerSecond <= 0.5)
         require(maximumCruiseNanos > 0L && baselineNanos >= 0L && brakingNanos > 0L && maximumTickGapNanos > 0L)
     }

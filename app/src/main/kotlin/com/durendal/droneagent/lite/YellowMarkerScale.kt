@@ -9,7 +9,7 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 
 /** Scene-specific scale references, not sticker OCR or a calibrated camera-pose solver.
- * The four yellow round stickers form two isolated close pairs, each measured at 0.20 m.
+ * Yellow round stickers form isolated close pairs, each measured at 0.20 m.
  * Cross-pair distances are unknown and must never be used as references.
  */
 internal class YellowMarkerScale : AutoCloseable {
@@ -31,10 +31,10 @@ internal class YellowMarkerScale : AutoCloseable {
     private val high = Scalar(40.0, 255.0, 255.0)
     private val component = IntArray(5)
     private val centre = DoubleArray(2)
-    private val x = DoubleArray(MAX_MARKERS)
-    private val y = DoubleArray(MAX_MARKERS)
-    private val diameter = DoubleArray(MAX_MARKERS)
-    private val nearest = IntArray(MAX_MARKERS)
+    private var x = DoubleArray(0)
+    private var y = DoubleArray(0)
+    private var diameter = DoubleArray(0)
+    private var nearest = IntArray(0)
     private var metersPerPixel: Double? = null
     private var lastObservedNanos: Long? = null
     private var pendingScale: Double? = null
@@ -84,6 +84,15 @@ internal class YellowMarkerScale : AutoCloseable {
         return Observation(null, null, age, pairPixels, error, if (age != null) "SCALE_EXPIRED" else "NO_SCALE")
     }
 
+    private fun ensureMarkerCapacity(required: Int) {
+        if (required <= x.size) return
+        val capacity = maxOf(required, 4, x.size * 2)
+        x = x.copyOf(capacity)
+        y = y.copyOf(capacity)
+        diameter = diameter.copyOf(capacity)
+        nearest = nearest.copyOf(capacity)
+    }
+
     private fun measurePair(rgb: Mat): Double? {
         Imgproc.cvtColor(rgb, hsv, Imgproc.COLOR_RGB2HSV)
         Core.inRange(hsv, low, high, mask)
@@ -104,15 +113,14 @@ internal class YellowMarkerScale : AutoCloseable {
                 area.toDouble() / (width * height) < 0.45 ||
                 width.toDouble() / height !in 0.65..1.54
             ) continue
-            // More than the four expected stickers means this scene is ambiguous.
-            if (count == MAX_MARKERS) return null
+            ensureMarkerCapacity(count + 1)
             centroids.get(index, 0, centre)
             x[count] = centre[0]
             y[count] = centre[1]
             diameter[count] = sqrt(width.toDouble() * height)
             count++
         }
-        if (count !in 2..MAX_MARKERS) return null
+        if (count < 2) return null
         for (a in 0 until count) {
             var best = Double.POSITIVE_INFINITY
             nearest[a] = -1
@@ -134,7 +142,7 @@ internal class YellowMarkerScale : AutoCloseable {
             val distance = hypot(x[a] - x[b], y[a] - y[b])
             val meanDiameter = (diameter[a] + diameter[b]) * 0.5
             // This size/separation gate belongs to the photographed round-sticker setup.
-            // It excludes the unknown, much longer distances between the two pairs.
+            // It excludes the unknown, much longer distances between isolated pairs.
             if (diameter[a] / diameter[b] !in 0.70..1.43 || distance / meanDiameter !in 6.0..16.0) continue
             if (pairCount > 0 && abs(distance / first - 1.0) > MAX_SCALE_DISAGREEMENT) return null
             if (pairCount == 0) first = distance
@@ -155,7 +163,6 @@ internal class YellowMarkerScale : AutoCloseable {
 
     companion object {
         const val DISTANCE_METERS = 0.20
-        private const val MAX_MARKERS = 4
         private const val MAX_AGE_MS = 10_000.0
         private const val MAX_SCALE_DISAGREEMENT = 0.08
     }

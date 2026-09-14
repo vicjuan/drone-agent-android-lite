@@ -10,32 +10,17 @@ import org.junit.Test
 class MathematicalCircleControllerTest {
     @Test
     fun `circle starts with the requested radius speed and tangent`() {
-        val controller = MathematicalCircleController()
+        val controller = MathematicalCircleController(diameterMeters = 2.0, secondsPerLap = 10.0)
 
         val command = controller.start(1_000_000_000L, headingDegrees = 30.0)
 
-        assertEquals(PI * 1.5 / 7.5, controller.tangentialSpeedMetersPerSecond, 1e-12)
-        assertEquals(0.75, controller.radiusMeters, 0.0)
-        assertEquals(48.0, controller.angularRateDegreesPerSecond, 0.0)
+        assertEquals(PI * 2.0 / 10.0, controller.tangentialSpeedMetersPerSecond, 1e-12)
+        assertEquals(1.0, controller.radiusMeters, 0.0)
+        assertEquals(36.0, controller.angularRateDegreesPerSecond, 0.0)
         assertEquals(controller.tangentialSpeedMetersPerSecond, command.forwardMetersPerSecond, 1e-12)
         assertEquals(0.0, command.rightMetersPerSecond, 1e-12)
         assertEquals(30.0, command.tangentHeadingDegrees, 0.0)
         assertFalse(command.completed)
-    }
-
-    @Test
-    fun `racing schedule is faster without changing the skating default`() {
-        val skating = MathematicalCircleController()
-        val racing = MathematicalCircleController(
-            secondsPerLap = MathematicalCircleController.RACING_SECONDS_PER_LAP,
-        )
-
-        assertEquals(7.5, skating.secondsPerLap, 0.0)
-        assertEquals(PI * 1.5 / 7.5, skating.tangentialSpeedMetersPerSecond, 1e-12)
-        assertEquals(6.75, racing.secondsPerLap, 0.0)
-        assertEquals(PI * 1.5 / 6.75, racing.tangentialSpeedMetersPerSecond, 1e-12)
-        assertEquals(53.333333333333336, racing.angularRateDegreesPerSecond, 1e-12)
-        assertEquals(20_250_000_000L, racing.scheduledDurationNanos)
     }
 
     @Test
@@ -101,23 +86,4 @@ class MathematicalCircleControllerTest {
         }
     }
 
-    @Test
-    fun `armed log identifies the mathematical schedule`() {
-        val message =
-            mathematicalCircleArmedLogMessage(
-                mode = "RACING",
-                diameterMeters = 2.0,
-                secondsPerLap = 7.5,
-                laps = 3,
-                speedMetersPerSecond = 0.838,
-                angularRateDegreesPerSecond = 48.0,
-                headingDegrees = -12.5,
-            )
-
-        assertEquals(
-            "mathematical circle armed mode=RACING diameter=2.00 secondsPerLap=7.5 " +
-                "laps=3 speed=0.838 angularRate=48.0 heading=-12.5",
-            message,
-        )
-    }
 }

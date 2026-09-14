@@ -38,7 +38,15 @@ data class VirtualStickStatus(
     val enabled: Boolean = false,
     val advancedMode: Boolean = false,
     val authority: String = "UNKNOWN",
-)
+) {
+    /** UNKNOWN is accepted by operator policy, but never enables a disabled session. */
+    val hasMsdkAuthority: Boolean
+        get() = enabled && (authority == "MSDK" || authority == "UNKNOWN")
+
+    /** An unknown owner only confirms release once virtual stick reports disabled. */
+    val isReleased: Boolean
+        get() = authority == "RC" || (!enabled && authority == "UNKNOWN")
+}
 
 internal enum class VirtualStickFrameRate(
     val hertz: Long,
@@ -61,8 +69,11 @@ data class VirtualStickFrameProfile(
     val horizontalCommandUpdatedAtNanos: Long,
     val configuredRateHz: Long,
     val succeeded: Boolean,
-    val forwardMetersPerSecond: Double,
-    val rightMetersPerSecond: Double,
+    val rollPitchMode: String,
+    val forwardMetersPerSecond: Double?,
+    val rightMetersPerSecond: Double?,
+    val rollDegrees: Double?,
+    val pitchDegrees: Double?,
     val climbMetersPerSecond: Double,
     val yawMode: String,
     val yawValue: Double,
@@ -75,7 +86,7 @@ data class VirtualStickFrameProfile(
  * frames stop arriving. Producing frames is therefore this class's job alone —
  * callers only move sticks, and a released stick is a zero, never a missing frame.
  *
- * Axis semantics (advanced mode, BODY frame) as measured on a Mini 4 Pro on
+ * VELOCITY axis semantics (advanced mode, BODY frame) as measured on a Mini 4 Pro on
  * 2026-08-14: MSDK's `roll` drives the body X axis (forward/back) and `pitch`
  * drives the body Y axis (right/left) — the opposite of what the field names
  * suggest, and the opposite of the mapping in the main project's
@@ -83,11 +94,14 @@ data class VirtualStickFrameProfile(
  * sideways on the "forward" button, so the field names lose to the aircraft:
  *   roll = forward m/s        pitch = right m/s
  *   verticalThrottle = up m/s yaw   = clockwise rate or ground-frame heading
+ * ANGLE commands instead use raw DJI rotation fields in degrees: positive roll
+ * tilts right and negative pitch tilts forward. They never use the velocity mapping.
  */
 class VirtualStickSession(
     private val onStatus: (VirtualStickStatus) -> Unit,
     private val onFrameSummary: (String) -> Unit = {},
     private val onFrameSent: (VirtualStickFrameProfile) -> Unit = {},
+    private val onBeforeFrame: (Long) -> Unit = {},
     private val manager: IVirtualStickManager = VirtualStickManager.getInstance(),
 ) {
 
@@ -95,8 +109,10 @@ class VirtualStickSession(
         Thread(runnable, "LiteVirtualStick").apply { isDaemon = true }
     }
 
-    @Volatile private var commandedForwardMetersPerSecond = 0.0
-    @Volatile private var commandedRightMetersPerSecond = 0.0
+    // Mode and raw DJI horizontal fields are read/written together under this monitor.
+    private var horizontalMode = RollPitchControlMode.VELOCITY
+    private var commandedRoll = 0.0
+    private var commandedPitch = 0.0
     @Volatile private var commandedClimbMetersPerSecond = 0.0
     @Volatile private var yawCommand: YawCommand = YawCommand.Rate(0.0)
     @Volatile private var horizontalCommandUpdatedAtNanos = 0L
@@ -112,31 +128,20 @@ class VirtualStickSession(
 
     private val stateListener = object : VirtualStickStateListener {
         override fun onVirtualStickStateUpdate(state: VirtualStickState) {
-            val owner = state.currentFlightControlAuthorityOwner?.name ?: "UNKNOWN"
-            // Frames follow authority, in both directions. Only the owner's frames
-            // mean anything, so this app goes quiet the moment the aircraft names
-            // someone else — and resumes as soon as it names MSDK again.
-            //
-            // The resume half is not optional: enableVirtualStick returns before the
-            // aircraft has finished handing authority over, so the first state update
-            // still says RC. A one-way stop there killed the frame stream for the
-            // whole flight (2026-08-17): the sticks and the height loop produced
-            // commands that were never sent, while takeoff and landing kept working
-            // because those are action keys, not frames.
-            if (state.isVirtualStickEnable) {
-                if (owner == MSDK_AUTHORITY_OWNER) {
-                    if (startSending()) Log.i(TAG, "authority is MSDK; frames running")
-                } else if (stopSending()) {
-                    Log.w(TAG, "authority owner is $owner; frames paused")
-                }
-            }
-            onStatus(
-                VirtualStickStatus(
-                    enabled = state.isVirtualStickEnable,
-                    advancedMode = state.isVirtualStickAdvancedModeEnabled,
-                    authority = owner,
-                ),
+            val status = VirtualStickStatus(
+                enabled = state.isVirtualStickEnable,
+                advancedMode = state.isVirtualStickAdvancedModeEnabled,
+                authority = state.currentFlightControlAuthorityOwner?.name ?: "UNKNOWN",
             )
+            // Mini 3 Pro reported enabled + UNKNOWN after a successful enable.
+            // Accept that owner like MSDK; explicit takeover or disable still stops frames.
+            // Resume on later accepted states: enable may initially report RC.
+            if (status.hasMsdkAuthority) {
+                if (startSending()) Log.i(TAG, "authority owner is ${status.authority}; frames running")
+            } else if (stopSending()) {
+                Log.w(TAG, "enabled=${status.enabled} authority=${status.authority}; frames paused")
+            }
+            onStatus(status)
         }
 
         override fun onChangeReasonUpdate(reason: FlightControlAuthorityChangeReason) {
@@ -173,6 +178,7 @@ class VirtualStickSession(
      * Returns control to the RC. A neutral frame is sent before the link drops so
      * the aircraft never inherits the last non-zero command as its final input.
      */
+    @Synchronized
     fun disable(onResult: (String?) -> Unit) {
         zeroAxes()
         stopSending()
@@ -220,9 +226,11 @@ class VirtualStickSession(
                 commandedClimbMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_VERTICAL_MPS
             }
             StickSide.RIGHT -> {
+                horizontalMode = RollPitchControlMode.VELOCITY
                 horizontalCommandValidUntilNanos = 0L
-                commandedRightMetersPerSecond = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
-                commandedForwardMetersPerSecond = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                commandedPitch = x.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                commandedRoll = y.coerceIn(-1.0, 1.0) * MAX_HORIZONTAL_MPS
+                horizontalCommandUpdatedAtNanos = System.nanoTime()
             }
         }
     }
@@ -270,35 +278,83 @@ class VirtualStickSession(
     /** Fixed body-forward speed used only by the obstacle-gated pulse. */
     @Synchronized
     fun setForwardOnly(metersPerSecond: Double) {
+        horizontalMode = RollPitchControlMode.VELOCITY
         horizontalCommandValidUntilNanos = 0L
-        commandedForwardMetersPerSecond = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
-        commandedRightMetersPerSecond = 0.0
+        commandedRoll = metersPerSecond.coerceIn(-MAX_HORIZONTAL_MPS, MAX_HORIZONTAL_MPS)
+        commandedPitch = 0.0
+        horizontalCommandUpdatedAtNanos = System.nanoTime()
     }
 
     /**
      * Body-frame horizontal velocity for autonomous tracking. A positive deadline
      * opts into sender-thread neutralisation even when the caller stops ticking.
      * Zero keeps the legacy unbounded command lifetime.
+     * A positive magnitude limit opts into the bounded stage-two envelope for
+     * this command only; zero retains the legacy per-axis 2.0 m/s clamp.
      */
     @Synchronized
     fun setHorizontalVelocity(
         forwardMetersPerSecond: Double,
         rightMetersPerSecond: Double,
         validUntilNanos: Long = 0L,
+        maximumMagnitudeMetersPerSecond: Double = 0.0,
     ) {
         require(validUntilNanos >= 0L)
+        require(
+            maximumMagnitudeMetersPerSecond.isFinite() &&
+                maximumMagnitudeMetersPerSecond in 0.0..MAX_EXPLICIT_HORIZONTAL_MPS,
+        )
+        if (maximumMagnitudeMetersPerSecond > 0.0) {
+            require(forwardMetersPerSecond.isFinite() && rightMetersPerSecond.isFinite())
+        }
+        horizontalMode = RollPitchControlMode.VELOCITY
         horizontalCommandValidUntilNanos = validUntilNanos
-        commandedForwardMetersPerSecond =
-            forwardMetersPerSecond.coerceIn(
-                -AUTONOMOUS_MAX_HORIZONTAL_MPS,
-                AUTONOMOUS_MAX_HORIZONTAL_MPS,
-            )
-        commandedRightMetersPerSecond =
-            rightMetersPerSecond.coerceIn(
-                -AUTONOMOUS_MAX_HORIZONTAL_MPS,
-                AUTONOMOUS_MAX_HORIZONTAL_MPS,
-            )
+        if (maximumMagnitudeMetersPerSecond == 0.0) {
+            commandedRoll =
+                forwardMetersPerSecond.coerceIn(-AUTONOMOUS_MAX_HORIZONTAL_MPS, AUTONOMOUS_MAX_HORIZONTAL_MPS)
+            commandedPitch =
+                rightMetersPerSecond.coerceIn(-AUTONOMOUS_MAX_HORIZONTAL_MPS, AUTONOMOUS_MAX_HORIZONTAL_MPS)
+        } else {
+            val magnitude = kotlin.math.hypot(forwardMetersPerSecond, rightMetersPerSecond)
+            val scale =
+                if (magnitude > maximumMagnitudeMetersPerSecond) {
+                    maximumMagnitudeMetersPerSecond / magnitude
+                } else {
+                    1.0
+                }
+            commandedRoll = forwardMetersPerSecond * scale
+            commandedPitch = rightMetersPerSecond * scale
+        }
         horizontalCommandUpdatedAtNanos = System.nanoTime()
+    }
+
+    /**
+     * Raw DJI ANGLE rotation fields, not the measured VELOCITY field mapping.
+     * Every accepted command has at most a 150 ms lease; rejection clears any
+     * prior tilt to VELOCITY zero. Commands cannot queue while authority is paused.
+     */
+    @Synchronized
+    fun setHorizontalAngles(
+        rollDegrees: Double,
+        pitchDegrees: Double,
+        validUntilNanos: Long,
+    ): Boolean {
+        val nowNanos = System.nanoTime()
+        if (
+            !rollDegrees.isFinite() || !pitchDegrees.isFinite() ||
+            kotlin.math.hypot(rollDegrees, pitchDegrees) > MAX_HORIZONTAL_ANGLE_DEGREES ||
+            validUntilNanos <= 0L || validUntilNanos <= nowNanos || sendTask == null
+        ) {
+            zeroHorizontal(nowNanos)
+            return false
+        }
+        horizontalMode = RollPitchControlMode.ANGLE
+        commandedRoll = rollDegrees
+        commandedPitch = pitchDegrees
+        horizontalCommandValidUntilNanos =
+            minOf(validUntilNanos, nowNanos + MAX_HORIZONTAL_ANGLE_LEASE_NANOS)
+        horizontalCommandUpdatedAtNanos = nowNanos
+        return true
     }
 
 
@@ -320,6 +376,17 @@ class VirtualStickSession(
         firstFrameSentAtNanos = 0L
         sendTask = sender.scheduleAtFixedRate(
             {
+                synchronized(this@VirtualStickSession) {
+                    if (sendTask == null || generation != sendGeneration) return@scheduleAtFixedRate
+                }
+                // Prepare time-sensitive phase changes before sampling the frame,
+                // outside the transport monitor to avoid caller/session lock inversion.
+                try {
+                    onBeforeFrame(System.nanoTime())
+                } catch (error: Throwable) {
+                    zeroAxes()
+                    Log.w(TAG, "frame preparation failed; sending velocity zero", error)
+                }
                 val currentYawCommand: YawCommand
                 val currentHorizontalCommandUpdatedAtNanos: Long
                 val param: VirtualStickFlightControlParam
@@ -352,8 +419,15 @@ class VirtualStickSession(
                                 currentHorizontalCommandUpdatedAtNanos,
                             configuredRateHz = activeFrameRate.hertz,
                             succeeded = sendResult.isSuccess,
-                            forwardMetersPerSecond = param.roll,
-                            rightMetersPerSecond = param.pitch,
+                            rollPitchMode = param.rollPitchControlMode.name,
+                            forwardMetersPerSecond =
+                                if (param.rollPitchControlMode == RollPitchControlMode.VELOCITY) param.roll else null,
+                            rightMetersPerSecond =
+                                if (param.rollPitchControlMode == RollPitchControlMode.VELOCITY) param.pitch else null,
+                            rollDegrees =
+                                if (param.rollPitchControlMode == RollPitchControlMode.ANGLE) param.roll else null,
+                            pitchDegrees =
+                                if (param.rollPitchControlMode == RollPitchControlMode.ANGLE) param.pitch else null,
                             climbMetersPerSecond = param.verticalThrottle,
                             yawMode = currentYawCommand.mode.name,
                             yawValue = currentYawCommand.value,
@@ -385,12 +459,17 @@ class VirtualStickSession(
                             } else {
                                 0.0
                             }
+                        val horizontalSummary =
+                            if (param.rollPitchControlMode == RollPitchControlMode.ANGLE) {
+                                "rollPitchMode=ANGLE rawRollDeg=%.2f rawPitchDeg=%.2f ".format(param.roll, param.pitch)
+                            } else {
+                                "rollPitchMode=VELOCITY fwdMps=%.2f rightMps=%.2f ".format(param.roll, param.pitch)
+                            }
                         onFrameSummary(
                             "frames=$frameCount fails=$frameFailures " +
                                 "configuredHz=${activeFrameRate.hertz} actualHz=%.3f ".format(actualRateHz) +
-                                "fwd=%.2f right=%.2f up=%.2f yawMode=%s yaw=%.1f".format(
-                                    param.roll,
-                                    param.pitch,
+                                horizontalSummary +
+                                "upMps=%.2f yawMode=%s yaw=%.1f".format(
                                     param.verticalThrottle,
                                     currentYawCommand.mode.name,
                                     currentYawCommand.value,
@@ -410,10 +489,8 @@ class VirtualStickSession(
     @Synchronized
     private fun stopSending(): Boolean {
         // Do not revive an opted-in leg when aircraft authority later returns.
-        if (horizontalCommandValidUntilNanos != 0L) {
-            commandedForwardMetersPerSecond = 0.0
-            commandedRightMetersPerSecond = 0.0
-            horizontalCommandValidUntilNanos = 0L
+        if (horizontalMode == RollPitchControlMode.ANGLE || horizontalCommandValidUntilNanos != 0L) {
+            zeroHorizontal(System.nanoTime())
         }
         val task = sendTask ?: return false
         task.cancel(false)
@@ -423,28 +500,32 @@ class VirtualStickSession(
 
     @Synchronized
     private fun zeroAxes() {
-        horizontalCommandValidUntilNanos = 0L
-        commandedForwardMetersPerSecond = 0.0
-        commandedRightMetersPerSecond = 0.0
+        zeroHorizontal(System.nanoTime())
         commandedClimbMetersPerSecond = 0.0
         yawCommand = YawCommand.Rate(0.0)
+    }
+
+    /** Caller holds the session monitor; no second horizontal command snapshot. */
+    private fun zeroHorizontal(nowNanos: Long) {
+        horizontalMode = RollPitchControlMode.VELOCITY
+        commandedRoll = 0.0
+        commandedPitch = 0.0
+        horizontalCommandValidUntilNanos = 0L
+        horizontalCommandUpdatedAtNanos = nowNanos
     }
 
     @Synchronized
     private fun currentParam(currentYawCommand: YawCommand): VirtualStickFlightControlParam {
         val nowNanos = System.nanoTime()
         if (horizontalCommandValidUntilNanos != 0L && nowNanos >= horizontalCommandValidUntilNanos) {
-            commandedForwardMetersPerSecond = 0.0
-            commandedRightMetersPerSecond = 0.0
-            horizontalCommandValidUntilNanos = 0L
-            horizontalCommandUpdatedAtNanos = nowNanos
+            zeroHorizontal(nowNanos)
         }
         return VirtualStickFlightControlParam().apply {
-            roll = commandedForwardMetersPerSecond
-            pitch = commandedRightMetersPerSecond
+            roll = commandedRoll
+            pitch = commandedPitch
             verticalThrottle = commandedClimbMetersPerSecond
             yaw = currentYawCommand.value
-            rollPitchControlMode = RollPitchControlMode.VELOCITY
+            rollPitchControlMode = horizontalMode
             verticalControlMode = VerticalControlMode.VELOCITY
             yawControlMode = currentYawCommand.mode
             rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
@@ -453,9 +534,6 @@ class VirtualStickSession(
 
     companion object {
         private const val NANOS_PER_SECOND = 1_000_000_000.0
-        /** Authority owner name that means this app's frames are the ones being flown. */
-        const val MSDK_AUTHORITY_OWNER = "MSDK"
-
         /** Deliberately gentle limits for indoor control. */
         const val MAX_HORIZONTAL_MPS = 0.5
         const val MAX_VERTICAL_MPS = 0.3
@@ -467,6 +545,9 @@ class VirtualStickSession(
          * path controller retains confidence, lookahead, offset, and loss gates.
          */
         const val AUTONOMOUS_MAX_HORIZONTAL_MPS = 2.0
+        private const val MAX_EXPLICIT_HORIZONTAL_MPS = 2.35
+        private const val MAX_HORIZONTAL_ANGLE_DEGREES = 5.0
+        private const val MAX_HORIZONTAL_ANGLE_LEASE_NANOS = 150_000_000L
         const val AUTONOMOUS_MAX_YAW_DEGREES_PER_SECOND = 100.0
         const val MAX_YAW_HEADING_DEGREES = 180.0
 

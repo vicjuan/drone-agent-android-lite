@@ -239,7 +239,7 @@
 
 - 09/04 B2 場次的 `flight-profile.tsv`：用來算 `alongTrackSpeed=null` 比例、切向/徑向分解、以及速度樣本年齡分布。
 - 08/28 硬體延遲脈衝場次的 TSV：20 次 0.5 m/s 脈衝中每次達到的峰值速度，可以先粗估 K 與 T，不必等新實驗。
-- 任何一趟 `DirectionalVelocityPulseSequence`（0.8 m/s）的記錄，用途同上。
+- 既有 `DirectionalVelocityPulseSequence`（0.8 m/s）的歷史記錄，用途同上；四方向階躍入口及專用排程已移除，不再由目前介面啟動。
 - Mini 4 Pro 在目前飛行模式與高度下，MSDK 回報的水平速度上限與加速度設定（若 MSDK 有提供對應的 key）。
 
 若這些都拿不到，第 1.2 節的直線測試是第一項的起點；它能驗證速度回授，其餘缺口（K、τ_d、T、327 ms 的組成）要靠後續針對性的實驗，不會在一趟裡補齊。

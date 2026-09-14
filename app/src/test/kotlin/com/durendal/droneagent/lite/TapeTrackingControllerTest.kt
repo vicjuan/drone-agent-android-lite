@@ -371,6 +371,126 @@ class TapeTrackingControllerTest {
         assertNull(restarted.measuredAlongTrackSpeedMetersPerSecond)
     }
 
+    @Test
+    fun `B4 horizontal commands use fresh visual feedback without falling back to SDK speed`() {
+        val controller = TapeTrackingController()
+        controller.start(
+            nowNanos = 1L,
+            mode = TapeTrackingMode.FIXED_HEADING,
+            fixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL,
+            fixedHeadingSpeedTarget = FixedHeadingSpeedTarget.STEP_075,
+        )
+        val path = observation(
+            angleDegrees = 0.0,
+            longSideFraction = 0.8,
+            heightAboveGroundMeters = 1.2,
+            confidence = 0.9,
+            centerline = metricCurvedPath(curvaturePerMeter = 0.0),
+        )
+        var step = 0L
+        fun cruise(visualSpeed: Double?, sdkSpeed: Double): TapeTrackingDecision {
+            var decision = TapeTrackingDecision(TapeTrackingPhase.RECENTERING, 0.0)
+            repeat(20) {
+                val now = ++step * 100_000_000L + 1L
+                controller.observe(
+                    path.copy(
+                        capturedAtNanos = now,
+                        actualTravelDirectionDegrees = 0.0,
+                        actualGroundSpeedMetersPerSecond = sdkSpeed,
+                        speedFeedbackSampleAtNanos = now,
+                    ),
+                    now,
+                )
+                if (visualSpeed != null) {
+                    controller.updateVisualVelocity(
+                        visualSpeed, 0.0, 0.0, 0.0, now, now, null,
+                    )
+                }
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+
+        val missing = cruise(visualSpeed = null, sdkSpeed = 0.10)
+        assertEquals(1.60, missing.forwardSpeedMetersPerSecond, 0.001)
+        assertNull(missing.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(missing.actuationCompensationActive)
+        assertEquals(0.0, missing.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.0, missing.actuationGain, 0.0)
+
+        val visual = cruise(visualSpeed = 0.10, sdkSpeed = 2.0)
+        assertEquals(0.10, checkNotNull(visual.measuredAlongTrackSpeedMetersPerSecond), 1e-9)
+        assertEquals(2.05, visual.forwardSpeedMetersPerSecond, 0.001)
+        assertEquals(0.0, visual.rightSpeedMetersPerSecond, 1e-9)
+        assertEquals(0.0, visual.yawRateDegreesPerSecond, 0.0)
+        assertTrue(visual.actuationCompensationActive)
+        assertTrue(visual.actuationGain < 1.0)
+
+        val stale = cruise(visualSpeed = null, sdkSpeed = 0.10)
+        assertEquals(1.60, stale.forwardSpeedMetersPerSecond, 0.001)
+        assertNull(stale.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(stale.actuationCompensationActive)
+        assertEquals(0.0, stale.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(1.0, stale.actuationGain, 0.0)
+        assertEquals(0.0, stale.appliedPhaseLeadDegrees, 0.0)
+    }
+
+    @Test
+    fun `selected B4 along-track target changes actual cruise but leaves B3 baseline unchanged`() {
+        val controller = TapeTrackingController()
+        val path = observation(
+            angleDegrees = 0.0,
+            longSideFraction = 0.8,
+            heightAboveGroundMeters = 1.2,
+            confidence = 0.9,
+            centerline = metricCurvedPath(curvaturePerMeter = 0.0),
+        )
+        var step = 0L
+        fun cruise(
+            profile: FixedHeadingActuationPhaseLead,
+            target: FixedHeadingSpeedTarget,
+        ): TapeTrackingDecision {
+            controller.stop()
+            controller.start(
+                nowNanos = step * 100_000_000L + 1L,
+                mode = TapeTrackingMode.FIXED_HEADING,
+                fixedHeadingActuationPhaseLead = profile,
+                fixedHeadingSpeedTarget = target,
+            )
+            var decision = TapeTrackingDecision(TapeTrackingPhase.RECENTERING, 0.0)
+            repeat(20) {
+                val now = ++step * 100_000_000L + 1L
+                controller.observe(path.copy(capturedAtNanos = now), now)
+                controller.updateVisualVelocity(0.70, 0.0, 0.0, 0.0, now, now, null)
+                decision = controller.tick(now)
+            }
+            return decision
+        }
+
+        val baseline = cruise(
+            FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL,
+            FixedHeadingSpeedTarget.BASELINE,
+        )
+        assertTrue(baseline.forwardSpeedMetersPerSecond in 1.50..1.60)
+
+        val selected = cruise(
+            FixedHeadingActuationPhaseLead.SPEED_SCHEDULED_VISUAL,
+            FixedHeadingSpeedTarget.STEP_085,
+        )
+        assertTrue(selected.forwardSpeedMetersPerSecond > baseline.forwardSpeedMetersPerSecond + 0.40)
+        assertTrue(selected.forwardSpeedMetersPerSecond <= 2.35)
+        assertEquals(0.85, checkNotNull(selected.desiredAlongTrackSpeedMetersPerSecond), 0.0)
+        assertEquals(2.35, selected.maximumCommandSpeedMetersPerSecond, 0.0)
+
+        val b3 = cruise(
+            FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL,
+            FixedHeadingSpeedTarget.STEP_085,
+        )
+        assertEquals(1.60, b3.forwardSpeedMetersPerSecond, 0.001)
+        assertEquals(0.70, checkNotNull(b3.desiredAlongTrackSpeedMetersPerSecond), 0.0)
+        assertEquals(1.90, b3.maximumCommandSpeedMetersPerSecond, 0.0)
+    }
+
 
     @Test
     fun `aligned shortened tape enters a bounded endpoint probe before turning`() {

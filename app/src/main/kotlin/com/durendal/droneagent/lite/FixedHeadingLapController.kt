@@ -1,11 +1,14 @@
 package com.durendal.droneagent.lite
 
 import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tan
 
 internal enum class FixedHeadingLapPhase {
     DISABLED,
@@ -23,8 +26,11 @@ internal enum class FixedHeadingActuationPhaseLead(
     val maximumCommandSpeedMetersPerSecond: Double = targetSpeedMetersPerSecond,
     val speedSlewRateMetersPerSecondSquared: Double? = null,
     val usesCurvatureFeedforward: Boolean = false,
+    val usesVisualVelocity: Boolean = false,
+    val usesSpeedScheduledActuation: Boolean = false,
 ) {
     DEGREES_0(0.0, 1.25),
+    LOW_SPEED_14(14.0, 0.60),
     DEGREES_14(14.0, 1.25),
     DEGREES_16(
         degrees = 16.0,
@@ -47,7 +53,28 @@ internal enum class FixedHeadingActuationPhaseLead(
         maximumCommandSpeedMetersPerSecond = 1.90,
         speedSlewRateMetersPerSecondSquared = 1.60,
         usesCurvatureFeedforward = true,
+        usesVisualVelocity = true,
     ),
+    SPEED_SCHEDULED_VISUAL(
+        degrees = 0.0,
+        targetSpeedMetersPerSecond = 1.60,
+        desiredAlongTrackSpeedMetersPerSecond = 0.70,
+        maximumCommandSpeedMetersPerSecond = 1.90,
+        speedSlewRateMetersPerSecondSquared = 1.60,
+        usesCurvatureFeedforward = true,
+        usesVisualVelocity = true,
+        usesSpeedScheduledActuation = true,
+    ),
+}
+
+internal enum class FixedHeadingSpeedTarget(
+    val desiredAlongTrackSpeedMetersPerSecond: Double,
+    val maximumCommandSpeedMetersPerSecond: Double,
+) {
+    BASELINE(0.70, 1.90),
+    STEP_075(0.75, 2.05),
+    STEP_080(0.80, 2.20),
+    STEP_085(0.85, 2.35),
 }
 
 
@@ -83,6 +110,12 @@ internal data class FixedHeadingLapDecision(
     val speedFeedbackObservedAtNanos: Long = 0L,
     val speedFeedbackUnavailableReason: String? = null,
     val speedFeedbackDirectionErrorDegrees: Double? = null,
+    val appliedPhaseLeadDegrees: Double = 0.0,
+    val actuationGain: Double = 1.0,
+    val scheduledTurnRateRadiansPerSecond: Double = 0.0,
+    val desiredAlongTrackSpeedMetersPerSecond: Double? = null,
+    val maximumCommandSpeedMetersPerSecond: Double = 0.0,
+    val actuationCompensationActive: Boolean = false,
 )
 
 /**
@@ -96,6 +129,13 @@ internal class FixedHeadingLapController {
     private var phase = FixedHeadingLapPhase.DISABLED
     private var actuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_0
     private var targetSpeedMetersPerSecond = TARGET_SPEED_METERS_PER_SECOND
+    private var desiredAlongTrackSpeedMetersPerSecond: Double? = null
+    private var maximumCommandSpeedMetersPerSecond = TARGET_SPEED_METERS_PER_SECOND
+    private var scheduledTurnRateRadiansPerSecond = 0.0
+    private var scheduledPhaseLeadDegrees = 0.0
+    private var actuationGain = 1.0
+    private var actuationCompensationActive = false
+    private var visualVelocityValidAfterNanos = 0L
     private var virtualHeadingDegrees = 0.0
     private var pathSpeedMetersPerSecond = 0.0
     private var pathAccelerationMetersPerSecondSquared = 0.0
@@ -124,10 +164,25 @@ internal class FixedHeadingLapController {
     fun start(
         nowNanos: Long,
         actuationPhaseLead: FixedHeadingActuationPhaseLead,
+        speedTarget: FixedHeadingSpeedTarget = FixedHeadingSpeedTarget.BASELINE,
     ) {
         enabled = true
         this.actuationPhaseLead = actuationPhaseLead
         targetSpeedMetersPerSecond = actuationPhaseLead.targetSpeedMetersPerSecond
+        desiredAlongTrackSpeedMetersPerSecond =
+            if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                speedTarget.desiredAlongTrackSpeedMetersPerSecond
+            } else {
+                actuationPhaseLead.desiredAlongTrackSpeedMetersPerSecond
+            }
+        maximumCommandSpeedMetersPerSecond =
+            if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                speedTarget.maximumCommandSpeedMetersPerSecond
+            } else {
+                actuationPhaseLead.maximumCommandSpeedMetersPerSecond
+            }
+        resetScheduledActuation()
+        visualVelocityValidAfterNanos = nowNanos
         phase = FixedHeadingLapPhase.ACQUIRING
         virtualHeadingDegrees = 0.0
         pathSpeedMetersPerSecond = 0.0
@@ -178,6 +233,8 @@ internal class FixedHeadingLapController {
         commandTargetSpeedMetersPerSecond = 0.0
         filteredCurvaturePerMeter = 0.0
         filteredLateralOffsetMeters = 0.0
+        resetScheduledActuation()
+        visualVelocityValidAfterNanos = 0L
     }
 
     /**
@@ -197,6 +254,13 @@ internal class FixedHeadingLapController {
         lossObservedAtNanos = nowNanos
         filteredCurvaturePerMeter = 0.0
         lastTickAtNanos = nowNanos
+        if (actuationPhaseLead.usesSpeedScheduledActuation) {
+            visualVelocityValidAfterNanos = nowNanos
+            resetScheduledActuation()
+            clearScheduledVisualFeedback()
+            filteredLateralOffsetMeters = 0.0
+            lastVirtualTurnRateDegreesPerSecond = 0.0
+        }
     }
 
     fun updateVisualVelocity(
@@ -210,7 +274,9 @@ internal class FixedHeadingLapController {
     ) {
         if (
             !enabled || phase == FixedHeadingLapPhase.STOPPED ||
-            actuationPhaseLead != FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL
+            !actuationPhaseLead.usesVisualVelocity ||
+            actuationPhaseLead.usesSpeedScheduledActuation &&
+                phase == FixedHeadingLapPhase.RECOVERING_FRAME_STREAM
         ) return
         val groundSpeed =
             if (forwardMetersPerSecond != null && rightMetersPerSecond != null) {
@@ -222,6 +288,8 @@ internal class FixedHeadingLapController {
             unavailableReason != null -> unavailableReason
             sampleAtNanos <= 0L -> "VISUAL_SAMPLE_MISSING"
             sampleAtNanos < startedAtNanos -> "VISUAL_SAMPLE_BEFORE_START"
+            actuationPhaseLead.usesSpeedScheduledActuation &&
+                sampleAtNanos < visualVelocityValidAfterNanos -> "VISUAL_SAMPLE_BEFORE_RECOVERY"
             sampleAtNanos > nowNanos -> "VISUAL_SAMPLE_FUTURE"
             nowNanos - sampleAtNanos > MAX_VISUAL_VELOCITY_AGE_NANOS -> "VISUAL_VELOCITY_STALE"
             forwardMetersPerSecond == null || !forwardMetersPerSecond.isFinite() ||
@@ -301,7 +369,7 @@ internal class FixedHeadingLapController {
         speedFeedbackUnavailableReason: String? = null,
     ) {
         if (!enabled) return
-        if (actuationPhaseLead != FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL) {
+        if (!actuationPhaseLead.usesVisualVelocity) {
             updateMeasuredAlongTrackSpeed(
                 actualTravelDirectionDegrees = actualTravelDirectionDegrees,
                 actualGroundSpeedMetersPerSecond = actualGroundSpeedMetersPerSecond,
@@ -389,7 +457,7 @@ internal class FixedHeadingLapController {
                 speedFeedbackUnavailableReason = "NO_OBSERVATION",
             )
         }
-        if (actuationPhaseLead == FixedHeadingActuationPhaseLead.CURVATURE_FEEDFORWARD_16_VISUAL) {
+        if (actuationPhaseLead.usesVisualVelocity) {
             refreshVisualVelocity(nowNanos)
         }
         if (phase == FixedHeadingLapPhase.ACQUIRING) {
@@ -440,6 +508,10 @@ internal class FixedHeadingLapController {
             phase = FixedHeadingLapPhase.COASTING
             filteredCurvaturePerMeter = 0.0
             filteredLateralOffsetMeters = 0.0
+            if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                visualVelocityValidAfterNanos = nowNanos
+                lastVirtualTurnRateDegreesPerSecond = 0.0
+            }
             if (!withinExplicitLossHold) {
                 pathAccelerationMetersPerSecondSquared = 0.0
                 pathSpeedMetersPerSecond = moveToward(
@@ -471,7 +543,9 @@ internal class FixedHeadingLapController {
                 measuredAlongTrackSpeedMetersPerSecond != null
         if (!curvatureFeedforwardActive) {
             filteredCurvaturePerMeter = 0.0
-            filteredLateralOffsetMeters = 0.0
+            if (!actuationPhaseLead.usesSpeedScheduledActuation) {
+                filteredLateralOffsetMeters = 0.0
+            }
         }
         val curvature =
             if (curvatureFeedforwardActive) {
@@ -487,6 +561,28 @@ internal class FixedHeadingLapController {
         val lateralOffsetResidualMeters =
             (abs(measurement.lateralOffsetMeters) - expectedLateralOffsetMeters)
                 .coerceAtLeast(0.0)
+
+        val maximumTurnDegrees =
+            (if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                SCHEDULED_MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND
+            } else {
+                MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND
+            }) * elapsedSeconds
+        val feedforwardTurnDegrees =
+            Math.toDegrees(
+                (measuredAlongTrackSpeedMetersPerSecond ?: 0.0) * curvature,
+            ) * elapsedSeconds
+        val residualTurnDegrees =
+            guidanceResidualDegrees * GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND * elapsedSeconds
+        val turnDegrees =
+            (feedforwardTurnDegrees + residualTurnDegrees)
+                .coerceIn(-maximumTurnDegrees, maximumTurnDegrees)
+        virtualHeadingDegrees = wrapDegrees(virtualHeadingDegrees + turnDegrees)
+        lastVirtualTurnRateDegreesPerSecond =
+            if (elapsedSeconds > 0.0) turnDegrees / elapsedSeconds else 0.0
+        if (actuationPhaseLead.usesSpeedScheduledActuation) {
+            updateScheduledActuation(elapsedSeconds)
+        }
 
         commandTargetSpeedMetersPerSecond = feedbackCompensatedCommandSpeed()
         val confidenceLimitedSpeed =
@@ -523,27 +619,34 @@ internal class FixedHeadingLapController {
             emergencyBrake = trackingAuthority == 0.0,
             elapsedSeconds = elapsedSeconds,
         )
-        val maximumTurnDegrees =
-            MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND * elapsedSeconds
-        val feedforwardTurnDegrees =
-            Math.toDegrees(
-                (measuredAlongTrackSpeedMetersPerSecond ?: 0.0) * curvature,
-            ) * elapsedSeconds
-        val residualTurnDegrees =
-            guidanceResidualDegrees * GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND * elapsedSeconds
-        val turnDegrees =
-            (feedforwardTurnDegrees + residualTurnDegrees)
-                .coerceIn(-maximumTurnDegrees, maximumTurnDegrees)
-        virtualHeadingDegrees = wrapDegrees(virtualHeadingDegrees + turnDegrees)
-        lastVirtualTurnRateDegreesPerSecond =
-            if (elapsedSeconds > 0.0) turnDegrees / elapsedSeconds else 0.0
-
+        if (actuationPhaseLead.usesSpeedScheduledActuation && pathSpeedMetersPerSecond == 0.0) {
+            scheduledPhaseLeadDegrees = 0.0
+        }
         val phaseLeadDegrees = appliedActuationPhaseLeadDegrees()
         val commandHeadingDegrees = wrapDegrees(virtualHeadingDegrees + phaseLeadDegrees)
         val commandHeadingRadians = Math.toRadians(commandHeadingDegrees)
         val lateralCorrectionSourceMeters =
             when {
                 pathSpeedMetersPerSecond == 0.0 -> measurement.lateralOffsetMeters
+                actuationPhaseLead.usesSpeedScheduledActuation -> {
+                    // Losing velocity must not drop a lateral command in one
+                    // step. Keep the old profiles' filter, but bound B4's change
+                    // by elapsed time and unwind it when feedback is unavailable.
+                    val targetOffset =
+                        if (curvatureFeedforwardActive) {
+                            filteredLateralOffsetMeters + LATERAL_OFFSET_FILTER_ALPHA *
+                                (measurement.lateralOffsetMeters - filteredLateralOffsetMeters)
+                        } else {
+                            0.0
+                        }
+                    filteredLateralOffsetMeters = moveToward(
+                        filteredLateralOffsetMeters,
+                        targetOffset,
+                        checkNotNull(actuationPhaseLead.speedSlewRateMetersPerSecondSquared) *
+                            elapsedSeconds / LATERAL_FEEDBACK_GAIN_PER_SECOND,
+                    )
+                    filteredLateralOffsetMeters
+                }
                 curvatureFeedforwardActive ->
                     updateFilteredLateralOffset(measurement.lateralOffsetMeters)
                 else -> 0.0
@@ -564,8 +667,8 @@ internal class FixedHeadingLapController {
                 correction * cos(correctionHeadingRadians)
         val resultantSpeed = hypot(forward, right)
         val resultantScale =
-            if (resultantSpeed > actuationPhaseLead.maximumCommandSpeedMetersPerSecond) {
-                actuationPhaseLead.maximumCommandSpeedMetersPerSecond / resultantSpeed
+            if (resultantSpeed > maximumCommandSpeedMetersPerSecond) {
+                maximumCommandSpeedMetersPerSecond / resultantSpeed
             } else {
                 1.0
             }
@@ -574,6 +677,7 @@ internal class FixedHeadingLapController {
             forward = forward * resultantScale,
             right = right * resultantScale,
             lateralCorrectionMetersPerSecond = correction * resultantScale,
+            appliedPhaseLeadDegrees = phaseLeadDegrees,
         )
     }
 
@@ -663,6 +767,9 @@ internal class FixedHeadingLapController {
         ) {
             return 0.0
         }
+        if (actuationPhaseLead.usesSpeedScheduledActuation) {
+            return scheduledPhaseLeadDegrees
+        }
         return when {
             lastVirtualTurnRateDegreesPerSecond > 0.0 -> actuationPhaseLead.degrees
             lastVirtualTurnRateDegreesPerSecond < 0.0 -> -actuationPhaseLead.degrees
@@ -707,22 +814,76 @@ internal class FixedHeadingLapController {
             }
     }
 
+    private fun updateScheduledActuation(elapsedSeconds: Double) {
+        actuationCompensationActive = measuredAlongTrackSpeedMetersPerSecond != null
+        val targetLeadDegrees: Double
+        if (actuationCompensationActive) {
+            // Schedule the rotating vector actually commanded this tick, including
+            // guidance residual and the turn-rate ceiling. Normalize at the flown
+            // reference so the empirical 1.60 command is not given a second inverse K.
+            val alpha = 1.0 - exp(-elapsedSeconds / SCHEDULED_TURN_FILTER_SECONDS)
+            scheduledTurnRateRadiansPerSecond += alpha *
+                (Math.toRadians(lastVirtualTurnRateDegreesPerSecond) - scheduledTurnRateRadiansPerSecond)
+            val response = scheduledTurnRateRadiansPerSecond * SCHEDULED_RESPONSE_TIME_SECONDS
+            targetLeadDegrees = Math.toDegrees(atan(response))
+                .coerceIn(-SCHEDULED_MAX_PHASE_LEAD_DEGREES, SCHEDULED_MAX_PHASE_LEAD_DEGREES)
+            actuationGain = (hypot(1.0, response) / SCHEDULED_REFERENCE_GAIN)
+                .coerceAtMost(SCHEDULED_MAX_GAIN)
+        } else {
+            // Invalid feedback is unknown speed, not zero speed. Drop the model
+            // amplitude immediately, while smoothly unwinding the applied phase.
+            scheduledTurnRateRadiansPerSecond = 0.0
+            actuationGain = 1.0
+            targetLeadDegrees = 0.0
+        }
+        scheduledPhaseLeadDegrees = moveToward(
+            scheduledPhaseLeadDegrees,
+            targetLeadDegrees,
+            SCHEDULED_PHASE_SLEW_DEGREES_PER_SECOND * elapsedSeconds,
+        )
+    }
+
+    private fun resetScheduledActuation() {
+        scheduledTurnRateRadiansPerSecond = 0.0
+        scheduledPhaseLeadDegrees = 0.0
+        actuationGain = 1.0
+        actuationCompensationActive = false
+        speedFeedbackBoostMetersPerSecond = 0.0
+        commandTargetSpeedMetersPerSecond = 0.0
+    }
+
+    private fun clearScheduledVisualFeedback() {
+        measuredAlongTrackSpeedMetersPerSecond = null
+        visualTravelDirectionDegrees = null
+        visualGroundSpeedMetersPerSecond = null
+        speedFeedbackSampleAtNanos = 0L
+        speedFeedbackObservedAtNanos = 0L
+        speedFeedbackDirectionErrorDegrees = null
+        speedFeedbackUnavailableReason = "VISUAL_FEEDBACK_RESET"
+    }
+
     private fun feedbackCompensatedCommandSpeed(): Double {
-        val desiredSpeed = actuationPhaseLead.desiredAlongTrackSpeedMetersPerSecond
+        val desiredSpeed = desiredAlongTrackSpeedMetersPerSecond
         val measuredSpeed = measuredAlongTrackSpeedMetersPerSecond
         if (desiredSpeed == null || measuredSpeed == null) {
             speedFeedbackBoostMetersPerSecond = 0.0
             return targetSpeedMetersPerSecond
         }
+        val nominalSpeed =
+            if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                (targetSpeedMetersPerSecond * (desiredSpeed / 0.70) * actuationGain)
+                    .coerceAtMost(maximumCommandSpeedMetersPerSecond)
+            } else {
+                targetSpeedMetersPerSecond
+            }
         speedFeedbackBoostMetersPerSecond =
             (
                 SPEED_FEEDBACK_GAIN *
                     (desiredSpeed - measuredSpeed).coerceAtLeast(0.0)
                 ).coerceAtMost(
-                actuationPhaseLead.maximumCommandSpeedMetersPerSecond -
-                    targetSpeedMetersPerSecond,
+                (maximumCommandSpeedMetersPerSecond - nominalSpeed).coerceAtLeast(0.0),
             )
-        return targetSpeedMetersPerSecond + speedFeedbackBoostMetersPerSecond
+        return nominalSpeed + speedFeedbackBoostMetersPerSecond
     }
 
 
@@ -760,7 +921,17 @@ internal class FixedHeadingLapController {
         right: Double = 0.0,
         stopRequested: Boolean = false,
         lateralCorrectionMetersPerSecond: Double = 0.0,
-    ): FixedHeadingLapDecision = FixedHeadingLapDecision(
+        appliedPhaseLeadDegrees: Double = 0.0,
+    ): FixedHeadingLapDecision {
+        if (
+            actuationPhaseLead.usesSpeedScheduledActuation &&
+            phase != FixedHeadingLapPhase.TRACKING &&
+            phase != FixedHeadingLapPhase.ACQUIRING
+        ) {
+            resetScheduledActuation()
+            clearScheduledVisualFeedback()
+        }
+        return FixedHeadingLapDecision(
         phase = phase,
         forwardMetersPerSecond = forward,
         rightMetersPerSecond = right,
@@ -776,8 +947,22 @@ internal class FixedHeadingLapController {
         speedFeedbackObservedAtNanos = speedFeedbackObservedAtNanos,
         speedFeedbackUnavailableReason = speedFeedbackUnavailableReason,
         speedFeedbackDirectionErrorDegrees = speedFeedbackDirectionErrorDegrees,
+        appliedPhaseLeadDegrees = appliedPhaseLeadDegrees,
+        actuationGain = if (phase == FixedHeadingLapPhase.TRACKING) actuationGain else 1.0,
+        scheduledTurnRateRadiansPerSecond =
+            if (phase == FixedHeadingLapPhase.TRACKING) scheduledTurnRateRadiansPerSecond else 0.0,
+        desiredAlongTrackSpeedMetersPerSecond = desiredAlongTrackSpeedMetersPerSecond,
+        maximumCommandSpeedMetersPerSecond = maximumCommandSpeedMetersPerSecond,
+        actuationCompensationActive =
+            phase == FixedHeadingLapPhase.TRACKING &&
+                if (actuationPhaseLead.usesSpeedScheduledActuation) {
+                    actuationCompensationActive && pathSpeedMetersPerSecond > 0.0
+                } else {
+                    appliedPhaseLeadDegrees != 0.0
+                },
         stopRequested = stopRequested,
     )
+    }
 
     private fun updatePathSpeed(
         targetSpeed: Double,
@@ -859,6 +1044,21 @@ internal class FixedHeadingLapController {
         const val MAX_VISUAL_VELOCITY_AGE_NANOS = 250_000_000L
         const val MIN_VISUAL_GROUND_SPEED_METERS_PER_SECOND = 0.05
         const val MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 60.0
+        const val SCHEDULED_MAX_VIRTUAL_TURN_RATE_DEGREES_PER_SECOND = 90.0
+        const val SCHEDULED_REFERENCE_TURN_RATE_RADIANS_PER_SECOND = 0.71
+        const val SCHEDULED_REFERENCE_PHASE_LEAD_DEGREES = 16.0
+        // Bounded empirical seed from flown 16 degrees at 0.71 rad/s, NOT an
+        // identified aircraft transfer function. No separate image/actuator delay,
+        // and no inverse K from the inconclusive command-to-vision fit.
+        val SCHEDULED_RESPONSE_TIME_SECONDS =
+            tan(Math.toRadians(SCHEDULED_REFERENCE_PHASE_LEAD_DEGREES)) /
+                SCHEDULED_REFERENCE_TURN_RATE_RADIANS_PER_SECOND
+        private val SCHEDULED_REFERENCE_GAIN =
+            hypot(1.0, SCHEDULED_REFERENCE_TURN_RATE_RADIANS_PER_SECOND * SCHEDULED_RESPONSE_TIME_SECONDS)
+        const val SCHEDULED_TURN_FILTER_SECONDS = 0.15
+        const val SCHEDULED_MAX_PHASE_LEAD_DEGREES = 35.0
+        const val SCHEDULED_PHASE_SLEW_DEGREES_PER_SECOND = 60.0
+        const val SCHEDULED_MAX_GAIN = 1.20
         const val MAX_FEEDFORWARD_CURVATURE_PER_METER = 1.20
         const val GUIDANCE_RESIDUAL_RESPONSE_PER_SECOND = 4.0
         const val CURVATURE_FILTER_ALPHA = 0.35

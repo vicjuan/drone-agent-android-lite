@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="瓦楞紙圓形跑道的尺標貼紙位置圖：22、23 放在 12 點鐘內側；24、25 放在 3 點鐘內側。量圓心距離，並保留黑膠帶旁的淨空。">
+<meta name="description" content="保留已貼好的 22–25；新增同款黃色圓貼紙 26–29，在原圖 6 點鐘與 9 點鐘內側各補一對，每對中心距離 20 cm。完成後共四組、八張，原有兩組不必重測。">
 <title>尺標貼紙位置圖｜瓦楞紙圓形跑道</title>
 <style>
 :root {
@@ -42,8 +42,10 @@ header { margin-bottom: 24px; }
 svg { font-family: inherit; }
 .clock { fill: #606969; font-size: 22px; font-weight: 600; }
 .sticker { fill: var(--yellow); stroke: #b59b18; stroke-width: 1.5; }
+.sticker.new { stroke: var(--amber); stroke-width: 3; }
 .sticker-number { fill: #202320; font-size: 29px; font-weight: 800; text-anchor: middle; dominant-baseline: central; }
 .group-label { fill: #075f57; font-size: 23px; font-weight: 700; text-anchor: middle; }
+.group-label.new { fill: var(--amber); }
 .dimension { stroke: #087b70; stroke-width: 2.3; fill: none; }
 .extension { stroke: #087b70; stroke-width: 1.5; stroke-dasharray: 4 4; }
 .measure-label { fill: #075f57; font-size: 22px; font-weight: 700; text-anchor: middle; }
@@ -53,12 +55,15 @@ figcaption { padding: 14px 20px 18px; border-top: 1px solid var(--line); font-si
 .swatch { width: 16px; height: 16px; border-radius: 3px; display: inline-block; }
 .swatch.tape { background: #252b2b; }
 .swatch.label { background: var(--yellow); border-radius: 50%; border: 1px solid #b59b18; }
+.swatch.new-label { background: var(--yellow); border-radius: 50%; border: 3px solid var(--amber); }
 .swatch.clear { background: #f1d2a8; border: 1px dashed #ae7035; }
 .side { display: grid; gap: 16px; }
 .instructions { padding: 20px; }
 .pair { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .pair p { margin-top: 7px; }
 .number { display: inline-flex; width: 34px; height: 34px; margin-right: 5px; justify-content: center; align-items: center; background: var(--yellow); border: 1px solid #b59b18; border-radius: 50%; color: #202320; font-weight: 800; }
+.number.new { border: 2px solid var(--amber); }
+.new-pair h3 { color: var(--amber); }
 .distance { color: var(--teal); font-weight: 700; }
 .small { color: var(--muted); font-size: 14px; }
 .clearance { padding: 18px 20px; }
@@ -112,9 +117,9 @@ footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
 <body>
 <main>
   <header>
-    <p class="eyebrow">瓦楞紙圓形跑道 · 距離參考</p>
-    <h1>尺標貼紙位置圖</h1>
-    <p class="lead">先放<strong>兩組、共四張</strong>。都在圓內側；每組兩張要能同時清楚入鏡。</p>
+    <p class="eyebrow">瓦楞紙圓形跑道 · 尺標增補 · 2026 / 09 / 10</p>
+    <h1>只補四張：26、27、28、29</h1>
+    <p class="lead">使用與 22–25 <strong>同款、同尺寸的黃色圓貼紙</strong>。在原圖 <strong>6 點鐘與 9 點鐘內側各補一對</strong>；完成後共四組、八張。原有 22–23、24–25 已確認各為 20 cm，<strong>保留原位，不用重測</strong>。</p>
   </header>
 
   <div class="layout">
@@ -124,8 +129,8 @@ footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
         <span class="badge">位置示意 · 非等比例</span>
       </div>
       <svg class="diagram" viewBox="0 0 620 620" role="img" aria-labelledby="placement-title placement-desc">
-        <title id="placement-title">兩組黃色尺標放在圓形黑膠帶的內側</title>
-        <desc id="placement-desc">將圓形看成時鐘。22 和 23 在 12 點鐘附近，左右排列；24 和 25 在 3 點鐘附近，上下排列。每組兩張的圓心直線距離約 20 公分。所有貼紙外緣距離膠帶邊緣至少 5 公分。圓心不放尺標。圖中連接線、虛線和淡色淨空帶都只是說明，不要畫在紙板上。</desc>
+        <title id="placement-title">保留 22–25，於 6 點鐘和 9 點鐘內側新增 26–29</title>
+        <desc id="placement-desc">沿用原頁的時鐘方位：A 組 22、23 示意在 12 點鐘，B 組 24、25 示意在 3 點鐘，兩組均保留。新增 C 組在 6 點鐘內側，26 在左、27 在右；新增 D 組在 9 點鐘內側，28 在上、29 在下。每組兩張貼紙的圓心直線距離為 20 公分。所有貼紙外緣距膠帶邊緣至少 5 公分。圓心不用貼。箭頭、框線和淨空帶只作說明，不要畫在紙板上。</desc>
         <defs>
           <marker id="dimension-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M1 1L7 4L1 7" fill="none" stroke="#087b70" stroke-width="1.5"/>
@@ -140,56 +145,73 @@ footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
         <text class="clock" x="562" y="333" text-anchor="middle">3</text>
         <text class="clock" x="310" y="579" text-anchor="middle">6</text>
         <text class="clock" x="58" y="333" text-anchor="middle">9</text>
-        <text class="group-label" x="310" y="143">A 組</text>
-        <text class="group-label" x="445" y="220">B 組</text>
+        <text class="group-label" x="310" y="135">A 保留</text>
+        <text class="group-label" x="445" y="235">B 保留</text>
+        <text class="group-label new" x="310" y="525">C 新增</text>
+        <text class="group-label new" x="175" y="235">D 新增</text>
 
-        <path class="extension" d="M255 185V244M365 185V244"/>
-        <line class="dimension" x1="255" y1="235" x2="365" y2="235" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
-        <text class="measure-label" x="310" y="267">約 20 cm</text>
-        <circle class="sticker" cx="255" cy="185" r="22"/>
-        <circle class="sticker" cx="365" cy="185" r="22"/>
-        <text class="sticker-number" x="255" y="185">22</text>
-        <text class="sticker-number" x="365" y="185">23</text>
+        <path class="extension" d="M270 175V229M350 175V229"/>
+        <line class="dimension" x1="270" y1="220" x2="350" y2="220" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="310" y="252">20 cm</text>
+        <circle class="sticker" cx="270" cy="175" r="22"/>
+        <circle class="sticker" cx="350" cy="175" r="22"/>
+        <text class="sticker-number" x="270" y="175">22</text>
+        <text class="sticker-number" x="350" y="175">23</text>
 
-        <path class="extension" d="M445 270H384M445 380H384"/>
-        <line class="dimension" x1="392" y1="270" x2="392" y2="380" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
-        <text class="measure-label" x="374" y="325" transform="rotate(-90 374 325)">約 20 cm</text>
-        <circle class="sticker" cx="445" cy="270" r="22"/>
-        <circle class="sticker" cx="445" cy="380" r="22"/>
-        <text class="sticker-number" x="445" y="270">24</text>
-        <text class="sticker-number" x="445" y="380">25</text>
+        <path class="extension" d="M460 285H396M460 365H396"/>
+        <line class="dimension" x1="405" y1="285" x2="405" y2="365" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="384" y="325" transform="rotate(-90 384 325)">20 cm</text>
+        <circle class="sticker" cx="460" cy="285" r="22"/>
+        <circle class="sticker" cx="460" cy="365" r="22"/>
+        <text class="sticker-number" x="460" y="285">24</text>
+        <text class="sticker-number" x="460" y="365">25</text>
+
+        <path class="extension" d="M270 475V421M350 475V421"/>
+        <line class="dimension" x1="270" y1="430" x2="350" y2="430" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="310" y="415">20 cm</text>
+        <circle class="sticker new" cx="270" cy="475" r="22"/>
+        <circle class="sticker new" cx="350" cy="475" r="22"/>
+        <text class="sticker-number" x="270" y="475">26</text>
+        <text class="sticker-number" x="350" y="475">27</text>
+
+        <path class="extension" d="M160 285H224M160 365H224"/>
+        <line class="dimension" x1="215" y1="285" x2="215" y2="365" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
+        <text class="measure-label" x="236" y="325" transform="rotate(-90 236 325)">20 cm</text>
+        <circle class="sticker new" cx="160" cy="285" r="22"/>
+        <circle class="sticker new" cx="160" cy="365" r="22"/>
+        <text class="sticker-number" x="160" y="285">28</text>
+        <text class="sticker-number" x="160" y="365">29</text>
 
         <circle cx="310" cy="325" r="3" fill="#937953"/>
         <text x="310" y="356" text-anchor="middle" fill="#72593c" font-size="21">圓心</text>
         <text x="310" y="383" text-anchor="middle" fill="#72593c" font-size="18">不用貼尺標</text>
-        <text x="310" y="461" text-anchor="middle" fill="#075f57" font-size="20" font-weight="600">量圓心到圓心的直線距離</text>
-        <text x="310" y="527" text-anchor="middle" fill="#725024" font-size="18">淨空帶</text>
       </svg>
       <figcaption>
         <div class="legend" aria-label="圖例">
           <span><i class="swatch tape" aria-hidden="true"></i>黑膠帶</span>
-          <span><i class="swatch label" aria-hidden="true"></i>黃色貼紙</span>
+          <span><i class="swatch label" aria-hidden="true"></i>22–25：原有，保留</span>
+          <span><i class="swatch new-label" aria-hidden="true"></i>26–29：這次新增</span>
           <span><i class="swatch clear" aria-hidden="true"></i>不貼記號的淨空帶</span>
         </div>
-        <strong>箭頭、連接線、虛線與淡色淨空帶都只是示意，不要畫在紙板上。</strong><br>
-        圓徑與貼紙直徑未依實物設定；請用尺量距離，不要照螢幕比例施工。本圖只畫尺標，未畫其他追蹤貼片。
+        <strong>箭頭、強調外框、連接線與淨空帶都只是示意，不要畫在紙板上。</strong><br>
+        沿用原圖的時鐘方位，不代表機頭或羅盤方向，也不要求挪動原有貼紙。圓徑與貼紙直徑非等比例；用尺量，不照螢幕比例施工。
       </figcaption>
     </figure>
 
     <div class="side">
       <section class="card instructions" aria-labelledby="position-heading">
-        <h2 id="position-heading">照這兩個位置貼</h2>
-        <div class="pair">
-          <h3>A 組｜12 點鐘附近的內側</h3>
-          <p><span class="number">22</span><span class="number">23</span>左右排列</p>
-          <p>圓心直線距離：<span class="distance">約 20 公分</span></p>
+        <h2 id="position-heading">這次只補這兩組</h2>
+        <div class="pair new-pair">
+          <h3>C 組｜6 點鐘附近的內側</h3>
+          <p><span class="number new">26</span><span class="number new">27</span>左右排列</p>
+          <p>兩張貼紙圓心到圓心：<span class="distance">20.0 公分</span></p>
         </div>
-        <div class="pair">
-          <h3>B 組｜3 點鐘附近的內側</h3>
-          <p><span class="number">24</span><span class="number">25</span>上下排列</p>
-          <p>圓心直線距離：<span class="distance">約 20 公分</span></p>
+        <div class="pair new-pair">
+          <h3>D 組｜9 點鐘附近的內側</h3>
+          <p><span class="number new">28</span><span class="number new">29</span>上下排列</p>
+          <p>兩張貼紙圓心到圓心：<span class="distance">20.0 公分</span></p>
         </div>
-        <p class="small" style="margin-top:16px">兩組的連線方向大致互相垂直。時鐘方向只是位置描述，不代表機頭方向；不必沿整圈等距貼滿。</p>
+        <p class="small" style="margin-top:16px">優先補到既有兩組的對側空白區，不要擠在 22–25 附近。若剛好遇到紙板接縫，可在該區稍微偏移，不必卡在精確鐘點。</p>
       </section>
 
       <section class="card clearance" aria-labelledby="clearance-heading">
@@ -200,7 +222,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
           <rect x="8" y="8" width="284" height="105" rx="8" fill="#edd8b5"/>
           <rect x="35" y="8" width="25" height="105" fill="#252b2b"/>
           <circle class="sticker" cx="230" cy="61" r="28"/>
-          <text class="sticker-number" x="230" y="61">22</text>
+          <text class="sticker-number" x="230" y="61">26</text>
           <line class="dimension" x1="60" y1="61" x2="202" y2="61" marker-start="url(#dimension-arrow)" marker-end="url(#dimension-arrow)"/>
           <text x="131" y="44" text-anchor="middle" fill="#075f57" font-size="23" font-weight="700">≥ 5 cm</text>
           <text x="51" y="139" text-anchor="middle" fill="#606969" font-size="16">膠帶邊緣</text>
@@ -211,24 +233,25 @@ footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
 
       <section class="reminder" aria-labelledby="frame-heading">
         <h2 id="frame-heading">同一組，要同時入鏡</h2>
-        <p>在預定拍攝高度確認：兩張都清楚可見，盡量不要落在畫面邊角。不要把同一組拆放在圓的兩端。</p>
+        <p>在實驗使用的相機高度與視角檢查：同組兩張要清楚、完整入鏡，不要拆放在圓的兩端；不同組則保持分離。</p>
       </section>
     </div>
   </div>
 
   <div class="bottom">
     <section class="card" aria-labelledby="record-heading">
-      <h2 id="record-heading">貼好後，留下一張紀錄照</h2>
+      <h2 id="record-heading">只檢查這次新增的兩組</h2>
       <ol>
-        <li>量好 <strong>22–23</strong> 與 <strong>24–25</strong> 各自的圓心距離。</li>
-        <li>不必硬湊整數；實測 <strong>20.3 公分</strong>，就記 20.3 公分。</li>
-        <li>拍下貼紙位置，附上兩組距離，供影片分析時核對尺度。</li>
+        <li>量好 <strong>26–27</strong> 與 <strong>28–29</strong>，各為 <strong>20.0 公分</strong>。App 目前按固定 20 cm 換算，不能任意貼成其他距離。</li>
+        <li>每組盡量貼在同一塊紙板，避免搬動後間距改變；每張最近的另一張，應是自己的同組夥伴。</li>
+        <li>拍一張包含四組位置的紀錄照即可。<strong>原有兩組不用重測，也不用量 23–24 等跨組距離。</strong></li>
       </ol>
     </section>
     <section class="card caution" aria-labelledby="trial-heading">
-      <h2 id="trial-heading">先確認黑字不會干擾循線</h2>
-      <p>這款貼紙有黑色數字；先少量試貼，確認循線辨識未受干擾，再擴展其他追蹤貼片。</p>
-      <p class="small">本圖是建議配置，尚未驗證這款貼紙的實拍效果。目前 App 不會自動讀編號或已知間距；尺標供離線量測與核對。</p>
+      <h2 id="trial-heading">補尺度覆蓋，不是整圈貼滿</h2>
+      <p>今天 B3 的 956 次測速有 <strong>150 次缺少尺度</strong>，中途最長約 <strong>3.7 秒</strong>沒有有效測速。這次補點的目的是縮短尺度失效後，重新找到可用貼紙對的等待。</p>
+      <p><strong>先不加黑色追蹤貼片、棋盤格或其他顏色。</strong>先只補這四張同款尺標，讓變更集中在尺度覆蓋。</p>
+      <p class="small">現版 App 已用貼紙對與固定 20 cm 間距做即時尺度校準，也已解除四張上限；數字只供人辨位置，程式不讀編號。這個新增配置尚未實飛，仍須確認測速中斷是否縮短，不能保證圈速變快。</p>
     </section>
   </div>
   <footer>單一 HTML，離線即可開啟；可使用瀏覽器的列印功能保存。此頁不連線，也不控制無人機。</footer>

@@ -87,7 +87,6 @@ internal class MathematicalCircleController(
     companion object {
         const val DIAMETER_METERS = 1.5
         const val SECONDS_PER_LAP = 7.5
-        const val RACING_SECONDS_PER_LAP = 6.75
         const val LAP_COUNT = 3
         private const val NANOS_PER_SECOND = 1_000_000_000.0
     }

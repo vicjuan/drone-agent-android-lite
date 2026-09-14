@@ -61,6 +61,66 @@ class FixedCameraVelocityEstimatorInstrumentedTest {
     }
 
     @Test
+    fun additionalPairsAndAnIsolatedMarkerPreserveMetricSpeedAcrossSceneReset() {
+        val many = texturedFloor(markers = true)
+        for (y in doubleArrayOf(80.0, 400.0)) {
+            for (x in doubleArrayOf(100.0, 350.0, 600.0)) {
+                drawMarkerPair(many, x, y)
+            }
+        }
+        // Seven isolated 20cm pairs plus one unpaired marker: count is not ambiguity.
+        Imgproc.circle(many, Point(800.0, 240.0), 5, MARKER_COLOUR, -1)
+        val movedMany = translated(many, 3.0, 2.0)
+        val few = texturedFloor()
+        drawMarkerPair(few, WIDTH / 2.0, HEIGHT / 2.0, distancePixels = 80.0)
+        val movedFew = translated(few, 3.0, 2.0)
+        try {
+            FixedCameraVelocityEstimator().use { estimator ->
+                val manyBaseline = establishScale(estimator, many)
+                val manyResult = estimator.process(movedMany, manyBaseline + STEP)
+                assertMetricTranslation(manyResult, 3.0, 2.0)
+                assertEquals(0.04, checkNotNull(manyResult.forwardMps), 0.004)
+                assertEquals(-0.06, checkNotNull(manyResult.rightMps), 0.004)
+
+                // Reused storage must not mix the old pairs into a smaller, new scene.
+                estimator.reset()
+                val fewBaseline = establishScale(estimator, few, START + 10 * STEP)
+                val fewResult = estimator.process(movedFew, fewBaseline + STEP)
+                assertMetricTranslation(fewResult, 3.0, 2.0)
+                assertEquals(0.05, checkNotNull(fewResult.forwardMps), 0.004)
+                assertEquals(-0.075, checkNotNull(fewResult.rightMps), 0.004)
+            }
+        } finally {
+            many.release()
+            movedMany.release()
+            few.release()
+            movedFew.release()
+        }
+    }
+
+    @Test
+    fun conflictingPairScalesCannotPublishMetricVelocity() {
+        val frame = texturedFloor()
+        drawMarkerPair(frame, 150.0, 80.0)
+        drawMarkerPair(frame, 650.0, 80.0)
+        drawMarkerPair(frame, 424.0, 360.0, distancePixels = 140.0)
+        val moved = translated(frame, 3.0, 2.0)
+        try {
+            FixedCameraVelocityEstimator().use { estimator ->
+                for (index in 0 until 4) {
+                    estimator.process(frame, START + index * STEP)
+                }
+                val result = estimator.process(moved, START + 4 * STEP)
+                assertPixelTranslation(result, 3.0, 2.0)
+                assertNoScale(result)
+            }
+        } finally {
+            frame.release()
+            moved.release()
+        }
+    }
+
+    @Test
     fun texturelessIsInvalidButTexturedStationaryHasZeroPixelMotionAndTrackingRecovers() {
         val flat = Mat(HEIGHT, WIDTH, CvType.CV_8UC4, FLOOR_COLOUR)
         val texture = texturedFloor()
@@ -349,13 +409,20 @@ class FixedCameraVelocityEstimatorInstrumentedTest {
             it.put(0, 0, bytes)
             Imgproc.GaussianBlur(it, it, Size(3.0, 3.0), 0.0)
             if (markers) {
-                val halfDistance = 50.0 * width / WIDTH
-                val radius = maxOf(2, (5.0 * width / WIDTH).toInt())
-                val yellow = Scalar(245.0, 225.0, 30.0, 255.0)
-                Imgproc.circle(it, Point(width / 2.0 - halfDistance, height / 2.0), radius, yellow, -1)
-                Imgproc.circle(it, Point(width / 2.0 + halfDistance, height / 2.0), radius, yellow, -1)
+                drawMarkerPair(it, width / 2.0, height / 2.0)
             }
         }
+    }
+
+    private fun drawMarkerPair(
+        frame: Mat,
+        x: Double,
+        y: Double,
+        distancePixels: Double = 100.0 * frame.cols() / WIDTH,
+    ) {
+        val radius = maxOf(2, (5.0 * frame.cols() / WIDTH).toInt())
+        Imgproc.circle(frame, Point(x - distancePixels / 2.0, y), radius, MARKER_COLOUR, -1)
+        Imgproc.circle(frame, Point(x + distancePixels / 2.0, y), radius, MARKER_COLOUR, -1)
     }
 
     private fun translated(source: Mat, dx: Double, dy: Double): Mat =
@@ -392,5 +459,6 @@ class FixedCameraVelocityEstimatorInstrumentedTest {
         private const val START = 1_000_000_000L
         private const val STEP = 100_000_000L
         private val FLOOR_COLOUR = Scalar(150.0, 102.0, 42.0, 255.0)
+        private val MARKER_COLOUR = Scalar(245.0, 225.0, 30.0, 255.0)
     }
 }
