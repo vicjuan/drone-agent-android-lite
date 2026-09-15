@@ -288,6 +288,75 @@ class FixedCameraVelocityEstimatorInstrumentedTest {
     }
 
     @Test
+    fun racingYawAndTravelRemainSignedCurrentBodyVelocityInBothDirections() {
+        // Metric precision requires distributed support. Sparse/off-centre support
+        // may legitimately fail the unchanged inlier gate; pure yaw is tested below.
+        val frame = texturedFloor(markers = true)
+        try {
+            for (yawDegrees in doubleArrayOf(-6.0, 6.0)) {
+                for (direction in doubleArrayOf(-1.0, 1.0)) {
+                    val forwardMps = direction * 0.56
+                    val rightMps = direction * 0.42
+                    // The measured pair is 0.20m / 100px. A 0.07m displacement
+                    // over 100ms is 35px, explicitly in the CURRENT body frame.
+                    // Static-ground image coordinates obey q = R(p-c) + c + t,
+                    // t = (-right, forward) * dt / metersPerPixel. Rotation acts
+                    // on the previous features, NOT on t a second time.
+                    val moved = transformed(
+                        frame, angleDegrees = yawDegrees,
+                        dx = -rightMps * 0.1 / 0.002,
+                        dy = forwardMps * 0.1 / 0.002,
+                    )
+                    try {
+                        FixedCameraVelocityEstimator().use { estimator ->
+                            val baselineTime = establishScale(estimator, frame)
+                            val result = estimator.process(moved, baselineTime + STEP)
+                            assertMetricTranslation(
+                                result, -rightMps * 0.1 / 0.002, forwardMps * 0.1 / 0.002,
+                                tolerance = 0.5,
+                            )
+                            assertEquals(-yawDegrees, checkNotNull(result.rotationDegrees), 0.15)
+                            assertEquals(0.002, checkNotNull(result.metersPerPixel), 0.0001)
+                            assertEquals(forwardMps, checkNotNull(result.forwardMps), 0.015)
+                            // A second 6deg rotation changes these components by
+                            // over 0.04m/s, well outside either tolerance.
+                            assertEquals(rightMps, checkNotNull(result.rightMps), 0.015)
+                        }
+                    } finally {
+                        moved.release()
+                    }
+                }
+            }
+        } finally {
+            frame.release()
+        }
+    }
+
+    @Test
+    fun racingPureYawWithOffCentreFeaturesDoesNotBecomeGroundTravel() {
+        val frame = texturedFloor(markers = true, offCentreSupport = true)
+        try {
+            for (yawDegrees in doubleArrayOf(-6.0, 6.0)) {
+                val rotated = transformed(frame, angleDegrees = yawDegrees)
+                try {
+                    FixedCameraVelocityEstimator().use { estimator ->
+                        val baselineTime = establishScale(estimator, frame)
+                        val result = estimator.process(rotated, baselineTime + STEP)
+                        assertMetricTranslation(result, 0.0, 0.0, tolerance = 0.5)
+                        assertEquals(-yawDegrees, checkNotNull(result.rotationDegrees), 0.15)
+                        assertEquals(0.0, checkNotNull(result.forwardMps), 0.01)
+                        assertEquals(0.0, checkNotNull(result.rightMps), 0.01)
+                    }
+                } finally {
+                    rotated.release()
+                }
+            }
+        } finally {
+            frame.release()
+        }
+    }
+
+    @Test
     fun disappearedMarkersExpireAndResetCannotReuseTheirMetricScale() {
         val marked = texturedFloor(markers = true)
         val unmarked = texturedFloor()
@@ -436,7 +505,7 @@ class FixedCameraVelocityEstimatorInstrumentedTest {
         dy: Double = 0.0
     ): Mat {
         val transform = Imgproc.getRotationMatrix2D(
-            Point(source.cols() / 2.0, source.rows() / 2.0), angleDegrees, imageScale
+            Point((source.cols() - 1) * 0.5, (source.rows() - 1) * 0.5), angleDegrees, imageScale
         )
         val destination = Mat()
         try {

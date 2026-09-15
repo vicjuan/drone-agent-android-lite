@@ -311,6 +311,285 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `visual racing corrects slow and fast motion in both turns without amplifying yaw feedforward`() {
+        for (direction in listOf(-1.0, 1.0)) {
+            val slow = settledRacingController(direction = direction)
+            val fast = settledRacingController(direction = direction)
+            val nominal = settledRacingController(CircularTrackingSpeed.SPEED_SCHEDULED, direction)
+            var slowDecision = slow.tick(seconds(11))
+            var fastDecision = fast.tick(seconds(11))
+            repeat(40) { index ->
+                val now = seconds(11) + index * 100_000_000L
+                val path = racingPath(direction).copy(capturedAtNanos = now)
+                listOf(slow, fast, nominal).forEach { it.observe(path, now) }
+                slow.updateVisualVelocity(0.40, 0.0, 0.0, 0.0, now, now, null)
+                fast.updateVisualVelocity(1.0, 0.0, 0.0, 0.0, now, now, null)
+                slowDecision = slow.tick(now)
+                fastDecision = fast.tick(now)
+                val nominalDecision = nominal.tick(now)
+                assertTrue(slowDecision.speedFeedbackActive)
+                assertTrue(fastDecision.speedFeedbackActive)
+                assertEquals(
+                    nominalDecision.circularFeedforwardYawRateDegreesPerSecond,
+                    slowDecision.circularFeedforwardYawRateDegreesPerSecond,
+                    1e-9,
+                )
+                assertEquals(
+                    nominalDecision.circularFeedforwardYawRateDegreesPerSecond,
+                    fastDecision.circularFeedforwardYawRateDegreesPerSecond,
+                    1e-9,
+                )
+                assertTrue(kotlin.math.hypot(
+                    slowDecision.forwardSpeedMetersPerSecond,
+                    slowDecision.rightSpeedMetersPerSecond,
+                ) <= 0.85 + 1e-9)
+            }
+            assertEquals(0.83, slowDecision.forwardSpeedMetersPerSecond, 0.001)
+            assertEquals(0.67, fastDecision.forwardSpeedMetersPerSecond, 0.001)
+            assertEquals(0.75, checkNotNull(slowDecision.desiredAlongTrackSpeedMetersPerSecond), 0.0)
+            assertEquals(0.08, slowDecision.speedFeedbackBoostMetersPerSecond, 1e-9)
+            assertEquals(-0.08, fastDecision.speedFeedbackBoostMetersPerSecond, 1e-9)
+            assertTrue(slowDecision.rightSpeedMetersPerSecond * direction > 0.0)
+        }
+    }
+
+    @Test
+    fun `visual racing projects sample axes across heading wrap onto local tangent not lookahead`() {
+        val controller = settledRacingController()
+        val now = seconds(11)
+        val path = racingPath(tangentDegrees = 10.0).copy(
+            lookahead = TapeLookahead(0.8, 0.5),
+            capturedAtNanos = now,
+        )
+        controller.observe(path, now)
+        val sampleAngle = Math.toRadians(12.0)
+        val forward = 0.70 * kotlin.math.cos(sampleAngle)
+        val right = 0.70 * kotlin.math.sin(sampleAngle)
+        controller.updateVisualVelocity(forward, right, 179.0, -179.0, now, now, null)
+        val wrapped = controller.tick(now)
+        assertTrue(wrapped.speedFeedbackActive)
+        assertEquals(0.70, checkNotNull(wrapped.measuredAlongTrackSpeedMetersPerSecond), 0.001)
+
+        val later = now + 100_000_000L
+        controller.updateAircraftHeading(-170.0)
+        controller.updateVisualVelocity(forward, right, 179.0, -170.0, now, later, null)
+        val rotated = controller.tick(later)
+        assertEquals(
+            0.70 * kotlin.math.cos(Math.toRadians(
+                checkNotNull(wrapped.speedFeedbackDirectionErrorDegrees) - 9.0,
+            )),
+            checkNotNull(rotated.measuredAlongTrackSpeedMetersPerSecond),
+            0.001,
+        )
+        assertEquals(wrapped.speedFeedbackBoostMetersPerSecond, rotated.speedFeedbackBoostMetersPerSecond, 0.0)
+        assertEquals(now, rotated.speedFeedbackObservedAtNanos)
+    }
+
+    @Test
+    fun `visual racing accepts zero motion but invalid and opposed motion revoke it`() {
+        val controller = settledRacingController()
+        var now = seconds(11)
+        controller.updateVisualVelocity(0.0, 0.0, 0.0, 0.0, now, now, null)
+        val stationary = controller.tick(now)
+        assertEquals(0.0, checkNotNull(stationary.measuredAlongTrackSpeedMetersPerSecond), 0.0)
+        assertTrue(stationary.speedFeedbackActive)
+        assertEquals(0.83, stationary.commandTargetSpeedMetersPerSecond, 1e-9)
+
+        now += 100_000_000L
+        controller.updateVisualVelocity(Double.NaN, 0.0, 0.0, 0.0, now, now, null)
+        val invalid = controller.tick(now)
+        assertNull(invalid.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(invalid.speedFeedbackActive)
+        assertEquals(0.75, invalid.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertTrue(invalid.forwardSpeedMetersPerSecond <= 0.75)
+
+        now += 100_000_000L
+        controller.observe(racingPath().copy(capturedAtNanos = now), now)
+        controller.updateVisualVelocity(-0.40, 0.0, 0.0, 0.0, now, now, null)
+        val opposed = controller.tick(now)
+        assertNull(opposed.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(opposed.speedFeedbackActive)
+        assertEquals("DIRECTION_MISMATCH", opposed.speedFeedbackUnavailableReason)
+        assertEquals(now, opposed.speedFeedbackSampleAtNanos)
+        assertEquals(now, opposed.speedFeedbackObservedAtNanos)
+
+        now += 100_000_000L
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, null, now, now, null)
+        assertFalse(controller.tick(now).speedFeedbackActive)
+    }
+
+    @Test
+    fun `visual racing sample age expires without another result and duplicate polling cannot renew it`() {
+        val controller = settledRacingController()
+        val sampledAt = seconds(11)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, sampledAt, sampledAt, null)
+        assertTrue(controller.tick(sampledAt).speedFeedbackActive)
+        val boundary = sampledAt + 250_000_000L
+        controller.observe(racingPath().copy(capturedAtNanos = boundary), boundary)
+        val atBoundary = controller.tick(boundary)
+        assertTrue(atBoundary.speedFeedbackActive)
+        val expired = controller.tick(boundary + 1L)
+        assertFalse(expired.speedFeedbackActive)
+        assertNull(expired.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals("VISUAL_VELOCITY_STALE", expired.speedFeedbackUnavailableReason)
+        assertEquals(sampledAt, expired.speedFeedbackObservedAtNanos)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, sampledAt, boundary + 2L, null)
+        val replayed = controller.tick(boundary + 2L)
+        assertFalse(replayed.speedFeedbackActive)
+        assertEquals(expired.speedFeedbackUnavailableReason, replayed.speedFeedbackUnavailableReason)
+        assertEquals(sampledAt, replayed.speedFeedbackObservedAtNanos)
+        assertTrue(replayed.forwardSpeedMetersPerSecond <= 0.75)
+        assertTrue(replayed.actuationCompensationActive)
+    }
+
+    @Test
+    fun `visual racing rejects future out of order and previous attempt samples without poisoning later measurements`() {
+        val controller = settledRacingController()
+        val now = seconds(11)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now, now, null)
+        assertTrue(controller.tick(now).speedFeedbackActive)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now - 1L, now + 1L, null)
+        assertFalse(controller.tick(now + 1L).speedFeedbackActive)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now, now + 2L, null)
+        assertFalse(controller.tick(now + 2L).speedFeedbackActive)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now + seconds(5), now + 3L, null)
+        assertFalse(controller.tick(now + 3L).speedFeedbackActive)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now + 4L, now + 4L, null)
+        assertTrue(controller.tick(now + 4L).speedFeedbackActive)
+        controller.stop()
+        val stopped = controller.tick(now + 5L)
+        assertNull(stopped.measuredAlongTrackSpeedMetersPerSecond)
+        assertFalse(stopped.speedFeedbackActive)
+        controller.start(now + seconds(1), TapeTrackingMode.CIRCULAR, false, CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now, now + seconds(1), null)
+        assertFalse(controller.tick(now + seconds(1)).speedFeedbackActive)
+    }
+
+    @Test
+    fun `visual racing safety reductions require a new sample after recovery`() {
+        val controller = settledRacingController()
+        var now = seconds(11)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now, now, null)
+        assertTrue(controller.tick(now).speedFeedbackActive)
+        val oldSampleAt = now
+        now += 50_000_000L
+        controller.observe(racingPath().copy(
+            quality = PathQuality.NEAR_FIELD_ONLY,
+            lookahead = null,
+            capturedAtNanos = now,
+        ), now)
+        val unsafe = controller.tick(now)
+        assertFalse(unsafe.speedFeedbackActive)
+        assertEquals(0.0, unsafe.commandTargetSpeedMetersPerSecond, 0.0)
+        now += 50_000_000L
+        controller.observe(racingPath().copy(capturedAtNanos = now), now)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, oldSampleAt, now, null)
+        assertFalse(controller.tick(now).speedFeedbackActive)
+        now += 50_000_000L
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, now, now, null)
+        assertTrue(controller.tick(now).speedFeedbackActive)
+
+        now += 50_000_000L
+        controller.observe(racingPath().copy(nearFieldOffsetFraction = 0.4, capturedAtNanos = now), now)
+        controller.updateVisualVelocity(0.0, 0.0, 0.0, 0.0, now, now, null)
+        val displaced = controller.tick(now)
+        assertFalse(displaced.speedFeedbackActive)
+        assertTrue(displaced.commandTargetSpeedMetersPerSecond < 0.75)
+        now += 50_000_000L
+        controller.observe(null, now)
+        assertFalse(controller.tick(now).speedFeedbackActive)
+    }
+
+    @Test
+    fun `delayed rejected outcomes cannot push the racing recovery boundary past queued valid frames`() {
+        val controller = settledRacingController()
+        val start = seconds(11)
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, start, start, null)
+        assertTrue(controller.tick(start).speedFeedbackActive)
+        val lostAt = start + 50_000_000L
+        controller.observe(racingPath().copy(
+            quality = PathQuality.NEAR_FIELD_ONLY,
+            lookahead = null,
+            capturedAtNanos = lostAt,
+        ), lostAt)
+        assertFalse(controller.tick(lostAt).speedFeedbackActive)
+        val recoveredAt = start + 100_000_000L
+        controller.observe(racingPath().copy(capturedAtNanos = recoveredAt), recoveredAt)
+        assertFalse(controller.tick(recoveredAt).speedFeedbackActive)
+
+        // This old result completes after a usable post-recovery frame was
+        // captured, but before that newer frame's own processing completes.
+        val oldOutcomeObservedAt = start + 200_000_000L
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, lostAt, oldOutcomeObservedAt, null)
+        val rejected = controller.tick(oldOutcomeObservedAt)
+        assertFalse(rejected.speedFeedbackActive)
+        assertEquals(lostAt, rejected.speedFeedbackSampleAtNanos)
+        assertEquals(oldOutcomeObservedAt, rejected.speedFeedbackObservedAtNanos)
+
+        val validCapturedAt = start + 150_000_000L
+        val validObservedAt = start + 250_000_000L
+        controller.updateVisualVelocity(0.4, 0.0, 0.0, 0.0, validCapturedAt, validObservedAt, null)
+        val resumed = controller.tick(validObservedAt)
+        assertTrue(resumed.speedFeedbackActive)
+        assertEquals(validCapturedAt, resumed.speedFeedbackSampleAtNanos)
+        assertEquals(validObservedAt, resumed.speedFeedbackObservedAtNanos)
+        assertTrue(resumed.commandTargetSpeedMetersPerSecond > 0.75)
+    }
+
+    @Test
+    fun `visual racing bounds the entire vector while lateral correction and speed slew change`() {
+        for (direction in listOf(-1.0, 1.0)) {
+            val controller = settledRacingController(direction = direction)
+            repeat(150) { index ->
+                val now = seconds(11) + index * 50_000_000L
+                val offset = when (index % 50) {
+                    in 0..19 -> -direction * 0.13
+                    in 20..29 -> direction * 0.02
+                    else -> 0.0
+                }
+                controller.observe(racingPath(direction).copy(
+                    nearFieldOffsetFraction = offset,
+                    capturedAtNanos = now,
+                ), now)
+                controller.updateVisualVelocity(0.0, 0.0, 0.0, 0.0, now, now, null)
+                val decision = controller.tick(now)
+                assertTrue(kotlin.math.hypot(
+                    decision.forwardSpeedMetersPerSecond,
+                    decision.rightSpeedMetersPerSecond,
+                ) <= 0.85 + 1e-9)
+                assertTrue(kotlin.math.abs(decision.yawRateDegreesPerSecond) <= 65.0)
+                assertTrue(kotlin.math.abs(decision.appliedPhaseLeadDegrees) <= 15.0)
+                assertTrue(decision.actuationGain <= 1.04)
+            }
+        }
+    }
+
+    @Test
+    fun `old racing profiles ignore visual speed while new racing ignores SDK speed`() {
+        for (profile in listOf(CircularTrackingSpeed.FAST, CircularTrackingSpeed.SPEED_SCHEDULED)) {
+            val controller = settledRacingController(profile)
+            val now = seconds(11)
+            controller.updateVisualVelocity(0.0, 0.0, 0.0, 0.0, now, now, null)
+            val decision = controller.tick(now)
+            assertEquals(profile.targetMetersPerSecond, decision.forwardSpeedMetersPerSecond, 1e-9)
+            assertFalse(decision.speedFeedbackActive)
+            assertNull(decision.measuredAlongTrackSpeedMetersPerSecond)
+        }
+        val controller = settledRacingController()
+        val now = seconds(11)
+        controller.observe(racingPath().copy(
+            actualGroundSpeedMetersPerSecond = 0.0,
+            actualTravelDirectionDegrees = 90.0,
+            speedFeedbackSampleAtNanos = now,
+            capturedAtNanos = now,
+        ), now)
+        val decision = controller.tick(now)
+        assertFalse(decision.speedFeedbackActive)
+        assertNull(decision.measuredAlongTrackSpeedMetersPerSecond)
+        assertEquals(0.75, decision.forwardSpeedMetersPerSecond, 1e-9)
+    }
+
+    @Test
     fun `scheme C refuses translation without a metric visual centerline`() {
         val controller = circularTrackingController()
         controller.updateAircraftHeading(0.0)
@@ -2564,11 +2843,37 @@ class TapeTrackingControllerTest {
         return controller
     }
 
+    private fun racingPath(
+        direction: Double = 1.0,
+        tangentDegrees: Double = 0.0,
+    ): TapeTrackingObservation = observation(
+        angleDegrees = tangentDegrees,
+        longSideFraction = 0.8,
+        heightAboveGroundMeters = 1.2,
+        centerline = metricCurvedPath(direction * 4.0 / 3.0, tangentDegrees),
+        confidence = 0.95,
+    )
+
+    private fun settledRacingController(
+        profile: CircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
+        direction: Double = 1.0,
+    ): TapeTrackingController = TapeTrackingController().also { controller ->
+        controller.start(0L, TapeTrackingMode.CIRCULAR, false, profile)
+        controller.updateAircraftHeading(0.0)
+        controller.tick(seconds(2))
+        val path = racingPath(direction)
+        repeat(80) { index ->
+            val now = seconds(3) + index * 100_000_000L
+            controller.observe(path.copy(capturedAtNanos = now), now)
+            controller.tick(now)
+        }
+    }
+
     private fun circularTrackingController(
         mode: TapeTrackingMode = TapeTrackingMode.CIRCULAR,
     ): TapeTrackingController =
         TapeTrackingController().also {
-            it.start(0L, mode)
+            it.start(0L, mode, circularTrackingSpeed = CircularTrackingSpeed.FAST)
             assertEquals(TapeTrackingPhase.TRACKING, it.tick(seconds(2)).phase)
         }
 

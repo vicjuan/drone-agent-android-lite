@@ -118,6 +118,7 @@ class MainActivity : Activity() {
     private lateinit var tapeTrackingButton: PillButton
     private lateinit var circularTapeTrackingButton: PillButton
     private lateinit var speedScheduledCircularTapeTrackingButton: PillButton
+    private lateinit var visualFeedbackCircularTapeTrackingButton: PillButton
     private lateinit var angleCircularTapeTrackingButton: PillButton
     private lateinit var fixedHeadingLowSpeedButton: PillButton
     private lateinit var fixedHeadingLowSpeedTargetButton: PillButton
@@ -286,7 +287,8 @@ class MainActivity : Activity() {
     private var straightLineTracePending = false
     @Volatile private var visualVelocityDiagnostics: VisualVelocityDiagnostics? = null
     @Volatile private var visualVelocityFrameContext: VisualVelocityDiagnostics.FrameContext? = null
-    private var fixedHeadingVisualVelocityAttemptId: String? = null
+    private var trackingVisualVelocityAttemptId: String? = null
+    private var trackingVisualVelocityStatus: String? = null
     private var activityForeground = false
 
     private val velocityReadDiagnostics = VelocityReadDiagnostics(
@@ -446,7 +448,7 @@ class MainActivity : Activity() {
     private var tapeEndpointTurn = false
     private var tapeCommandLoggedAtNanos = 0L
     private var activeTapeTrackingMode: TapeTrackingMode? = null
-    private var activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+    private var activeCircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL
     private var activeCircularYawControlMode = CircularYawControlMode.RATE
     private var activeFixedHeadingActuationPhaseLead =
         FixedHeadingActuationPhaseLead.DEGREES_0
@@ -643,11 +645,15 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         activityForeground = false
+        if (usesRacingVisualVelocityFeedback()) {
+            stopTapeTracking("畫面離開前景，賽車視覺回授已停止", release = true)
+        }
         mainHandler.removeCallbacks(velocityReadTickRunnable)
         velocityReadDiagnostics.stop()
         visualVelocityDiagnostics?.stop()
         visualVelocityFrameContext = null
-        fixedHeadingVisualVelocityAttemptId = null
+        trackingVisualVelocityAttemptId = null
+        trackingVisualVelocityStatus = null
         if (isStraightLineTest()) {
             stopHardwareLatencyTest("測試畫面離開前景，已中止直線測試")
         }
@@ -664,7 +670,8 @@ class MainActivity : Activity() {
         visualVelocityDiagnostics?.close()
         visualVelocityDiagnostics = null
         visualVelocityFrameContext = null
-        fixedHeadingVisualVelocityAttemptId = null
+        trackingVisualVelocityAttemptId = null
+        trackingVisualVelocityStatus = null
         stopHardwareLatencyTest("App 關閉，${activeHorizontalPulseName()}已停止", release = false)
         stopMathematicalCircle("App 關閉，數學圓周已停止", release = false)
         stopTiltFlight("App 關閉，傾角實驗已停止", release = false)
@@ -1083,7 +1090,7 @@ class MainActivity : Activity() {
                     }
                 circularTapeTrackingButton =
                     PillButton("方案 C：Ø1.5m 定曲率＋視覺修正・0.70 m/s", StickPadView.CYAN) {
-                        toggleCircularTapeTracking()
+                        toggleTapeTracking(TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.FAST)
                     }
                 speedScheduledCircularTapeTrackingButton =
                     PillButton("賽車提速：0.75 m/s・動態提前＋增益", StickPadView.AMBER) {
@@ -1092,6 +1099,17 @@ class MainActivity : Activity() {
                             CircularTrackingSpeed.SPEED_SCHEDULED,
                             CircularYawControlMode.RATE,
                         )
+                    }
+                visualFeedbackCircularTapeTrackingButton =
+                    PillButton(
+                        tapeTrackingName(
+                            TapeTrackingMode.CIRCULAR,
+                            CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
+                            CircularYawControlMode.RATE,
+                        ),
+                        StickPadView.AMBER,
+                    ) {
+                        toggleCircularTapeTracking()
                     }
                 angleCircularTapeTrackingButton =
                     PillButton("ANGLE 前視點・0.10 m/s", StickPadView.RED) {
@@ -1173,6 +1191,7 @@ class MainActivity : Activity() {
                         toggleFrameCapture()
                     }
                 addView(virtualStickFrameRateButton, actionParams(marginEnd = dp(4)))
+                addView(visualFeedbackCircularTapeTrackingButton, actionParams(marginEnd = dp(4)))
                 addView(circularTapeTrackingButton, actionParams(marginEnd = dp(4)))
                 addView(speedScheduledCircularTapeTrackingButton, actionParams(marginEnd = dp(4)))
                 addView(fixedHeadingLowSpeedButton, actionParams(marginEnd = dp(4)))
@@ -1587,7 +1606,7 @@ class MainActivity : Activity() {
     }
 
     private fun toggleCircularTapeTracking() {
-        toggleTapeTracking(TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.FAST)
+        toggleTapeTracking(TapeTrackingMode.CIRCULAR)
     }
 
     private fun toggleAngleCircularTapeTracking() {
@@ -1681,7 +1700,7 @@ class MainActivity : Activity() {
 
     private fun toggleTapeTracking(
         mode: TapeTrackingMode,
-        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
+        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
         circularYawControlMode: CircularYawControlMode = CircularYawControlMode.RATE,
         fixedHeadingActuationPhaseLead: FixedHeadingActuationPhaseLead =
             FixedHeadingActuationPhaseLead.DEGREES_0,
@@ -1716,6 +1735,11 @@ class MainActivity : Activity() {
                     release = true,
                 )
             tapeTracking.enabled -> render("另一個黑膠帶追蹤模式正在使用中")
+            tapeTrackingStartPending && sameRun &&
+                circularTrackingSpeed.usesVisualVelocity && mode == TapeTrackingMode.CIRCULAR ->
+                stopTapeTracking("${
+                    tapeTrackingName(mode, circularTrackingSpeed, circularYawControlMode)
+                }準備已取消", release = true)
             tapeTrackingStartPending -> render("正在切換飛機避障模式，請稍候")
             else ->
                 startTapeTracking(
@@ -1730,7 +1754,7 @@ class MainActivity : Activity() {
 
     private fun startTapeTracking(
         mode: TapeTrackingMode,
-        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
+        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
         circularYawControlMode: CircularYawControlMode = CircularYawControlMode.RATE,
         fixedHeadingActuationPhaseLead: FixedHeadingActuationPhaseLead =
             FixedHeadingActuationPhaseLead.DEGREES_0,
@@ -1749,10 +1773,16 @@ class MainActivity : Activity() {
                 fixedHeadingActuationPhaseLead.usesSpeedScheduledActuation
         val circularSpeedScheduledActuation =
             mode == TapeTrackingMode.CIRCULAR &&
-                circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED &&
+                circularTrackingSpeed.usesSpeedScheduledActuation &&
                 circularYawControlMode == CircularYawControlMode.RATE
+        val circularVisualFeedback =
+            circularSpeedScheduledActuation && circularTrackingSpeed.usesVisualVelocity
+        val visualFeedback =
+            circularVisualFeedback ||
+                (mode == TapeTrackingMode.FIXED_HEADING && fixedHeadingActuationPhaseLead.usesVisualVelocity)
         val schemeCControl =
             when {
+                circularVisualFeedback -> "speed_scheduled_visual_velocity_feedback"
                 circularSpeedScheduledActuation -> "speed_scheduled_rotating_velocity"
                 mode == TapeTrackingMode.CIRCULAR -> "planned_1p5m_curvature_visual_tangent_correction"
                 else -> null
@@ -1800,6 +1830,10 @@ class MainActivity : Activity() {
             render("OpenCV 未啟動，無法啟動$trackingName")
             return
         }
+        if (circularVisualFeedback && (!activityForeground || visualVelocityDiagnostics == null)) {
+            render("視覺測速未就緒，無法啟動$trackingName")
+            return
+        }
         if (anotherFlightControlActive()) {
             render("另一個飛行控制正在使用中")
             return
@@ -1821,6 +1855,7 @@ class MainActivity : Activity() {
             render("無法啟動$trackingName：$cameraNotDownReason")
             return
         }
+        stopTrackingVisualVelocity()
         mainHandler.removeCallbacks(idleReleaseRunnable)
         activeTapeTrackingMode = mode
         activeCircularTrackingSpeed = circularTrackingSpeed
@@ -1850,7 +1885,7 @@ class MainActivity : Activity() {
                     if (!status.closedConfirmed) {
                         tapeTrackingStartPending = false
                         activeTapeTrackingMode = null
-                        activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+                        activeCircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL
                         activeCircularYawControlMode = CircularYawControlMode.RATE
                         activeFixedHeadingActuationPhaseLead =
                             FixedHeadingActuationPhaseLead.DEGREES_0
@@ -1871,9 +1906,26 @@ class MainActivity : Activity() {
                         },
                         shouldContinue = {
                             startGeneration == tapeTrackingStartGeneration &&
-                                tapeTrackingStartPending && !activityDestroying
+                                tapeTrackingStartPending && !activityDestroying &&
+                                (!circularVisualFeedback || activityForeground)
                         },
                     ) {
+                        if (
+                            startGeneration != tapeTrackingStartGeneration ||
+                            !tapeTrackingStartPending || activityDestroying
+                        ) return@acquireControlLink
+                        if (
+                            circularVisualFeedback &&
+                            (!activityForeground || visualVelocityDiagnostics == null ||
+                                cameraPitchCommandPending ||
+                                selectedCameraPitchDegrees?.let {
+                                    it.isFinite() && abs(it - CAMERA_DOWN_PITCH_DEGREES) <=
+                                        CAMERA_DOWN_PITCH_TOLERANCE_DEGREES
+                                } != true)
+                        ) {
+                            stopTapeTracking("視覺測速條件已改變，$trackingName 取消", release = true)
+                            return@acquireControlLink
+                        }
                         tapeEndpointTurn = false
                         tapeDetector?.setDetectionMode(mode.detectionMode)
                         // Preview is stateless. Flight control receives no path until
@@ -1922,20 +1974,28 @@ class MainActivity : Activity() {
                         )
                         tapeTrackingStartPending = false
                         if (
-                            mode == TapeTrackingMode.FIXED_HEADING &&
-                            fixedHeadingActuationPhaseLead.usesCurvatureFeedforward &&
+                            (circularVisualFeedback ||
+                                (mode == TapeTrackingMode.FIXED_HEADING &&
+                                    fixedHeadingActuationPhaseLead.usesCurvatureFeedforward)) &&
                             activityForeground && !activityDestroying
                         ) {
                             val profileTag = when {
+                                circularVisualFeedback -> "racing-visual"
                                 fixedHeadingActuationPhaseLead.usesSpeedScheduledActuation -> "b4"
                                 fixedHeadingActuationPhaseLead.usesVisualVelocity -> "b3"
                                 else -> "b2"
                             }
                             val attemptId = "$flightProfileSessionId-$profileTag-$now"
-                            fixedHeadingVisualVelocityAttemptId = attemptId
+                            trackingVisualVelocityAttemptId = attemptId
                             visualVelocityDiagnostics?.start(
-                                attemptId, TapeTrackingPhase.RECENTERING.name, fixedHeadingReferenceDegrees,
-                                controlFeedback = fixedHeadingActuationPhaseLead.usesVisualVelocity,
+                                attemptId, TapeTrackingPhase.RECENTERING.name,
+                                axisHeading = if (circularVisualFeedback) null else fixedHeadingReferenceDegrees,
+                                controlFeedback = visualFeedback,
+                                maximumHeadingAgeNanos = if (circularVisualFeedback) {
+                                    TapeTrackingController.CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS
+                                } else {
+                                    1_000_000_000L
+                                },
                             )
                             refreshVisualVelocityContext()
                         }
@@ -1956,6 +2016,25 @@ class MainActivity : Activity() {
                                 "mode" to mode,
                                 "circularSpeed" to circularTrackingSpeed,
                                 "yawControl" to circularYawControlMode,
+                                "speedFeedbackEnabled" to visualFeedback,
+                                "controlFeedback" to false,
+                                "speedFeedbackSource" to "none",
+                                "visualVelocityAttemptId" to trackingVisualVelocityAttemptId,
+                                "visualVelocityCalibration" to
+                                    "isolated_yellow_pair_0p20m_required_no_sdk_or_height_fallback"
+                                        .takeIf { visualFeedback },
+                                "visualVelocityMeasurement" to
+                                    "ransac_similarity_center_translation_current_body_frame_interval_average"
+                                        .takeIf { visualFeedback },
+                                "desiredAlongTrackSpeedMetersPerSecond" to
+                                    if (circularVisualFeedback) circularTrackingSpeed.targetMetersPerSecond
+                                    else desiredAlongTrackSpeed.takeIf { mode == TapeTrackingMode.FIXED_HEADING },
+                                "maximumCommandSpeedMetersPerSecond" to
+                                    if (circularSpeedScheduledActuation) {
+                                        TapeTrackingController.CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND
+                                    } else {
+                                        maximumCommandSpeed.takeIf { mode == TapeTrackingMode.FIXED_HEADING }
+                                    },
                                 "fixedHeadingPhaseLeadDegrees" to
                                     configuredPhaseLeadDegrees,
                                 "fixedHeadingProfile" to fixedHeadingActuationPhaseLead,
@@ -2027,6 +2106,8 @@ class MainActivity : Activity() {
                                     circularYawControlMode == CircularYawControlMode.HEADING ->
                                         angleCircularTapeTrackingButton.text =
                                             "停止 ANGLE 前視點修正版・0.10 m/s"
+                                    circularVisualFeedback ->
+                                        visualFeedbackCircularTapeTrackingButton.text = "停止$trackingName"
                                     circularSpeedScheduledActuation ->
                                         speedScheduledCircularTapeTrackingButton.text = "停止$trackingName"
                                     else ->
@@ -2080,9 +2161,22 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun usesRacingVisualVelocityFeedback(): Boolean =
+        activeTapeTrackingMode == TapeTrackingMode.CIRCULAR &&
+            activeCircularTrackingSpeed.usesVisualVelocity &&
+            activeCircularYawControlMode == CircularYawControlMode.RATE
+
     private fun usesVisualVelocityFeedback(): Boolean =
-        activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
-            activeFixedHeadingActuationPhaseLead.usesVisualVelocity
+        usesRacingVisualVelocityFeedback() ||
+            (activeTapeTrackingMode == TapeTrackingMode.FIXED_HEADING &&
+                activeFixedHeadingActuationPhaseLead.usesVisualVelocity)
+
+    private fun stopTrackingVisualVelocity() {
+        trackingVisualVelocityAttemptId?.let { visualVelocityDiagnostics?.stop(it) }
+        trackingVisualVelocityAttemptId = null
+        trackingVisualVelocityStatus = null
+        refreshVisualVelocityContext()
+    }
 
     private val tapeTrackingControlRunnable = object : Runnable {
         override fun run() {
@@ -2140,19 +2234,23 @@ class MainActivity : Activity() {
 
             val decisionStartedAtNanos = System.nanoTime()
             val visualFeedback = usesVisualVelocityFeedback()
+            val racingVisualFeedback = usesRacingVisualVelocityFeedback()
             if (visualFeedback) {
-                val sample = fixedHeadingVisualVelocityAttemptId?.let {
+                val sample = trackingVisualVelocityAttemptId?.let {
                     visualVelocityDiagnostics?.controlSample(it)
                 }
                 val cameraReady = !cameraPitchCommandPending &&
                     selectedCameraPitchDegrees?.let { it.isFinite() && abs(it + 90.0) <= 0.5 } == true
+                val maximumHeadingAgeNanos =
+                    if (racingVisualFeedback) TapeTrackingController.CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS
+                    else MAX_MOVING_HEADING_AGE_NANOS
                 tapeTracking.updateVisualVelocity(
                     forwardMetersPerSecond = sample?.forwardMps?.takeIf { cameraReady },
                     rightMetersPerSecond = sample?.rightMps?.takeIf { cameraReady },
                     sampleHeadingDegrees = sample?.aircraftHeadingDegrees,
                     currentHeadingDegrees = aircraftHeadingDegrees?.takeIf {
                         aircraftHeadingAtNanos != 0L &&
-                            now - aircraftHeadingAtNanos in 0L..MAX_MOVING_HEADING_AGE_NANOS
+                            now - aircraftHeadingAtNanos in 0L..maximumHeadingAgeNanos
                     },
                     sampleAtNanos = sample?.frameNanos ?: 0L,
                     nowNanos = now,
@@ -2342,10 +2440,20 @@ class MainActivity : Activity() {
                     "offset" to decision.controlledOffsetFraction,
                     "groundSpeed" to groundSpeedMetersPerSecond,
                     "alongTrackSpeed" to decision.measuredAlongTrackSpeedMetersPerSecond,
-                    "speedFeedbackSource" to if (visualFeedback) "visual_velocity" else "dji_listener",
-                    "controlFeedback" to
-                        (visualFeedback && decision.measuredAlongTrackSpeedMetersPerSecond != null),
-                    "visualVelocityAttemptId" to fixedHeadingVisualVelocityAttemptId.takeIf { visualFeedback },
+                    "speedFeedbackSource" to when {
+                        racingVisualFeedback ->
+                            if (ownsAuthority && decision.speedFeedbackActive) "visual_velocity" else "none"
+                        visualFeedback -> "visual_velocity"
+                        activeTapeTrackingMode == TapeTrackingMode.CIRCULAR -> "none"
+                        else -> "dji_listener"
+                    },
+                    "speedFeedbackEnabled" to visualFeedback,
+                    "controlFeedback" to if (racingVisualFeedback) {
+                        ownsAuthority && decision.speedFeedbackActive
+                    } else {
+                        visualFeedback && decision.measuredAlongTrackSpeedMetersPerSecond != null
+                    },
+                    "visualVelocityAttemptId" to trackingVisualVelocityAttemptId.takeIf { visualFeedback },
                     "speedFeedbackSampleNanos" to decision.speedFeedbackSampleAtNanos,
                     "speedFeedbackObservedNanos" to decision.speedFeedbackObservedAtNanos,
                     "speedFeedbackSampleAgeMs" to decision.speedFeedbackSampleAtNanos
@@ -2380,9 +2488,21 @@ class MainActivity : Activity() {
                 now - tapeCommandLoggedAtNanos >= TAPE_COMMAND_LOG_PERIOD_NANOS
             ) {
                 tapeCommandLoggedAtNanos = now
+                if (racingVisualFeedback) {
+                    val measuredSpeed = decision.measuredAlongTrackSpeedMetersPerSecond
+                    trackingVisualVelocityStatus =
+                        "視覺沿線=" + (measuredSpeed?.let { "%.2f m/s".format(it) } ?: "—") +
+                            if (ownsAuthority && decision.speedFeedbackActive) "・回授中"
+                            else "・未回授(${
+                                if (!ownsAuthority) "等待控制權"
+                                else decision.speedFeedbackUnavailableReason ?: decision.phase.name
+                            })"
+                    updateTelemetryText()
+                }
                 flightLog.write(
                     (
                         "tape tracking mode=$activeTapeTrackingMode " +
+                            "circularSpeed=$activeCircularTrackingSpeed " +
                             "yawControl=$activeCircularYawControlMode " +
                             "headingTarget=${yawHeadingTarget.logNumber(1)} " +
                             "rawAngle=${decision.rawAngleDegrees.logNumber(1)} " +
@@ -2411,7 +2531,7 @@ class MainActivity : Activity() {
                 )
             }
             if (decision.phase != renderedTapeTrackingPhase) {
-                fixedHeadingVisualVelocityAttemptId?.let {
+                trackingVisualVelocityAttemptId?.let {
                     visualVelocityDiagnostics?.updatePhase(decision.phase.name, it)
                 }
                 renderedTapeTrackingPhase = decision.phase
@@ -2477,6 +2597,8 @@ class MainActivity : Activity() {
                 when {
                     circularYawControlMode == CircularYawControlMode.HEADING ->
                         "ANGLE 前視點修正版・0.10 m/s"
+                    circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL ->
+                        "賽車（預設）：0.75 m/s・動態提前＋增益・視覺回授"
                     circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED ->
                         "賽車提速：0.75 m/s・動態提前＋增益"
                     else ->
@@ -2536,11 +2658,7 @@ class MainActivity : Activity() {
         message: String,
         release: Boolean,
     ) {
-        fixedHeadingVisualVelocityAttemptId?.let {
-            visualVelocityDiagnostics?.stop(it)
-            fixedHeadingVisualVelocityAttemptId = null
-            refreshVisualVelocityContext()
-        }
+        stopTrackingVisualVelocity()
         val wasActive =
             tapeTrackingStartPending || tapeTracking.enabled ||
                 renderedTapeTrackingPhase != TapeTrackingPhase.DISABLED ||
@@ -2596,7 +2714,7 @@ class MainActivity : Activity() {
         renderedTapeTrackingPhase = TapeTrackingPhase.DISABLED
         tapeCommandLoggedAtNanos = 0L
         activeTapeTrackingMode = null
-        activeCircularTrackingSpeed = CircularTrackingSpeed.FAST
+        activeCircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL
         activeCircularYawControlMode = CircularYawControlMode.RATE
         activeFixedHeadingActuationPhaseLead = FixedHeadingActuationPhaseLead.DEGREES_0
         activeFixedHeadingSpeedTarget = FixedHeadingSpeedTarget.BASELINE
@@ -2607,6 +2725,9 @@ class MainActivity : Activity() {
         }
         if (::speedScheduledCircularTapeTrackingButton.isInitialized) {
             speedScheduledCircularTapeTrackingButton.text = "賽車提速：0.75 m/s・動態提前＋增益"
+        }
+        if (::visualFeedbackCircularTapeTrackingButton.isInitialized) {
+            visualFeedbackCircularTapeTrackingButton.text = tapeTrackingName(TapeTrackingMode.CIRCULAR)
         }
         if (::angleCircularTapeTrackingButton.isInitialized) {
             angleCircularTapeTrackingButton.text = "ANGLE 前視點修正版・0.10 m/s"
@@ -2894,6 +3015,7 @@ class MainActivity : Activity() {
             activeTapeTrackingMode == TapeTrackingMode.CIRCULAR &&
                 activeCircularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED &&
                 activeCircularYawControlMode == CircularYawControlMode.RATE
+        val visualFeedbackRacingSelected = usesRacingVisualVelocityFeedback()
         circularTapeTrackingButton.text =
             when {
                 baselineRacingSelected && tapeTrackingStartPending -> "準備中："
@@ -2908,10 +3030,22 @@ class MainActivity : Activity() {
             } + tapeTrackingName(
                 TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.SPEED_SCHEDULED, CircularYawControlMode.RATE,
             )
+        visualFeedbackCircularTapeTrackingButton.text =
+            when {
+                visualFeedbackRacingSelected && tapeTrackingStartPending -> "準備中（點按取消）："
+                visualFeedbackRacingSelected && tapeTracking.enabled -> "停止"
+                else -> ""
+            } + tapeTrackingName(
+                TapeTrackingMode.CIRCULAR, CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
+                CircularYawControlMode.RATE,
+            )
         circularTapeTrackingButton.available =
             (tapeTracking.enabled && baselineRacingSelected) || racingCanStart
         speedScheduledCircularTapeTrackingButton.available =
             (tapeTracking.enabled && speedScheduledRacingSelected) || racingCanStart
+        visualFeedbackCircularTapeTrackingButton.available =
+            ((tapeTracking.enabled || tapeTrackingStartPending) && visualFeedbackRacingSelected) ||
+                (racingCanStart && activityForeground && visualVelocityDiagnostics != null)
         angleCircularTapeTrackingButton.available =
             (
                 tapeTracking.enabled &&
@@ -2999,6 +3133,9 @@ class MainActivity : Activity() {
                 headingTurn?.let { "%.0f/%.0f°".format(it.progressDegrees, it.targetDegrees) } ?: "off",
             )
             append(" · landingConfirmNeeded=").append(confirmationNeeded)
+            if (tapeTracking.enabled && usesRacingVisualVelocityFeedback()) {
+                append("\n").append(trackingVisualVelocityStatus ?: "視覺沿線=—・等待測速")
+            }
             append("\nbattery=").append(batteryPercent?.let { "$it%" } ?: "—")
             append(if (lowCellVoltage) " lowCell" else "")
             append(" · ").append(avoidance.summary)
@@ -3284,7 +3421,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     visualVelocityDiagnostics?.stop()
                     visualVelocityFrameContext = null
-                    fixedHeadingVisualVelocityAttemptId = null
+                    trackingVisualVelocityAttemptId = null
+                    trackingVisualVelocityStatus = null
                     consecutiveTapeMisses = 0
                     tapeDetected = false
                     tapeOverlay.showDetection(null)

@@ -308,6 +308,100 @@ class VisualVelocityDiagnosticsInstrumentedTest {
     }
 
     @Test
+    fun racingHeadingValidityGatesConsumptionWithoutDiscardingRegisteredMarkerScale() {
+        val results = LinkedBlockingQueue<Map<String, String>>()
+        val diagnostic = VisualVelocityDiagnostics { event, _, details ->
+            if (event == "visual_velocity_result") {
+                results.add(details.split(' ').associate { it.substringBefore('=') to it.substringAfter('=') })
+            }
+        }
+        val frame = calibratedFloor()
+        fun submit(
+            headingAgeAtFrame: Long = 0L,
+            frameAgeAtSubmission: Long = 0L,
+            cameraPitchPending: Boolean = false,
+        ): Map<String, String> {
+            // Leave room for delayed frames to remain monotonic and admitted.
+            Thread.sleep(100 + TimeUnit.NANOSECONDS.toMillis(frameAgeAtSubmission))
+            val now = System.nanoTime()
+            val frameNanos = now - frameAgeAtSubmission
+            diagnostic.submitRgba(
+                frame, frameNanos,
+                context().copy(
+                    aircraftHeadingDegrees = 36.0,
+                    aircraftHeadingReceivedAtNanos = frameNanos - headingAgeAtFrame,
+                    cameraPitchCommandPending = cameraPitchPending,
+                ),
+            )
+            return checkNotNull(results.poll(10, TimeUnit.SECONDS)) { "racing result did not arrive" }
+        }
+        fun assertRecovered() {
+            submit()
+            val sample = checkNotNull(diagnostic.controlSample("racing"))
+            assertNull(sample.reason)
+            assertEquals(0.0, checkNotNull(sample.forwardMps), 0.005)
+            assertEquals(36.0, checkNotNull(sample.aircraftHeadingDegrees), 0.0)
+        }
+        fun assertRevoked(result: Map<String, String>, reason: String) {
+            assertEquals("true", result["motionValid"])
+            assertEquals("false", result["valueValid"])
+            val sample = checkNotNull(diagnostic.controlSample("racing"))
+            assertEquals(reason, sample.reason)
+            assertNull(sample.forwardMps)
+            assertNull(sample.rightMps)
+            assertRecovered()
+        }
+        try {
+            diagnostic.start(
+                "racing", "TRACKING", null, controlFeedback = true,
+                maximumHeadingAgeNanos = TapeTrackingController.CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS,
+            )
+            repeat(5) { submit() }
+            assertRecovered()
+            // The recorded telemetry cadence has a 216ms median; a normal cached
+            // heading must remain usable without extrapolating it from yaw commands.
+            submit(headingAgeAtFrame = 216_000_000L)
+            assertNull(checkNotNull(diagnostic.controlSample("racing")).reason)
+            assertRevoked(submit(headingAgeAtFrame = 251_000_000L), "STALE_AIRCRAFT_HEADING")
+            // Fresh at submission, but acquired AFTER this image's admission.
+            assertRevoked(
+                submit(headingAgeAtFrame = -10_000_000L, frameAgeAtSubmission = 20_000_000L),
+                "FUTURE_AIRCRAFT_HEADING",
+            )
+            // Fresh relative to the image, but not when that image is submitted.
+            assertRevoked(
+                submit(headingAgeAtFrame = 200_000_000L, frameAgeAtSubmission = 100_000_000L),
+                "STALE_AIRCRAFT_HEADING",
+            )
+            assertRevoked(submit(headingAgeAtFrame = -100_000_000L), "FUTURE_AIRCRAFT_HEADING")
+
+            // Unlike heading age, a camera-change interval invalidates the ground
+            // projection: the next supported image cannot reuse the old scale.
+            submit(cameraPitchPending = true)
+            assertNull(checkNotNull(diagnostic.controlSample("racing")).forwardMps)
+            submit()
+            assertNull(checkNotNull(diagnostic.controlSample("racing")).forwardMps)
+            repeat(4) { submit() }
+            assertRecovered()
+
+            // Replacing the strict scope must restore the unchanged legacy timing,
+            // not leave a global 250ms gate or allow the old owner to stop the new one.
+            diagnostic.start("legacy", "TRACKING", 0.0, controlFeedback = true)
+            diagnostic.stop("racing")
+            assertNull(diagnostic.controlSample("racing"))
+            repeat(5) { submit(headingAgeAtFrame = 300_000_000L) }
+            val legacy = checkNotNull(diagnostic.controlSample("legacy"))
+            assertNull(legacy.reason)
+            assertEquals(0.0, checkNotNull(legacy.forwardMps), 0.005)
+            submit(headingAgeAtFrame = -10_000_000L, frameAgeAtSubmission = 20_000_000L)
+            assertNull(checkNotNull(diagnostic.controlSample("legacy")).reason)
+        } finally {
+            diagnostic.close()
+            frame.release()
+        }
+    }
+
+    @Test
     fun replacementDuringResultLoggingCannotResurrectOldControlSample() {
         val blockNextResult = AtomicBoolean(false)
         val resultEntered = CountDownLatch(1)

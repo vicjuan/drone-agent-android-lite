@@ -2,8 +2,10 @@ package com.durendal.droneagent.lite
 
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sign
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tan
 
@@ -39,6 +41,14 @@ internal enum class CircularTrackingSpeed(
     SLOW(0.50, latencyCompensatedLookahead = false),
     FAST(0.70, latencyCompensatedLookahead = true),
     SPEED_SCHEDULED(0.75, latencyCompensatedLookahead = true),
+    SPEED_SCHEDULED_VISUAL(0.75, latencyCompensatedLookahead = true),
+    ;
+
+    val usesVisualVelocity: Boolean
+        get() = this == SPEED_SCHEDULED_VISUAL
+
+    val usesSpeedScheduledActuation: Boolean
+        get() = this == SPEED_SCHEDULED || this == SPEED_SCHEDULED_VISUAL
 }
 
 
@@ -127,6 +137,7 @@ internal data class TapeTrackingDecision(
     val speedFeedbackObservedAtNanos: Long = 0L,
     val speedFeedbackUnavailableReason: String? = null,
     val speedFeedbackDirectionErrorDegrees: Double? = null,
+    val speedFeedbackActive: Boolean = false,
     val appliedPhaseLeadDegrees: Double = 0.0,
     val actuationGain: Double = 1.0,
     val scheduledTurnRateRadiansPerSecond: Double = 0.0,
@@ -137,6 +148,18 @@ internal data class TapeTrackingDecision(
 private data class PredictedLookahead(
     val xFraction: Double,
     val yFraction: Double,
+)
+
+private class CircularForwardMotion {
+    var speed = 0.0
+    var acceleration = 0.0
+}
+
+private data class CircularVisualVelocity(
+    val forward: Double,
+    val right: Double,
+    val headingDegrees: Double,
+    val sampleAtNanos: Long,
 )
 
 
@@ -217,24 +240,47 @@ internal class TapeTrackingController {
     private var reliableCircularPathEstablished = false
     private var appliedYawRateDegreesPerSecond = 0.0
     private var appliedRightSpeedMetersPerSecond = 0.0
-    private var appliedForwardSpeedMetersPerSecond = 0.0
-    private var appliedForwardAccelerationMetersPerSecondSquared = 0.0
+    private val forwardMotion = CircularForwardMotion()
+    private val nominalForwardMotion = CircularForwardMotion()
+    private var appliedForwardSpeedMetersPerSecond: Double
+        get() = forwardMotion.speed
+        set(value) { forwardMotion.speed = value }
+    private var appliedForwardAccelerationMetersPerSecondSquared: Double
+        get() = forwardMotion.acceleration
+        set(value) { forwardMotion.acceleration = value }
     private var appliedPhaseLeadDegrees = 0.0
     private var actuationGain = 1.0
     private var scheduledTurnRateRadiansPerSecond = 0.0
     private var actuationCompensationActive = false
     private var lastCommandAtNanos = 0L
     private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
-    private var circularTrackingSpeed = CircularTrackingSpeed.FAST
+    private var circularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL
     private var pathQuality: PathQuality = PathQuality.LOST
     private var endpointTurnEnabled = true
     private val fixedHeadingLapController = FixedHeadingLapController()
+    private var circularVisualVelocity: CircularVisualVelocity? = null
+    private var circularVisualHeadingDegrees: Double? = null
+    private var circularVisualHeadingAtNanos = 0L
+    private var circularVisualAcceptAfterNanos = 0L
+    private var circularVisualLastUpdateAtNanos = 0L
+    private var circularVisualNewestSampleAtNanos = 0L
+    private var circularVisualSampleAtNanos = 0L
+    private var circularVisualObservedAtNanos = 0L
+    private var circularVisualUnavailableReason: String? = null
+    private var circularVisualDirectionErrorDegrees: Double? = null
+    private var circularVisualMeasuredSpeed: Double? = null
+    private var circularVisualFilteredCorrection = 0.0
+    private var circularVisualFilteredAtNanos = 0L
+    private var circularVisualSafe = false
+    private var circularSpeedFeedbackActive = false
+    private var circularSpeedCorrection = 0.0
+    private var circularCommandTargetSpeed = 0.0
 
     fun start(
         nowNanos: Long,
         mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT,
         endpointTurnEnabled: Boolean = true,
-        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.FAST,
+        circularTrackingSpeed: CircularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL,
         fixedHeadingActuationPhaseLead: FixedHeadingActuationPhaseLead =
             FixedHeadingActuationPhaseLead.DEGREES_0,
         fixedHeadingSpeedTarget: FixedHeadingSpeedTarget = FixedHeadingSpeedTarget.BASELINE,
@@ -244,6 +290,8 @@ internal class TapeTrackingController {
         this.endpointTurnEnabled = endpointTurnEnabled
         this.circularTrackingSpeed = circularTrackingSpeed
         resetLeg()
+        circularVisualAcceptAfterNanos = nowNanos
+        if (usesCircularVisualVelocity()) circularVisualUnavailableReason = "NO_VISUAL_VELOCITY"
         awaitingPostTurnDetection = false
         if (mode == TapeTrackingMode.FIXED_HEADING) {
             phase = TapeTrackingPhase.RECENTERING
@@ -272,7 +320,7 @@ internal class TapeTrackingController {
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
         endpointTurnEnabled = true
-        circularTrackingSpeed = CircularTrackingSpeed.FAST
+        circularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL
     }
 
     fun resumeAfterTurn(nowNanos: Long) {
@@ -295,6 +343,7 @@ internal class TapeTrackingController {
         val validHeading = headingDegrees?.takeIf(Double::isFinite)
         if (validHeading != null) directedHeadingEnabled = true
         currentAircraftHeadingDegrees = validHeading?.let(::wrapToSignedHeading)
+        if (usesCircularVisualVelocity()) circularVisualHeadingDegrees = currentAircraftHeadingDegrees
     }
 
     fun updateVisualVelocity(
@@ -306,16 +355,174 @@ internal class TapeTrackingController {
         nowNanos: Long,
         unavailableReason: String?,
     ) {
-        if (!enabled || mode != TapeTrackingMode.FIXED_HEADING) return
-        fixedHeadingLapController.updateVisualVelocity(
-            forwardMetersPerSecond = forwardMetersPerSecond,
-            rightMetersPerSecond = rightMetersPerSecond,
-            sampleHeadingDegrees = sampleHeadingDegrees,
-            currentHeadingDegrees = currentHeadingDegrees,
-            sampleAtNanos = sampleAtNanos,
-            nowNanos = nowNanos,
-            unavailableReason = unavailableReason,
+        if (!enabled) return
+        if (mode == TapeTrackingMode.FIXED_HEADING) {
+            fixedHeadingLapController.updateVisualVelocity(
+                forwardMetersPerSecond = forwardMetersPerSecond,
+                rightMetersPerSecond = rightMetersPerSecond,
+                sampleHeadingDegrees = sampleHeadingDegrees,
+                currentHeadingDegrees = currentHeadingDegrees,
+                sampleAtNanos = sampleAtNanos,
+                nowNanos = nowNanos,
+                unavailableReason = unavailableReason,
+            )
+            return
+        }
+        if (!usesCircularVisualVelocity() || nowNanos < circularVisualLastUpdateAtNanos) return
+        circularVisualLastUpdateAtNanos = nowNanos
+        circularVisualHeadingDegrees = currentHeadingDegrees?.takeIf(Double::isFinite)?.let(::wrapToSignedHeading)
+        circularVisualHeadingAtNanos = nowNanos
+        refreshCircularVisualSafety(nowNanos)
+        val reason = when {
+            unavailableReason != null -> unavailableReason
+            forwardMetersPerSecond == null || rightMetersPerSecond == null -> "NO_VISUAL_VELOCITY"
+            !forwardMetersPerSecond.isFinite() || !rightMetersPerSecond.isFinite() -> "INVALID_VISUAL_VELOCITY"
+            sampleHeadingDegrees == null || !sampleHeadingDegrees.isFinite() ||
+                circularVisualHeadingDegrees == null -> "VISUAL_HEADING_UNAVAILABLE"
+            sampleAtNanos <= 0L -> "INVALID_VISUAL_TIMESTAMP"
+            sampleAtNanos > nowNanos -> "VISUAL_VELOCITY_FUTURE"
+            sampleAtNanos <= circularVisualAcceptAfterNanos -> "VISUAL_VELOCITY_REPLAYED"
+            sampleAtNanos < circularVisualNewestSampleAtNanos -> "VISUAL_VELOCITY_OUT_OF_ORDER"
+            nowNanos - sampleAtNanos > CIRCULAR_VISUAL_MAX_SAMPLE_AGE_NANOS -> "VISUAL_VELOCITY_STALE"
+            !circularVisualSafe -> "FEEDBACK_NOT_SAFE"
+            else -> null
+        }
+        if (reason != null) {
+            // A repeated rejected poll cannot rewrite the original outcome's provenance.
+            if (circularVisualVelocity != null || sampleAtNanos != circularVisualSampleAtNanos ||
+                circularVisualUnavailableReason == null || circularVisualObservedAtNanos == 0L ||
+                (unavailableReason != null && unavailableReason != circularVisualUnavailableReason)
+            ) {
+                circularVisualSampleAtNanos = sampleAtNanos
+                circularVisualObservedAtNanos = nowNanos
+                invalidateCircularVisualVelocity(
+                    reason,
+                    sampleAtNanos.coerceIn(0L, nowNanos.coerceAtLeast(0L)),
+                )
+            }
+            return
+        }
+        if (sampleAtNanos == circularVisualSampleAtNanos) return
+        circularVisualNewestSampleAtNanos = sampleAtNanos
+        circularVisualSampleAtNanos = sampleAtNanos
+        circularVisualObservedAtNanos = nowNanos
+        circularVisualUnavailableReason = null
+        circularVisualVelocity = CircularVisualVelocity(
+            checkNotNull(forwardMetersPerSecond),
+            checkNotNull(rightMetersPerSecond),
+            wrapToSignedHeading(checkNotNull(sampleHeadingDegrees)),
+            sampleAtNanos,
         )
+        refreshCircularVisualMeasurement(nowNanos)
+    }
+
+    private fun usesCircularVisualVelocity(): Boolean =
+        enabled && mode == TapeTrackingMode.CIRCULAR && circularTrackingSpeed.usesVisualVelocity
+
+    private fun invalidateCircularVisualVelocity(reason: String, rejectThroughNanos: Long) {
+        // Outcome invalidation follows capture time, not processing time: a late
+        // rejected frame must not exclude newer frames already in the pipeline.
+        // Also revoke the currently retained sample when an older outcome arrives.
+        circularVisualAcceptAfterNanos = maxOf(
+            circularVisualAcceptAfterNanos,
+            rejectThroughNanos,
+            circularVisualVelocity?.sampleAtNanos ?: 0L,
+        )
+        circularVisualVelocity = null
+        circularVisualMeasuredSpeed = null
+        circularVisualDirectionErrorDegrees = null
+        circularVisualFilteredCorrection = 0.0
+        circularVisualFilteredAtNanos = 0L
+        circularSpeedFeedbackActive = false
+        circularSpeedCorrection = 0.0
+        circularVisualUnavailableReason = reason
+    }
+
+    private fun refreshCircularVisualSafety(nowNanos: Long) {
+        if (!usesCircularVisualVelocity()) return
+        val safe = phase == TapeTrackingPhase.TRACKING &&
+            pathQuality == PathQuality.FULL_PATH &&
+            circularCenterlineMeasurement != null &&
+            circularDirectionConfirmed && circularTurnDirection != 0.0 &&
+            !circularDetectionGap &&
+            nowNanos >= lastDetectionAtNanos &&
+            nowNanos - lastDetectionAtNanos <= DETECTION_COMMAND_STALE_NANOS &&
+            curveMisalignmentSinceNanos == 0L &&
+            abs(controlledAngleDegrees ?: 180.0) < CURVE_ALIGNMENT_ENTER_ANGLE_DEGREES &&
+            applyCurvatureSpeedCaps(desiredForwardSpeed(nowNanos)) >=
+                circularTrackingSpeed.targetMetersPerSecond
+        if (!safe || !circularVisualSafe) {
+            // A sample from before (or during) recovery cannot reactivate feedback,
+            // even when the same camera result is polled after the path recovers.
+            if (circularVisualVelocity != null) {
+                invalidateCircularVisualVelocity("FEEDBACK_NOT_SAFE", nowNanos)
+            } else {
+                circularVisualAcceptAfterNanos = maxOf(circularVisualAcceptAfterNanos, nowNanos)
+            }
+        }
+        circularVisualSafe = safe
+    }
+
+    private fun refreshCircularVisualMeasurement(nowNanos: Long) {
+        if (!usesCircularVisualVelocity()) return
+        val sample = circularVisualVelocity ?: return
+        val currentHeading = circularVisualHeadingDegrees
+        val tangent = circularCenterlineMeasurement?.tangentDegrees
+        val reason = when {
+            nowNanos < sample.sampleAtNanos -> "VISUAL_VELOCITY_FUTURE"
+            nowNanos - sample.sampleAtNanos > CIRCULAR_VISUAL_MAX_SAMPLE_AGE_NANOS ->
+                "VISUAL_VELOCITY_STALE"
+            currentHeading == null || nowNanos < circularVisualHeadingAtNanos ||
+                nowNanos - circularVisualHeadingAtNanos > CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS ->
+                "VISUAL_HEADING_UNAVAILABLE"
+            tangent == null || !tangent.isFinite() -> "NO_METRIC_TANGENT"
+            else -> null
+        }
+        if (reason != null) {
+            invalidateCircularVisualVelocity(reason, sample.sampleAtNanos)
+            return
+        }
+        // VO is expressed in the CURRENT image at sample time, not its previous
+        // frame. Rotate into the latest body axes, then project onto the measured
+        // local rail tangent (never the lookahead chord or compensated command).
+        val rotation = Math.toRadians(shortestAngularDelta(checkNotNull(currentHeading), sample.headingDegrees))
+        val forward = sample.forward * cos(rotation) - sample.right * sin(rotation)
+        val right = sample.forward * sin(rotation) + sample.right * cos(rotation)
+        val tangentRadians = Math.toRadians(checkNotNull(tangent))
+        val measured = forward * cos(tangentRadians) + right * sin(tangentRadians)
+        val magnitude = hypot(forward, right)
+        val directionError =
+            if (magnitude > 0.05) {
+                shortestAngularDelta(tangent, Math.toDegrees(atan2(right, forward)))
+            } else {
+                0.0
+            }
+        if (!measured.isFinite() || !magnitude.isFinite() || abs(directionError) > 45.0) {
+            invalidateCircularVisualVelocity(
+                if (!measured.isFinite() || !magnitude.isFinite()) "INVALID_VISUAL_VELOCITY" else "DIRECTION_MISMATCH",
+                sample.sampleAtNanos,
+            )
+            circularVisualDirectionErrorDegrees = directionError.takeIf(Double::isFinite)
+            return
+        }
+        circularVisualMeasuredSpeed = measured
+        circularVisualDirectionErrorDegrees = directionError
+        circularVisualUnavailableReason = null
+        if (sample.sampleAtNanos > circularVisualFilteredAtNanos) {
+            val correction = (
+                CIRCULAR_VISUAL_SPEED_GAIN * (circularTrackingSpeed.targetMetersPerSecond - measured)
+                ).coerceIn(
+                -CIRCULAR_VISUAL_MAX_CORRECTION_METERS_PER_SECOND,
+                CIRCULAR_VISUAL_MAX_CORRECTION_METERS_PER_SECOND,
+            )
+            val elapsedSeconds = (sample.sampleAtNanos - circularVisualFilteredAtNanos) / NANOS_PER_SECOND
+            val alpha =
+                if (circularVisualFilteredAtNanos == 0L) 1.0
+                else elapsedSeconds / (CIRCULAR_VISUAL_FILTER_SECONDS + elapsedSeconds)
+            circularVisualFilteredCorrection =
+                exponentialAverage(circularVisualFilteredCorrection, correction, alpha)
+            circularVisualFilteredAtNanos = sample.sampleAtNanos
+        }
     }
 
     fun observe(observation: TapeTrackingObservation?, nowNanos: Long) {
@@ -337,6 +544,7 @@ internal class TapeTrackingController {
         }
         if (mode.followsCurvedPath) {
             observeCircularPath(observation, nowNanos)
+            refreshCircularVisualSafety(nowNanos)
             return
         }
         if (observation == null) {
@@ -462,6 +670,11 @@ internal class TapeTrackingController {
 
     fun tick(nowNanos: Long): TapeTrackingDecision {
         resetActuationCompensation()
+        circularSpeedFeedbackActive = false
+        circularSpeedCorrection = 0.0
+        circularCommandTargetSpeed = 0.0
+        refreshCircularVisualSafety(nowNanos)
+        refreshCircularVisualMeasurement(nowNanos)
         if (mode == TapeTrackingMode.FIXED_HEADING) {
             val fixedDecision = fixedHeadingLapController.tick(nowNanos)
             phase = when (fixedDecision.phase) {
@@ -671,10 +884,44 @@ internal class TapeTrackingController {
                 limitForwardSpeedForYaw(profileForwardSpeedMetersPerSecond, purePursuitCurvature)
             }
         val ordinaryTargetSpeed = applyCurvatureSpeedCaps(yawLimitedTargetSpeed)
+        val nominalForwardSpeed =
+            if (usesCircularVisualVelocity()) {
+                applyForwardAccelerationLimit(ordinaryTargetSpeed, nowNanos, nominalForwardMotion)
+                    .let(::applyCurvatureSpeedCaps)
+                    .also {
+                        if (it < nominalForwardMotion.speed) {
+                            nominalForwardMotion.speed = it
+                            nominalForwardMotion.acceleration = 0.0
+                        }
+                    }
+            } else {
+                0.0
+            }
+        circularSpeedFeedbackActive = usesCircularVisualVelocity() &&
+            circularVisualSafe && circularVisualMeasuredSpeed != null && ordinaryTargetSpeed > 0.0
+        circularSpeedCorrection =
+            if (circularSpeedFeedbackActive) circularVisualFilteredCorrection else 0.0
+        circularCommandTargetSpeed = (ordinaryTargetSpeed + circularSpeedCorrection).coerceAtLeast(0.0)
         accelerationLimitedForwardSpeedMetersPerSecond =
-            applyForwardAccelerationLimit(ordinaryTargetSpeed, nowNanos)
+            applyForwardAccelerationLimit(circularCommandTargetSpeed, nowNanos)
+        // The nominal curvature cap is a physical-speed plan, not an actuator-speed
+        // cap. Permit bounded compensation only while that plan allows full cruise.
+        val permittedBoost = maxOf(0.0, circularSpeedCorrection)
         val forwardSpeed =
-            applyEmergencyCurvatureSpeedCap(accelerationLimitedForwardSpeedMetersPerSecond)
+            if (usesCircularVisualVelocity()) {
+                minOf(
+                    accelerationLimitedForwardSpeedMetersPerSecond,
+                    applyCurvatureSpeedCaps(accelerationLimitedForwardSpeedMetersPerSecond) + permittedBoost,
+                    nominalForwardSpeed + permittedBoost,
+                ).also {
+                    if (it < appliedForwardSpeedMetersPerSecond) {
+                        appliedForwardSpeedMetersPerSecond = it
+                        appliedForwardAccelerationMetersPerSecondSquared = 0.0
+                    }
+                }
+            } else {
+                applyEmergencyCurvatureSpeedCap(accelerationLimitedForwardSpeedMetersPerSecond)
+            }
         val usesVisualCurvatureControl = usesVisualCurvatureControl()
         val purePursuitYawRate =
             if (usesVisualCurvatureControl) {
@@ -684,7 +931,9 @@ internal class TapeTrackingController {
             }
         val circularFeedforwardYawRate =
             if (usesVisualCurvatureControl) {
-                circularFeedforwardYawRate(forwardSpeed)
+                circularFeedforwardYawRate(
+                    if (usesCircularVisualVelocity()) nominalForwardSpeed else forwardSpeed,
+                )
             } else {
                 0.0
             }
@@ -1312,8 +1561,12 @@ internal class TapeTrackingController {
                         path = centerline,
                         heightMeters = heightMeters,
                         travelDirectionDegrees =
-                            observation.actualTravelDirectionDegrees
-                                ?: observation.angleFromVerticalDegrees,
+                            if (usesCircularVisualVelocity()) {
+                                observation.angleFromVerticalDegrees
+                            } else {
+                                observation.actualTravelDirectionDegrees
+                                    ?: observation.angleFromVerticalDegrees
+                            },
                         previousMeasurement =
                             circularCenterlineMeasurement
                                 ?.takeIf { circularDirectionConfirmed }
@@ -1506,6 +1759,23 @@ internal class TapeTrackingController {
     }
 
     private fun resetControlState() {
+        circularVisualVelocity = null
+        circularVisualHeadingDegrees = null
+        circularVisualHeadingAtNanos = 0L
+        circularVisualAcceptAfterNanos = 0L
+        circularVisualNewestSampleAtNanos = 0L
+        circularVisualLastUpdateAtNanos = 0L
+        circularVisualSampleAtNanos = 0L
+        circularVisualObservedAtNanos = 0L
+        circularVisualUnavailableReason = null
+        circularVisualDirectionErrorDegrees = null
+        circularVisualMeasuredSpeed = null
+        circularVisualFilteredCorrection = 0.0
+        circularVisualFilteredAtNanos = 0L
+        circularVisualSafe = false
+        circularSpeedFeedbackActive = false
+        circularSpeedCorrection = 0.0
+        circularCommandTargetSpeed = 0.0
         curveAlignmentSinceNanos = 0L
         curveMisalignmentSinceNanos = 0L
         directedHeadingEnabled = false
@@ -1525,6 +1795,17 @@ internal class TapeTrackingController {
     }
 
     private fun resetAppliedCommands() {
+        nominalForwardMotion.speed = 0.0
+        nominalForwardMotion.acceleration = 0.0
+        if (usesCircularVisualVelocity()) {
+            val revokedAt = maxOf(lastDetectionAtNanos, circularVisualLastUpdateAtNanos)
+            if (circularVisualVelocity != null) {
+                invalidateCircularVisualVelocity("FEEDBACK_NOT_SAFE", revokedAt)
+            } else {
+                circularVisualAcceptAfterNanos = maxOf(circularVisualAcceptAfterNanos, revokedAt)
+            }
+            circularVisualSafe = false
+        }
         appliedYawRateDegreesPerSecond = 0.0
         appliedRightSpeedMetersPerSecond = 0.0
         appliedForwardSpeedMetersPerSecond = 0.0
@@ -1567,7 +1848,7 @@ internal class TapeTrackingController {
     private fun usesVisualCurvatureControl(): Boolean =
         mode == TapeTrackingMode.CIRCULAR &&
             (circularTrackingSpeed == CircularTrackingSpeed.FAST ||
-                circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED) &&
+                circularTrackingSpeed.usesSpeedScheduledActuation) &&
             directedHeadingEnabled
 
     private fun confirmCircularTurnDirectionIfNeeded(): Boolean {
@@ -1863,25 +2144,26 @@ internal class TapeTrackingController {
     private fun applyForwardAccelerationLimit(
         targetForwardSpeedMetersPerSecond: Double,
         nowNanos: Long,
+        motion: CircularForwardMotion = forwardMotion,
     ): Double {
         if (!mode.followsCurvedPath) {
-            appliedForwardSpeedMetersPerSecond = targetForwardSpeedMetersPerSecond
-            return appliedForwardSpeedMetersPerSecond
+            motion.speed = targetForwardSpeedMetersPerSecond
+            return motion.speed
         }
         val elapsedSeconds = outputIntervalSeconds(nowNanos)
         if (mode != TapeTrackingMode.CIRCULAR) {
             val maximumRate =
-                if (targetForwardSpeedMetersPerSecond >= appliedForwardSpeedMetersPerSecond) {
+                if (targetForwardSpeedMetersPerSecond >= motion.speed) {
                     MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED
                 } else {
                     CIRCULAR_MAX_FORWARD_DECELERATION_METERS_PER_SECOND_SQUARED
                 }
-            appliedForwardSpeedMetersPerSecond = moveToward(
-                appliedForwardSpeedMetersPerSecond,
+            motion.speed = moveToward(
+                motion.speed,
                 targetForwardSpeedMetersPerSecond,
                 maximumRate * elapsedSeconds,
             )
-            return appliedForwardSpeedMetersPerSecond
+            return motion.speed
         }
         if (
             targetForwardSpeedMetersPerSecond <= 0.0 &&
@@ -1889,21 +2171,20 @@ internal class TapeTrackingController {
                 projectedCrossTrackMagnitude(it) >= CIRCULAR_FORWARD_STOP_OFFSET_FRACTION
             } == true
         ) {
-            appliedForwardSpeedMetersPerSecond = 0.0
-            appliedForwardAccelerationMetersPerSecondSquared = 0.0
+            motion.speed = 0.0
+            motion.acceleration = 0.0
             return 0.0
         }
         if (
-            targetForwardSpeedMetersPerSecond < appliedForwardSpeedMetersPerSecond &&
+            targetForwardSpeedMetersPerSecond < motion.speed &&
             (circularDetectionGap || pathQuality == PathQuality.LOST)
         ) {
-            appliedForwardSpeedMetersPerSecond = targetForwardSpeedMetersPerSecond
-            appliedForwardAccelerationMetersPerSecondSquared = 0.0
-            return appliedForwardSpeedMetersPerSecond
+            motion.speed = targetForwardSpeedMetersPerSecond
+            motion.acceleration = 0.0
+            return motion.speed
         }
 
-        val speedError =
-            targetForwardSpeedMetersPerSecond - appliedForwardSpeedMetersPerSecond
+        val speedError = targetForwardSpeedMetersPerSecond - motion.speed
         val desiredAcceleration = (
             speedError * CIRCULAR_SPEED_ERROR_RESPONSE_PER_SECOND
             ).coerceIn(
@@ -1911,28 +2192,25 @@ internal class TapeTrackingController {
             CIRCULAR_FAST_MAX_FORWARD_ACCELERATION_METERS_PER_SECOND_SQUARED,
         )
         val jerkLimitedAcceleration = moveToward(
-            appliedForwardAccelerationMetersPerSecondSquared,
+            motion.acceleration,
             desiredAcceleration,
             CIRCULAR_MAX_FORWARD_JERK_METERS_PER_SECOND_CUBED * elapsedSeconds,
         )
         // A newly reduced safety target must never inherit positive acceleration.
-        appliedForwardAccelerationMetersPerSecondSquared =
+        motion.acceleration =
             if (speedError < 0.0) minOf(jerkLimitedAcceleration, 0.0) else jerkLimitedAcceleration
-        val nextSpeed = (
-            appliedForwardSpeedMetersPerSecond +
-                appliedForwardAccelerationMetersPerSecondSquared * elapsedSeconds
-            ).coerceAtLeast(0.0)
+        val nextSpeed = (motion.speed + motion.acceleration * elapsedSeconds).coerceAtLeast(0.0)
         val reachesTarget =
             abs(speedError) <= CIRCULAR_SPEED_SETTLED_TOLERANCE_METERS_PER_SECOND ||
                 speedError > 0.0 && nextSpeed >= targetForwardSpeedMetersPerSecond ||
                 speedError < 0.0 && nextSpeed <= targetForwardSpeedMetersPerSecond
         if (reachesTarget) {
-            appliedForwardSpeedMetersPerSecond = targetForwardSpeedMetersPerSecond
-            appliedForwardAccelerationMetersPerSecondSquared = 0.0
+            motion.speed = targetForwardSpeedMetersPerSecond
+            motion.acceleration = 0.0
         } else {
-            appliedForwardSpeedMetersPerSecond = nextSpeed
+            motion.speed = nextSpeed
         }
-        return appliedForwardSpeedMetersPerSecond
+        return motion.speed
     }
 
 
@@ -2137,7 +2415,7 @@ internal class TapeTrackingController {
         nominalForwardSpeedMetersPerSecond: Double,
     ): Double {
         if (
-            circularTrackingSpeed != CircularTrackingSpeed.SPEED_SCHEDULED ||
+            !circularTrackingSpeed.usesSpeedScheduledActuation ||
             !usesVisualCurvatureControl() ||
             phase != TapeTrackingPhase.TRACKING ||
             pathQuality != PathQuality.FULL_PATH ||
@@ -2151,8 +2429,8 @@ internal class TapeTrackingController {
             return targetRightSpeed
         }
         // Conservative first-order response model, not a calibrated aircraft
-        // time constant or measured-speed feedback. Keep forward (and hence yaw
-        // feedforward) nominal; the rotating-vector inverse adds only body-right.
+        // time constant or measured-speed feedback. This inverse adds only
+        // body-right; visual actuator correction never sets the yaw motion plan.
         val turnRate = Math.toRadians(appliedYawRateDegreesPerSecond)
         val maximumRatio = minOf(
             tan(Math.toRadians(CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES)),
@@ -2204,6 +2482,18 @@ internal class TapeTrackingController {
             compensatedRightSpeed(targetRightSpeed, nominalForwardSpeedMetersPerSecond),
             MAX_LATERAL_ACCELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
         )
+        if (mode == TapeTrackingMode.CIRCULAR && circularTrackingSpeed.usesSpeedScheduledActuation) {
+            // Clamp AFTER lateral slew: its retained value may exceed the new
+            // allowance when forward acceleration increases the vector magnitude.
+            val maximumRight = sqrt(
+                (CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND *
+                    CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND -
+                    nominalForwardSpeedMetersPerSecond * nominalForwardSpeedMetersPerSecond)
+                    .coerceAtLeast(0.0),
+            )
+            appliedRightSpeedMetersPerSecond =
+                appliedRightSpeedMetersPerSecond.coerceIn(-maximumRight, maximumRight)
+        }
         lastCommandAtNanos = nowNanos
         return appliedYawRateDegreesPerSecond to appliedRightSpeedMetersPerSecond
     }
@@ -2262,6 +2552,19 @@ internal class TapeTrackingController {
             profileForwardSpeedMetersPerSecond = profileForwardSpeedMetersPerSecond,
             accelerationLimitedForwardSpeedMetersPerSecond =
                 accelerationLimitedForwardSpeedMetersPerSecond,
+            measuredAlongTrackSpeedMetersPerSecond = circularVisualMeasuredSpeed,
+            speedFeedbackBoostMetersPerSecond = circularSpeedCorrection,
+            commandTargetSpeedMetersPerSecond =
+                if (usesCircularVisualVelocity()) circularCommandTargetSpeed else 0.0,
+            speedFeedbackSampleAtNanos = circularVisualSampleAtNanos,
+            speedFeedbackObservedAtNanos = circularVisualObservedAtNanos,
+            speedFeedbackUnavailableReason = circularVisualUnavailableReason,
+            speedFeedbackDirectionErrorDegrees = circularVisualDirectionErrorDegrees,
+            speedFeedbackActive = circularSpeedFeedbackActive,
+            desiredAlongTrackSpeedMetersPerSecond =
+                if (usesCircularVisualVelocity()) circularTrackingSpeed.targetMetersPerSecond else null,
+            maximumCommandSpeedMetersPerSecond =
+                if (usesCircularVisualVelocity()) CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND else 0.0,
             appliedPhaseLeadDegrees = appliedPhaseLeadDegrees,
             actuationGain = actuationGain,
             scheduledTurnRateRadiansPerSecond = scheduledTurnRateRadiansPerSecond,
@@ -2373,6 +2676,11 @@ internal class TapeTrackingController {
         const val CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES = 15.0
         const val CIRCULAR_SPEED_SCHEDULED_MAX_GAIN = 1.04
         const val CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND = 0.85
+        const val CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS = 250_000_000L
+        private const val CIRCULAR_VISUAL_MAX_SAMPLE_AGE_NANOS = 250_000_000L
+        private const val CIRCULAR_VISUAL_SPEED_GAIN = 0.5
+        private const val CIRCULAR_VISUAL_MAX_CORRECTION_METERS_PER_SECOND = 0.08
+        private const val CIRCULAR_VISUAL_FILTER_SECONDS = 0.2
         const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.24
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.20
         const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.04

@@ -32,7 +32,12 @@ internal class VisualVelocityDiagnostics(
         val cameraPitchCommandPending: Boolean = false,
     )
 
-    /** Latest outcome, including invalidation; availability is not evidence of actuation. */
+    /**
+     * Latest outcome, including invalidation; availability is not evidence of actuation.
+     * Velocity is interval displacement in the CURRENT image/body frame (+dy forward,
+     * -dx right), with cached heading checked at admission/submission for strict scopes.
+     * Frame timestamps are decoded-frame admission times, not camera exposure times.
+     */
     data class ControlSample(
         val frameNanos: Long,
         val forwardMps: Double?,
@@ -48,6 +53,7 @@ internal class VisualVelocityDiagnostics(
         val axisHeading: Double?,
         val startedAtNanos: Long,
         val controlFeedback: Boolean,
+        val maximumHeadingAgeNanos: Long,
     )
 
     private data class Frame(
@@ -112,13 +118,23 @@ internal class VisualVelocityDiagnostics(
         else latestControlSample
     }
 
-    fun start(attemptId: String, phase: String, axisHeading: Double?, controlFeedback: Boolean = false) {
+    fun start(
+        attemptId: String,
+        phase: String,
+        axisHeading: Double?,
+        controlFeedback: Boolean = false,
+        maximumHeadingAgeNanos: Long = MAX_HEADING_AGE_NANOS,
+    ) {
+        require(maximumHeadingAgeNanos > 0L) { "Heading age budget must be positive" }
         val previous: Scope?
         val current: Scope
         synchronized(lock) {
             if (closed) return
             previous = scope
-            current = Scope(++generation, attemptId, phase, axisHeading.finite(), System.nanoTime(), controlFeedback)
+            current = Scope(
+                ++generation, attemptId, phase, axisHeading.finite(), System.nanoTime(),
+                controlFeedback, maximumHeadingAgeNanos,
+            )
             scope = current
             latestControlSample = null
             // Do not clear busy or reuse the snapshot while an old generation still owns it.
@@ -225,7 +241,14 @@ internal class VisualVelocityDiagnostics(
             var failure: Throwable? = null
             try {
                 val current = estimator ?: FixedCameraVelocityEstimator().also { estimator = it }
-                val metricContextValid = metricContextReason(frame) == null
+                val metricContextValid =
+                    if (frame.scope.maximumHeadingAgeNanos == MAX_HEADING_AGE_NANOS) {
+                        metricContextReason(frame) == null
+                    } else {
+                        // Heading gates consumption, not image registration or marker scale.
+                        // A delayed 5Hz attitude update must not erase valid ground geometry.
+                        imageContextReason(frame) == null
+                    }
                 if (estimatorGeneration != frame.scope.generation ||
                     (metricContextValid && !precedingMetricContextValid)
                 ) {
@@ -365,6 +388,9 @@ internal class VisualVelocityDiagnostics(
                 "aircraftHeadingReceivedAtNanos" to context.aircraftHeadingReceivedAtNanos.takeUnless { it == 0L },
                 "aircraftHeadingAgeMs" to context.aircraftHeadingReceivedAtNanos.takeUnless { it == 0L }
                     ?.let { milliseconds(frame.submittedAtNanos - it) },
+                "aircraftHeadingAgeAtFrameMs" to context.aircraftHeadingReceivedAtNanos.takeUnless { it == 0L }
+                    ?.let { milliseconds(frame.frameNanos - it) },
+                "maximumHeadingAgeNanos" to frame.scope.maximumHeadingAgeNanos,
                 "listenerX" to listener?.x.finite(), "listenerY" to listener?.y.finite(),
                 "listenerZ" to listener?.z.finite(), "listenerValueValid" to listenerValid,
                 "listenerReason" to when {
@@ -428,6 +454,7 @@ internal class VisualVelocityDiagnostics(
                 "modelLimitation" to "in_plane_rotation_isotropic_zoom_not_calibrated_camera_pose_or_perspective",
                 "metricScaleMeaning" to "marker_observed_or_short_term_similarity_propagated_no_height_fallback",
                 "controlFeedback" to session.controlFeedback,
+                "maximumHeadingAgeNanos" to session.maximumHeadingAgeNanos,
                 "controlFeedbackMeaning" to "enabled_not_consumption",
             ),
         )
@@ -476,10 +503,9 @@ internal class VisualVelocityDiagnostics(
         }
     }
 
-    private fun metricContextReason(frame: Frame): String? {
+    private fun imageContextReason(frame: Frame): String? {
         val context = frame.context
         val contextAge = frame.submittedAtNanos - context.capturedAtNanos
-        val headingAge = frame.submittedAtNanos - context.aircraftHeadingReceivedAtNanos
         return when {
             context.capturedAtNanos == 0L -> "MISSING_CONTEXT_TIMESTAMP"
             contextAge < 0L -> "FUTURE_CONTEXT"
@@ -488,11 +514,27 @@ internal class VisualVelocityDiagnostics(
             context.cameraPitchCommandDegrees == null -> "MISSING_CAMERA_PITCH"
             !context.cameraPitchCommandDegrees.isFinite() -> "NON_FINITE_CAMERA_PITCH"
             abs(context.cameraPitchCommandDegrees + 90.0) > 0.5 -> "CAMERA_NOT_DOWNWARD"
+            else -> null
+        }
+    }
+
+    private fun metricContextReason(frame: Frame): String? {
+        imageContextReason(frame)?.let { return it }
+        val context = frame.context
+        val headingAge = frame.submittedAtNanos - context.aircraftHeadingReceivedAtNanos
+        val headingAgeAtFrame = frame.frameNanos - context.aircraftHeadingReceivedAtNanos
+        // Legacy fixed-heading callers retain their submission-only check. A configured
+        // budget also pairs heading with frame admission: later telemetry is not the
+        // heading of this rotating image, even if it is fresh at submission.
+        val pairHeadingWithFrame = frame.scope.maximumHeadingAgeNanos != MAX_HEADING_AGE_NANOS
+        return when {
             context.aircraftHeadingDegrees == null -> "MISSING_AIRCRAFT_HEADING"
             !context.aircraftHeadingDegrees.isFinite() -> "NON_FINITE_AIRCRAFT_HEADING"
             context.aircraftHeadingReceivedAtNanos == 0L -> "MISSING_HEADING_TIMESTAMP"
-            headingAge < 0L -> "FUTURE_AIRCRAFT_HEADING"
-            headingAge > MAX_HEADING_AGE_NANOS -> "STALE_AIRCRAFT_HEADING"
+            headingAge < 0L || (pairHeadingWithFrame && headingAgeAtFrame < 0L) -> "FUTURE_AIRCRAFT_HEADING"
+            headingAge > frame.scope.maximumHeadingAgeNanos ||
+                (pairHeadingWithFrame && headingAgeAtFrame > frame.scope.maximumHeadingAgeNanos) ->
+                "STALE_AIRCRAFT_HEADING"
             else -> null
         }
     }
