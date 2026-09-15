@@ -405,6 +405,74 @@ class BlackTapeDetectorInstrumentedTest {
         assertTrue(diagnostics.last(), diagnostics.last().contains("width:"))
     }
     @Test
+    fun overlappingWideDarkRegionCannotReplaceTrackedTape() {
+        val width = 640
+        val height = 360
+        val tape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(tape, width, height, direction = 1.0, value = 20)
+        val wideDarkRegion = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                wideDarkRegion, width,
+                left = (center - 45.0).toInt(), top = y,
+                right = (center + 45.0).toInt(), bottom = y + 1,
+                value = 20,
+            )
+        }
+        val diagnostics = mutableListOf<String>()
+        val detections = detectSequence(
+            listOf(tape, tape, tape, wideDarkRegion, tape),
+            width, height,
+            onDiagnostics = diagnostics::add,
+            beforeFrame = { index, detector ->
+                if (index == 0) detector.beginTrackingSession()
+            },
+        )
+        assertTrue(diagnostics[2], detections[2] != null)
+        assertEquals(diagnostics[3], null, detections[3])
+        val recovered = checkNotNull(detections[4]) { diagnostics[4] }
+        assertEquals(checkNotNull(detections[2]).anchorXFraction, recovered.anchorXFraction, 0.02)
+    }
+
+    @Test
+    fun trackedTapeRecoversItsWidthAfterTemporaryNarrowing() {
+        val width = 640
+        val height = 360
+        val tape = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(tape, width, height, direction = 1.0, value = 20)
+        val narrowed = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        for (y in 0 until height) {
+            val forwardFraction = (height - 1 - y) / (height - 1.0)
+            val center = width / 2.0 + CURVE_DISPLACEMENT * forwardFraction * forwardFraction
+            fillRect(
+                narrowed, width,
+                left = (center - 6.0).toInt(), top = y,
+                right = (center + 6.0).toInt(), bottom = y + 1,
+                value = 20,
+            )
+        }
+        val diagnostics = mutableListOf<String>()
+        val detections = detectSequence(
+            listOf(tape, tape, tape, narrowed, narrowed, narrowed, tape),
+            width, height,
+            onDiagnostics = diagnostics::add,
+            beforeFrame = { index, detector ->
+                if (index == 0) detector.beginTrackingSession()
+            },
+        )
+        for (index in 2 until detections.size) {
+            assertEquals(diagnostics[index], PathQuality.FULL_PATH, detections[index]?.quality)
+        }
+        assertEquals(
+            checkNotNull(detections[2]).anchorXFraction,
+            checkNotNull(detections.last()).anchorXFraction,
+            0.02,
+        )
+    }
+
+    @Test
     fun finalCardboardScreenshotUiIsNotAcceptedAsCameraTape() {
         // This asset is a screenshot with the app's dark status panel, controls,
         // and bottom bar burned into the pixels. The detector receives raw camera
@@ -674,6 +742,45 @@ class BlackTapeDetectorInstrumentedTest {
 
         assertTrue(diagnostics[2], detections[2] != null)
         assertEquals(diagnostics.last(), PathQuality.FULL_PATH, detections.last()?.quality)
+    }
+
+    @Test
+    fun trackedTapeConfidenceIgnoresDistantDarkBackground() {
+        val width = 640
+        val height = 360
+        val established = rgbaFrame(width, height, red = 180, green = 120, blue = 50)
+        fillCurvedRibbon(established, width, height, direction = 1.0, value = 20)
+        val darkBackground = established.copyOf()
+        // Leave the tape and its nearby board unchanged. Only the distant lower
+        // corners become dark, as when the cardboard ends inside the camera view.
+        fillRect(darkBackground, width, 0, 316, 240, height, value = 20)
+        fillRect(darkBackground, width, 400, 316, width, height, value = 20)
+        val diagnostics = mutableListOf<String>()
+        fun tracked(frame: ByteArray): TapeDetection = checkNotNull(
+            detectSequence(
+                listOf(established, established, established, frame),
+                width,
+                height,
+                onDiagnostics = diagnostics::add,
+                beforeFrame = { index, detector ->
+                    if (index == 0) detector.beginTrackingSession()
+                },
+            ).last(),
+        ) { diagnostics.joinToString("\n") }
+
+        val baseline = tracked(established)
+        val withDarkBackground = tracked(darkBackground)
+        assertEquals(PathQuality.FULL_PATH, baseline.quality)
+        assertEquals(PathQuality.FULL_PATH, withDarkBackground.quality)
+        assertEquals(baseline.anchorXFraction, withDarkBackground.anchorXFraction, 0.01)
+        assertEquals(baseline.lookaheadX, withDarkBackground.lookaheadX, 0.01)
+        assertEquals(baseline.lookaheadY, withDarkBackground.lookaheadY, 0.01)
+        assertEquals(
+            diagnostics.joinToString("\n"),
+            baseline.confidence,
+            withDarkBackground.confidence,
+            0.02,
+        )
     }
 
     @Test

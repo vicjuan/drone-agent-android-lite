@@ -171,7 +171,7 @@ class BlackTapeDetector internal constructor(
     private val failedFrameCount = AtomicLong(0L)
     private val firstAcceptedAtNanos = AtomicLong(0L)
     private var previousBounds: Rect? = null
-    private var previousPathMedianWidthFraction: Double? = null
+    private var trackedPathWidthReferenceFraction: Double? = null
     private var previousRouteStartXFraction: Double? = null
     private var previousRouteStartYFraction: Double? = null
     private var previousCenterlineEstimate: CenterlineEstimate? = null
@@ -392,7 +392,7 @@ class BlackTapeDetector internal constructor(
 
     private fun clearTrackingState() {
         previousBounds = null
-        previousPathMedianWidthFraction = null
+        trackedPathWidthReferenceFraction = null
         previousRouteStartXFraction = null
         previousRouteStartYFraction = null
         previousCenterlineEstimate = null
@@ -831,7 +831,11 @@ class BlackTapeDetector internal constructor(
             previousCenterlineEstimate = winner.estimate
             temporalFramesSinceFullExtraction =
                 if (winner.temporallyTracked) temporalFramesSinceFullExtraction + 1 else 0
-            previousPathMedianWidthFraction = winner.pathMedianWidthFraction
+            // Keep the lock's reference through glare-induced narrowing so
+            // normal tape width is still accepted when the glare clears.
+            if (trackedPathWidthReferenceFraction == null) {
+                trackedPathWidthReferenceFraction = winner.pathMedianWidthFraction
+            }
             previousRouteStartXFraction = winner.routeStartXFraction
             previousRouteStartYFraction = winner.routeStartYFraction
             lastPathAxis = if (winner.temporallyTracked) "TEMPORAL_NORMALS" else "CENTERLINE"
@@ -1172,6 +1176,17 @@ class BlackTapeDetector internal constructor(
             rejectionCounts[TapeCandidateRejection.WIDTH.ordinal] += 1
             return null
         }
+        // Bounds overlap alone does not establish strip identity: a broad dark
+        // region can enclose the old tape box. Reject abrupt widening, not
+        // narrowing: glare and a changing visible arc can thin genuine tape.
+        val previousWidth = trackedPathWidthReferenceFraction
+        if (
+            previousWidth != null &&
+            measurement.medianWidthFraction > previousWidth * MAX_TRACKED_PATH_WIDTH_RATIO
+        ) {
+            rejectionCounts[TapeCandidateRejection.WIDTH.ordinal] += 1
+            return null
+        }
         // The arc test exists to stop a wall or floor edge being acquired as
         // curved tape. It guards acquisition only: a path already being tracked
         // has proved itself, and demanding it re-prove curvature every frame
@@ -1382,10 +1397,22 @@ class BlackTapeDetector internal constructor(
         val pathConfidence =
             (measurement.arcLengthFraction / IDEAL_PATH_FRACTION).coerceIn(0.0, 1.0)
         val continuityConfidence = if (overlapsPrevious) 1.0 else 0.5
-        val floorConfidence =
-            (context.surroundingFraction + context.minimumSideFraction) / 2.0
+        // The matched path already passed the local, bilateral board checks.
+        // Do not let a directional, bottom-seeded floor mask veto that evidence
+        // again through confidence. Missing or incompatible pairs still count.
+        val backgroundConfidence =
+            if (referenceMatchedTrackedPath) {
+                val matchedBoard = checkNotNull(boardColor)
+                minOf(
+                    matchedBoard.sampleCoverageFraction,
+                    matchedBoard.compatiblePairFraction,
+                    matchedBoard.bothReferenceMatchFraction,
+                )
+            } else {
+                (context.surroundingFraction + context.minimumSideFraction) / 2.0
+            }
         val score = (
-            floorConfidence * 0.35 +
+            backgroundConfidence * 0.35 +
                 estimate.components.widthConsistency * 0.30 +
                 pathConfidence * 0.25 +
                 continuityConfidence * 0.10
@@ -2017,7 +2044,7 @@ class BlackTapeDetector internal constructor(
         consecutiveDetectionMisses++
         if (consecutiveDetectionMisses >= PREVIOUS_SELECTION_MISS_LIMIT) {
             previousBounds = null
-            previousPathMedianWidthFraction = null
+            trackedPathWidthReferenceFraction = null
             previousRouteStartXFraction = null
             previousRouteStartYFraction = null
             previousCenterlineEstimate = null
@@ -2231,6 +2258,7 @@ class BlackTapeDetector internal constructor(
         const val MIN_COARSE_CONTOUR_AREA_FRACTION = MIN_PATH_AREA_FRACTION * 0.5
         const val MAX_PATH_AREA_FRACTION = 0.18
         const val MIN_PATH_MEDIAN_WIDTH_FRACTION = 0.012
+        const val MAX_TRACKED_PATH_WIDTH_RATIO = 2.0
         const val MIN_PATH_SURROUNDING_FLOOR = 0.22
         const val MIN_PATH_SIDE_FLOOR = 0.30
         const val MIN_TRACKED_PATH_SURROUNDING_FLOOR = 0.12

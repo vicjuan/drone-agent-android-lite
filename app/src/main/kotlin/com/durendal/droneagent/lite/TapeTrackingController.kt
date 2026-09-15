@@ -38,6 +38,7 @@ internal enum class CircularTrackingSpeed(
     ANGLE(0.10, latencyCompensatedLookahead = true),
     SLOW(0.50, latencyCompensatedLookahead = false),
     FAST(0.70, latencyCompensatedLookahead = true),
+    SPEED_SCHEDULED(0.75, latencyCompensatedLookahead = true),
 }
 
 
@@ -218,6 +219,10 @@ internal class TapeTrackingController {
     private var appliedRightSpeedMetersPerSecond = 0.0
     private var appliedForwardSpeedMetersPerSecond = 0.0
     private var appliedForwardAccelerationMetersPerSecondSquared = 0.0
+    private var appliedPhaseLeadDegrees = 0.0
+    private var actuationGain = 1.0
+    private var scheduledTurnRateRadiansPerSecond = 0.0
+    private var actuationCompensationActive = false
     private var lastCommandAtNanos = 0L
     private var mode: TapeTrackingMode = TapeTrackingMode.STRAIGHT
     private var circularTrackingSpeed = CircularTrackingSpeed.FAST
@@ -456,6 +461,7 @@ internal class TapeTrackingController {
     }
 
     fun tick(nowNanos: Long): TapeTrackingDecision {
+        resetActuationCompensation()
         if (mode == TapeTrackingMode.FIXED_HEADING) {
             val fixedDecision = fixedHeadingLapController.tick(nowNanos)
             phase = when (fixedDecision.phase) {
@@ -692,6 +698,7 @@ internal class TapeTrackingController {
             targetYawRate,
             targetRightSpeed,
             nowNanos,
+            nominalForwardSpeedMetersPerSecond = forwardSpeed,
         )
         return decision(
             phase = phase,
@@ -1524,6 +1531,7 @@ internal class TapeTrackingController {
         appliedForwardAccelerationMetersPerSecondSquared = 0.0
         profileForwardSpeedMetersPerSecond = 0.0
         accelerationLimitedForwardSpeedMetersPerSecond = 0.0
+        resetActuationCompensation()
         lastCommandAtNanos = 0L
     }
 
@@ -1558,7 +1566,8 @@ internal class TapeTrackingController {
     }
     private fun usesVisualCurvatureControl(): Boolean =
         mode == TapeTrackingMode.CIRCULAR &&
-            circularTrackingSpeed == CircularTrackingSpeed.FAST &&
+            (circularTrackingSpeed == CircularTrackingSpeed.FAST ||
+                circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED) &&
             directedHeadingEnabled
 
     private fun confirmCircularTurnDirectionIfNeeded(): Boolean {
@@ -2116,10 +2125,67 @@ internal class TapeTrackingController {
             POST_TURN_RECOVERY_SPEED_METERS_PER_SECOND
         }
 
+    private fun resetActuationCompensation() {
+        appliedPhaseLeadDegrees = 0.0
+        actuationGain = 1.0
+        scheduledTurnRateRadiansPerSecond = 0.0
+        actuationCompensationActive = false
+    }
+
+    private fun compensatedRightSpeed(
+        targetRightSpeed: Double,
+        nominalForwardSpeedMetersPerSecond: Double,
+    ): Double {
+        if (
+            circularTrackingSpeed != CircularTrackingSpeed.SPEED_SCHEDULED ||
+            !usesVisualCurvatureControl() ||
+            phase != TapeTrackingPhase.TRACKING ||
+            pathQuality != PathQuality.FULL_PATH ||
+            circularCenterlineMeasurement == null ||
+            !circularDirectionConfirmed ||
+            circularTurnDirection == 0.0 ||
+            circularDetectionGap ||
+            profileForwardSpeedMetersPerSecond <= 0.0 ||
+            nominalForwardSpeedMetersPerSecond <= 0.0
+        ) {
+            return targetRightSpeed
+        }
+        // Conservative first-order response model, not a calibrated aircraft
+        // time constant or measured-speed feedback. Keep forward (and hence yaw
+        // feedforward) nominal; the rotating-vector inverse adds only body-right.
+        val turnRate = Math.toRadians(appliedYawRateDegreesPerSecond)
+        val maximumRatio = minOf(
+            tan(Math.toRadians(CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES)),
+            sqrt(CIRCULAR_SPEED_SCHEDULED_MAX_GAIN * CIRCULAR_SPEED_SCHEDULED_MAX_GAIN - 1.0),
+        )
+        val lateralRatio = (turnRate * CIRCULAR_SPEED_SCHEDULED_RESPONSE_SECONDS)
+            .coerceIn(-maximumRatio, maximumRatio)
+        val maximumRightSpeed = sqrt(
+            (
+                CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND *
+                    CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND -
+                    nominalForwardSpeedMetersPerSecond * nominalForwardSpeedMetersPerSecond
+                ).coerceAtLeast(0.0),
+        )
+        val compensatedTarget = (
+            targetRightSpeed + nominalForwardSpeedMetersPerSecond * lateralRatio
+            ).coerceIn(-maximumRightSpeed, maximumRightSpeed)
+        val addedRightSpeed = compensatedTarget - targetRightSpeed
+        if (addedRightSpeed != 0.0 && sign(addedRightSpeed) == sign(turnRate)) {
+            val appliedRatio = addedRightSpeed / nominalForwardSpeedMetersPerSecond
+            appliedPhaseLeadDegrees = Math.toDegrees(atan2(appliedRatio, 1.0))
+            actuationGain = hypot(1.0, appliedRatio)
+            scheduledTurnRateRadiansPerSecond = turnRate
+            actuationCompensationActive = true
+        }
+        return compensatedTarget
+    }
+
     private fun applyOutputLimits(
         targetYawRate: Double,
         targetRightSpeed: Double,
         nowNanos: Long,
+        nominalForwardSpeedMetersPerSecond: Double = 0.0,
     ): Pair<Double, Double> {
         val elapsedSeconds = outputIntervalSeconds(nowNanos)
         val maximumYawAcceleration =
@@ -2135,7 +2201,7 @@ internal class TapeTrackingController {
         )
         appliedRightSpeedMetersPerSecond = moveToward(
             appliedRightSpeedMetersPerSecond,
-            targetRightSpeed,
+            compensatedRightSpeed(targetRightSpeed, nominalForwardSpeedMetersPerSecond),
             MAX_LATERAL_ACCELERATION_METERS_PER_SECOND_SQUARED * elapsedSeconds,
         )
         lastCommandAtNanos = nowNanos
@@ -2196,6 +2262,10 @@ internal class TapeTrackingController {
             profileForwardSpeedMetersPerSecond = profileForwardSpeedMetersPerSecond,
             accelerationLimitedForwardSpeedMetersPerSecond =
                 accelerationLimitedForwardSpeedMetersPerSecond,
+            appliedPhaseLeadDegrees = appliedPhaseLeadDegrees,
+            actuationGain = actuationGain,
+            scheduledTurnRateRadiansPerSecond = scheduledTurnRateRadiansPerSecond,
+            actuationCompensationActive = actuationCompensationActive,
             pathQuality = pathQuality,
         )
     }
@@ -2298,6 +2368,11 @@ internal class TapeTrackingController {
         const val CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND =
             CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND -
                 CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
+        /** Conservative racing response assumption; not flight-calibrated. */
+        const val CIRCULAR_SPEED_SCHEDULED_RESPONSE_SECONDS = 0.25
+        const val CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES = 15.0
+        const val CIRCULAR_SPEED_SCHEDULED_MAX_GAIN = 1.04
+        const val CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND = 0.85
         const val CIRCULAR_TRACKING_FORWARD_SPEED_METERS_PER_SECOND = 0.24
         const val CIRCULAR_CORRECTION_FORWARD_SPEED_METERS_PER_SECOND = 0.20
         const val CIRCULAR_CENTERING_DEAD_ZONE_FRACTION = 0.04

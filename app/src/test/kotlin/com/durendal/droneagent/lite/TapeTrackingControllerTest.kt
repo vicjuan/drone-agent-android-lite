@@ -256,6 +256,61 @@ class TapeTrackingControllerTest {
     }
 
     @Test
+    fun `scheduled racing leads into either turn and removes compensation when forward geometry is lost`() {
+        for (direction in listOf(-1.0, 1.0)) {
+            val controller = TapeTrackingController()
+            controller.start(
+                nowNanos = 0L,
+                mode = TapeTrackingMode.CIRCULAR,
+                endpointTurnEnabled = false,
+                circularTrackingSpeed = CircularTrackingSpeed.SPEED_SCHEDULED,
+            )
+            controller.updateAircraftHeading(0.0)
+            controller.tick(seconds(2))
+            val curve = observation(
+                angleDegrees = 0.0,
+                longSideFraction = 0.8,
+                heightAboveGroundMeters = 1.2,
+                centerline = metricCurvedPath(direction * 4.0 / 3.0),
+                confidence = 0.95,
+            )
+            var decision = controller.tick(seconds(2))
+            repeat(80) { index ->
+                val now = seconds(3) + index * 100_000_000L
+                controller.observe(curve.copy(capturedAtNanos = now), now)
+                decision = controller.tick(now)
+                assertTrue(kotlin.math.hypot(
+                    decision.forwardSpeedMetersPerSecond,
+                    decision.rightSpeedMetersPerSecond,
+                ) <= 0.85 + 1e-9)
+                assertTrue(kotlin.math.abs(decision.yawRateDegreesPerSecond) <= 65.0)
+            }
+            assertEquals(TapeTrackingPhase.TRACKING, decision.phase)
+            assertTrue(decision.forwardSpeedMetersPerSecond > 0.70)
+            assertTrue(decision.rightSpeedMetersPerSecond * direction > 0.01)
+            assertTrue(decision.appliedPhaseLeadDegrees * direction > 0.0)
+            assertTrue(kotlin.math.abs(decision.appliedPhaseLeadDegrees) <= 15.0)
+            assertTrue(decision.actuationGain > 1.0 && decision.actuationGain <= 1.04)
+            assertTrue(decision.actuationCompensationActive)
+
+            val nearOnly = curve.copy(lookahead = null, quality = PathQuality.NEAR_FIELD_ONLY)
+            repeat(30) { index ->
+                val now = seconds(11) + index * 100_000_000L
+                controller.observe(nearOnly.copy(capturedAtNanos = now), now)
+                decision = controller.tick(now)
+                assertFalse(decision.actuationCompensationActive)
+            }
+            assertTrue(decision.forwardSpeedMetersPerSecond < 0.01)
+            assertTrue(kotlin.math.abs(decision.rightSpeedMetersPerSecond) < 0.01)
+            controller.stop()
+            val stopped = controller.tick(seconds(15))
+            assertEquals(0.0, stopped.forwardSpeedMetersPerSecond, 0.0)
+            assertEquals(0.0, stopped.rightSpeedMetersPerSecond, 0.0)
+            assertFalse(stopped.actuationCompensationActive)
+        }
+    }
+
+    @Test
     fun `scheme C refuses translation without a metric visual centerline`() {
         val controller = circularTrackingController()
         controller.updateAircraftHeading(0.0)
