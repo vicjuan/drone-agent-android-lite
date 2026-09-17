@@ -434,6 +434,7 @@ class MainActivity : Activity() {
     private var activeTapeControlTrigger = TapeControlTrigger.PERIODIC
 
     private val tapeTracking = TapeTrackingController()
+    private val circleVisualFrames = CircleVisualFrameJoiner()
     private val angleHeadingController = AngleHeadingController()
     private var tapeTrackingAuthoritySeen = false
     private var tapeTrackingStartedAtNanos = 0L
@@ -651,6 +652,7 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(velocityReadTickRunnable)
         velocityReadDiagnostics.stop()
         visualVelocityDiagnostics?.stop()
+        circleVisualFrames.clear()
         visualVelocityFrameContext = null
         trackingVisualVelocityAttemptId = null
         trackingVisualVelocityStatus = null
@@ -672,6 +674,7 @@ class MainActivity : Activity() {
         visualVelocityFrameContext = null
         trackingVisualVelocityAttemptId = null
         trackingVisualVelocityStatus = null
+        circleVisualFrames.clear()
         stopHardwareLatencyTest("App 關閉，${activeHorizontalPulseName()}已停止", release = false)
         stopMathematicalCircle("App 關閉，數學圓周已停止", release = false)
         stopTiltFlight("App 關閉，傾角實驗已停止", release = false)
@@ -795,13 +798,15 @@ class MainActivity : Activity() {
 
     private fun handleTapeDetection(detection: TapeDetection?) {
         val callbackAtNanos = System.nanoTime()
+        // Capture the source before posting: later detector frames can advance the profiler cache.
+        val sourceFrameNanos = detection?.capturedAtNanos ?: latestProfiledFrameNanos
         runOnUiThread {
             if (tapeEndpointTurn) return@runOnUiThread
             val now = System.nanoTime()
             flightProfiler.record(
                 event = "detection_ui",
                 atNanos = now,
-                frameNanos = detection?.capturedAtNanos ?: latestProfiledFrameNanos,
+                frameNanos = sourceFrameNanos,
                 durationNanos = now - callbackAtNanos,
                 details =
                     profileDetails(
@@ -811,18 +816,18 @@ class MainActivity : Activity() {
                                 1_000_000.0,
                     ),
             )
-            latestDetectionUiFrameNanos = detection?.capturedAtNanos ?: latestProfiledFrameNanos
+            latestDetectionUiFrameNanos = sourceFrameNanos
             latestDetectionUiAtNanos = now
         tapeTracking.updateAircraftHeading(
             aircraftHeadingDegrees?.takeIf {
                 aircraftHeadingAtNanos != 0L &&
                     now - aircraftHeadingAtNanos <= MAX_MOVING_HEADING_AGE_NANOS
             },
+            sampleAtNanos = aircraftHeadingAtNanos,
         )
         if (tapeTracking.enabled) {
             val visualFeedback = usesVisualVelocityFeedback()
-            tapeTracking.observe(
-                detection?.let {
+            val rawObservation = detection?.let {
                     synchronized(aircraftVelocityLock) {
                     TapeTrackingObservation(
                         angleFromVerticalDegrees = it.angleFromVerticalDegrees,
@@ -850,9 +855,16 @@ class MainActivity : Activity() {
                             if (visualFeedback) null else speedFeedbackInputFailure(now),
                     )
                     }
-                },
-                now,
-            )
+                }
+            tapeTracking.observe(rawObservation, now)
+            if (usesRacingVisualVelocityFeedback() &&
+                !circleVisualFrames.offer(rawObservation, sourceFrameNanos)
+            ) {
+                tapeTracking.invalidateCircleFrame(
+                    checkNotNull(RacingCircleGuidance.untrustedObservationReason(rawObservation)),
+                    sourceFrameNanos,
+                )
+            }
             activeTapeControlTrigger = TapeControlTrigger.FRESH_VISION
             tapeTrackingControlRunnable.run()
         }
@@ -980,6 +992,10 @@ class MainActivity : Activity() {
         val nowNanos = System.nanoTime()
         cameraFrameStreamStaleAtNanos = nowNanos
         tapeDetector?.resetTracking()
+        if (usesRacingVisualVelocityFeedback()) {
+            circleVisualFrames.invalidate(latestProfiledFrameNanos)
+            tapeTracking.invalidateCircleFrame("CAMERA_STREAM_STALE", latestProfiledFrameNanos)
+        }
         val waitingForFrameRecovery = tapeTracking.beginFrameStreamRecovery(nowNanos)
         if (!waitingForFrameRecovery) {
             tapeTracking.observe(null, nowNanos)
@@ -1954,7 +1970,7 @@ class MainActivity : Activity() {
                                 )
                                 return@acquireControlLink
                             }
-                            tapeTracking.updateAircraftHeading(heading)
+                            tapeTracking.updateAircraftHeading(heading, aircraftHeadingAtNanos)
                             if (mode == TapeTrackingMode.FIXED_HEADING) {
                                 fixedHeadingReferenceDegrees = heading
                             }
@@ -1964,6 +1980,7 @@ class MainActivity : Activity() {
                         val endpointTurnEnabled =
                             mode != TapeTrackingMode.CIRCULAR &&
                                 mode != TapeTrackingMode.FIXED_HEADING
+                        circleVisualFrames.clear(now)
                         tapeTracking.start(
                             nowNanos = now,
                             mode = mode,
@@ -2019,6 +2036,11 @@ class MainActivity : Activity() {
                                 "speedFeedbackEnabled" to visualFeedback,
                                 "controlFeedback" to false,
                                 "speedFeedbackSource" to "none",
+                                "circleGuidanceEnabled" to circularVisualFeedback,
+                                "circleGuidanceActive" to false,
+                                "circleGuidanceMeaning" to
+                                    "healthy_exact_frame_fit_ekf_yaw_angle_only_original_racer_fallback"
+                                        .takeIf { circularVisualFeedback },
                                 "visualVelocityAttemptId" to trackingVisualVelocityAttemptId,
                                 "visualVelocityCalibration" to
                                     "isolated_yellow_pair_0p20m_required_no_sdk_or_height_fallback"
@@ -2172,6 +2194,7 @@ class MainActivity : Activity() {
                 activeFixedHeadingActuationPhaseLead.usesVisualVelocity)
 
     private fun stopTrackingVisualVelocity() {
+        circleVisualFrames.clear()
         trackingVisualVelocityAttemptId?.let { visualVelocityDiagnostics?.stop(it) }
         trackingVisualVelocityAttemptId = null
         trackingVisualVelocityStatus = null
@@ -2229,7 +2252,7 @@ class MainActivity : Activity() {
                     stopTapeTracking("機頭方向資料停止更新，方案 C 已停止", release = true)
                     return
                 }
-                tapeTracking.updateAircraftHeading(currentHeading)
+                tapeTracking.updateAircraftHeading(currentHeading, aircraftHeadingAtNanos)
             }
 
             val decisionStartedAtNanos = System.nanoTime()
@@ -2260,6 +2283,28 @@ class MainActivity : Activity() {
                         else -> sample.reason
                     },
                 )
+                if (racingVisualFeedback) {
+                    val circleUnavailableReason = when {
+                        !cameraReady -> "CAMERA_NOT_READY"
+                        sample == null -> "MISSING_VISUAL_VELOCITY"
+                        else -> sample.reason
+                    }
+                    if (circleUnavailableReason != null) {
+                        val sourceAtNanos =
+                            if (!cameraReady) latestDetectionUiFrameNanos else sample?.frameNanos ?: 0L
+                        circleVisualFrames.invalidate(sourceAtNanos)
+                        tapeTracking.invalidateCircleFrame(circleUnavailableReason, sourceAtNanos)
+                    } else if (sample != null) {
+                        circleVisualFrames.take(sample)?.let { observation ->
+                            tapeTracking.observeCircleFrame(
+                                observation,
+                                checkNotNull(sample.forwardMps),
+                                checkNotNull(sample.rightMps),
+                                now,
+                            )
+                        }
+                    }
+                }
             }
             val decision = tapeTracking.tick(now)
             val decisionCompletedAtNanos = System.nanoTime()
@@ -2437,6 +2482,35 @@ class MainActivity : Activity() {
                     "circularFeedforwardYawRate" to
                         decision.circularFeedforwardYawRateDegreesPerSecond,
                     "circularTurnDirection" to decision.circularTurnDirection,
+                    "circleGuidanceActive" to (ownsAuthority && decision.circleModel?.guidanceActive == true),
+                    "yawGuidanceSource" to
+                        if (ownsAuthority && decision.circleModel?.guidanceActive == true) "circle_ekf"
+                        else "original",
+                    "circleStatus" to decision.circleModel?.status,
+                    "circleSourceAtNanos" to decision.circleModel?.sourceAtNanos,
+                    "circleReceivedAtNanos" to decision.circleModel?.receivedAtNanos,
+                    "circleLastRejectionReason" to decision.circleModel?.lastRejectionReason,
+                    "circleLastRejectionSourceAtNanos" to decision.circleModel?.lastRejectionSourceAtNanos,
+                    "circleRejectionCount" to decision.circleModel?.rejectionCount,
+                    "circleFitReason" to decision.circleModel?.fitReason,
+                    "circleEstimatorReason" to decision.circleModel?.estimatorReason,
+                    "circleFitResidualMeters" to decision.circleModel?.fitResidualRmsMeters,
+                    "circleFitInliers" to decision.circleModel?.fitInlierCount,
+                    "circleFitArcSpanRadians" to decision.circleModel?.fitArcSpanRadians,
+                    "circleMetersPerPixel" to decision.circleModel?.metersPerPixel,
+                    "circleImageScaleAtNanos" to decision.circleModel?.imageScaleAtNanos,
+                    "circleLastVisionAtNanos" to decision.circleModel?.lastVisionAtNanos,
+                    "circleLastVelocityAtNanos" to decision.circleModel?.lastVelocityAtNanos,
+                    "circleEstimateAtNanos" to decision.circleModel?.estimateAtNanos,
+                    "circlePositionStdMeters" to decision.circleModel?.positionStdMeters,
+                    "circleVelocityStdMps" to decision.circleModel?.velocityStdMetersPerSecond,
+                    "circleTangentDegrees" to decision.circleModel?.tangentErrorDegrees,
+                    "circlePredictionSeconds" to decision.circleModel?.predictionSeconds,
+                    "circleAcceptedVisionCount" to decision.circleModel?.acceptedVisionCount,
+                    "circleRejectedVisionCount" to decision.circleModel?.rejectedVisionCount,
+                    "circleAcceptedVelocityCount" to decision.circleModel?.acceptedVelocityCount,
+                    "circleLateReplayCount" to decision.circleModel?.lateReplayCount,
+                    "circleEstimatorResetCount" to decision.circleModel?.estimatorResetCount,
                     "offset" to decision.controlledOffsetFraction,
                     "groundSpeed" to groundSpeedMetersPerSecond,
                     "alongTrackSpeed" to decision.measuredAlongTrackSpeedMetersPerSecond,
@@ -2490,13 +2564,21 @@ class MainActivity : Activity() {
                 tapeCommandLoggedAtNanos = now
                 if (racingVisualFeedback) {
                     val measuredSpeed = decision.measuredAlongTrackSpeedMetersPerSecond
+                    val circleModel = decision.circleModel
+                    val circleStatus =
+                        if (ownsAuthority && circleModel?.guidanceActive == true) "圓模型＋EKF導引"
+                        else "原導引(${circleModel?.status ?: "WAITING"}；${
+                            circleModel?.estimatorReason ?: circleModel?.fitReason
+                                ?: circleModel?.lastRejectionReason?.let { "最近拒絕=$it" }
+                                ?: "未套用角度修正"
+                        })"
                     trackingVisualVelocityStatus =
                         "視覺沿線=" + (measuredSpeed?.let { "%.2f m/s".format(it) } ?: "—") +
-                            if (ownsAuthority && decision.speedFeedbackActive) "・回授中"
+                            (if (ownsAuthority && decision.speedFeedbackActive) "・回授中"
                             else "・未回授(${
                                 if (!ownsAuthority) "等待控制權"
                                 else decision.speedFeedbackUnavailableReason ?: decision.phase.name
-                            })"
+                            })") + "・$circleStatus"
                     updateTelemetryText()
                 }
                 flightLog.write(
@@ -2542,8 +2624,10 @@ class MainActivity : Activity() {
                         "$trackingName：回轉完成，低速前移重新取得膠帶"
                     TapeTrackingPhase.RECOVERING_FRAME_STREAM ->
                         "$trackingName：相機影格恢復中，保持懸停"
-                    TapeTrackingPhase.TRACKING ->
-                        "$trackingName（Pure Pursuit 前視點導引）"
+                    TapeTrackingPhase.TRACKING -> {
+                        if (racingVisualFeedback) "$trackingName（原導引＋健康模型角度修正）"
+                        else "$trackingName（Pure Pursuit 前視點導引）"
+                    }
                     TapeTrackingPhase.ALIGNING_CURVE ->
                         "$trackingName：急彎原地對準中"
                     TapeTrackingPhase.REACQUIRING_PATH ->
@@ -2598,7 +2682,7 @@ class MainActivity : Activity() {
                     circularYawControlMode == CircularYawControlMode.HEADING ->
                         "ANGLE 前視點修正版・0.10 m/s"
                     circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL ->
-                        "賽車（預設）：0.75 m/s・動態提前＋增益・視覺回授"
+                        "賽車・圓模型＋EKF（預設）・0.85 m/s・視覺回授"
                     circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED ->
                         "賽車提速：0.75 m/s・動態提前＋增益"
                     else ->
@@ -3423,6 +3507,7 @@ class MainActivity : Activity() {
                     visualVelocityFrameContext = null
                     trackingVisualVelocityAttemptId = null
                     trackingVisualVelocityStatus = null
+                    circleVisualFrames.clear()
                     consecutiveTapeMisses = 0
                     tapeDetected = false
                     tapeOverlay.showDetection(null)

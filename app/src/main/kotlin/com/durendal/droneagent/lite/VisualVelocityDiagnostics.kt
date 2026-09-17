@@ -44,6 +44,10 @@ internal class VisualVelocityDiagnostics(
         val rightMps: Double?,
         val aircraftHeadingDegrees: Double?,
         val reason: String?,
+        val metersPerPixel: Double? = null,
+        val analysisWidth: Int = 0,
+        val analysisHeight: Int = 0,
+        val aircraftHeadingAtNanos: Long = 0L,
     )
 
     private data class Scope(
@@ -324,11 +328,15 @@ internal class VisualVelocityDiagnostics(
                 // Check generation and publish atomically, before any external callback.
                 // Invalid outcomes revoke the previous velocity rather than retaining it.
                 latestControlSample = ControlSample(
-                    frame.frameNanos,
-                    estimate?.forwardMps?.takeIf { valueValid },
-                    estimate?.rightMps?.takeIf { valueValid },
-                    context.aircraftHeadingDegrees.finite(),
-                    reason,
+                    frameNanos = frame.frameNanos,
+                    forwardMps = estimate?.forwardMps?.takeIf { valueValid },
+                    rightMps = estimate?.rightMps?.takeIf { valueValid },
+                    aircraftHeadingDegrees = context.aircraftHeadingDegrees.finite(),
+                    reason = reason,
+                    metersPerPixel = estimate?.metersPerPixel?.takeIf { valueValid },
+                    analysisWidth = estimate?.width ?: frame.width ?: 0,
+                    analysisHeight = estimate?.height ?: frame.height ?: 0,
+                    aircraftHeadingAtNanos = context.aircraftHeadingReceivedAtNanos,
                 )
             }
         }

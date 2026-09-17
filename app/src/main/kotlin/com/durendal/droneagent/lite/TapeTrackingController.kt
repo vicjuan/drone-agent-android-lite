@@ -41,7 +41,7 @@ internal enum class CircularTrackingSpeed(
     SLOW(0.50, latencyCompensatedLookahead = false),
     FAST(0.70, latencyCompensatedLookahead = true),
     SPEED_SCHEDULED(0.75, latencyCompensatedLookahead = true),
-    SPEED_SCHEDULED_VISUAL(0.75, latencyCompensatedLookahead = true),
+    SPEED_SCHEDULED_VISUAL(0.85, latencyCompensatedLookahead = true),
     ;
 
     val usesVisualVelocity: Boolean
@@ -84,6 +84,7 @@ internal data class TapeTrackingObservation(
     val actualGroundSpeedMetersPerSecond: Double? = null,
     val speedFeedbackSampleAtNanos: Long = 0L,
     val speedFeedbackUnavailableReason: String? = null,
+    val circleImageScale: CircleImageScale? = null,
 ) {
     init {
         require(angleFromVerticalDegrees in -90.0..90.0)
@@ -144,6 +145,7 @@ internal data class TapeTrackingDecision(
     val desiredAlongTrackSpeedMetersPerSecond: Double? = null,
     val maximumCommandSpeedMetersPerSecond: Double = 0.0,
     val actuationCompensationActive: Boolean = false,
+    val circleModel: CircleModelDiagnostics? = null,
 )
 private data class PredictedLookahead(
     val xFraction: Double,
@@ -221,6 +223,10 @@ internal class TapeTrackingController {
     private var curveMisalignmentSinceNanos = 0L
     private var directedHeadingEnabled = false
     private var currentAircraftHeadingDegrees: Double? = null
+    private var currentAircraftHeadingAtNanos = 0L
+    private var racingCircleGuidance: RacingCircleGuidance? = null
+    private var racingCirclePrediction: RacingCircleGuidanceResult? = null
+    private var circleModelDiagnostics: CircleModelDiagnostics? = null
     private var directedPathHeadingDegrees: Double? = null
     private var circularDirectionConfirmed = false
     private var circularTurnDirection = 0.0
@@ -290,6 +296,9 @@ internal class TapeTrackingController {
         this.endpointTurnEnabled = endpointTurnEnabled
         this.circularTrackingSpeed = circularTrackingSpeed
         resetLeg()
+        racingCircleGuidance =
+            if (usesCircularVisualVelocity()) RacingCircleGuidance().also { it.reset(nowNanos) }
+            else null
         circularVisualAcceptAfterNanos = nowNanos
         if (usesCircularVisualVelocity()) circularVisualUnavailableReason = "NO_VISUAL_VELOCITY"
         awaitingPostTurnDetection = false
@@ -317,6 +326,7 @@ internal class TapeTrackingController {
         endpointReferenceBounds = null
         consecutiveEndpointMisses = 0
         fixedHeadingLapController.stop()
+        racingCircleGuidance = null
         resetControlState()
         mode = TapeTrackingMode.STRAIGHT
         endpointTurnEnabled = true
@@ -339,11 +349,29 @@ internal class TapeTrackingController {
     }
 
 
-    fun updateAircraftHeading(headingDegrees: Double?) {
+    fun updateAircraftHeading(headingDegrees: Double?, sampleAtNanos: Long = 0L) {
         val validHeading = headingDegrees?.takeIf(Double::isFinite)
         if (validHeading != null) directedHeadingEnabled = true
         currentAircraftHeadingDegrees = validHeading?.let(::wrapToSignedHeading)
+        currentAircraftHeadingAtNanos = sampleAtNanos
         if (usesCircularVisualVelocity()) circularVisualHeadingDegrees = currentAircraftHeadingDegrees
+    }
+
+    /** Supplemental geometry never delays or substitutes the ordinary detector observation. */
+    fun observeCircleFrame(
+        observation: TapeTrackingObservation,
+        forwardMetersPerSecond: Double,
+        rightMetersPerSecond: Double,
+        nowNanos: Long,
+    ) {
+        if (!usesCircularVisualVelocity()) return
+        racingCircleGuidance?.observe(
+            observation, forwardMetersPerSecond, rightMetersPerSecond, nowNanos,
+        )
+    }
+
+    fun invalidateCircleFrame(reason: String, sourceAtNanos: Long) {
+        racingCircleGuidance?.invalidate(reason, sourceAtNanos)
     }
 
     fun updateVisualVelocity(
@@ -675,6 +703,10 @@ internal class TapeTrackingController {
         circularCommandTargetSpeed = 0.0
         refreshCircularVisualSafety(nowNanos)
         refreshCircularVisualMeasurement(nowNanos)
+        racingCirclePrediction = racingCircleGuidance?.predict(
+            nowNanos, currentAircraftHeadingDegrees, currentAircraftHeadingAtNanos, circularTurnDirection,
+        )
+        circleModelDiagnostics = racingCirclePrediction?.diagnostics
         if (mode == TapeTrackingMode.FIXED_HEADING) {
             val fixedDecision = fixedHeadingLapController.tick(nowNanos)
             phase = when (fixedDecision.phase) {
@@ -1780,6 +1812,9 @@ internal class TapeTrackingController {
         curveMisalignmentSinceNanos = 0L
         directedHeadingEnabled = false
         currentAircraftHeadingDegrees = null
+        currentAircraftHeadingAtNanos = 0L
+        racingCirclePrediction = null
+        circleModelDiagnostics = null
         directedPathHeadingDegrees = null
         circularDirectionConfirmed = false
         circularTurnDirection = 0.0
@@ -1825,7 +1860,7 @@ internal class TapeTrackingController {
             phase == TapeTrackingPhase.VERIFYING_ENDPOINT ->
                 ENDPOINT_MAX_YAW_RATE_DEGREES_PER_SECOND
             mode == TapeTrackingMode.CIRCULAR ->
-                CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND
+                circularMaximumYawRate()
             mode.followsCurvedPath ->
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND
             else -> MAX_TRACKING_YAW_RATE_DEGREES_PER_SECOND
@@ -1853,7 +1888,9 @@ internal class TapeTrackingController {
 
     private fun confirmCircularTurnDirectionIfNeeded(): Boolean {
         if (!usesVisualCurvatureControl()) return true
-        if (circularTurnDirection != 0.0) return true
+        // A forced alignment or expired reacquisition invalidates the old direction.
+        // A stored nonzero sign is reusable only while its confirmation is still valid.
+        if (circularDirectionConfirmed && circularTurnDirection != 0.0) return true
         val curvature = trustedCurvaturePerMeter ?: predictedCurvaturePerMeter ?: return false
         if (abs(curvature) < CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER) return false
         circularTurnDirection = sign(curvature)
@@ -1871,11 +1908,48 @@ internal class TapeTrackingController {
 
     private fun desiredCircularYawRate(feedforwardYawRateDegreesPerSecond: Double): Double {
         if (!circularDirectionConfirmed || circularTurnDirection == 0.0) return 0.0
-        return visualCurvatureYawRate(feedforwardYawRateDegreesPerSecond)
+        val localAngle = controlledAngleDegrees
+        val modelAngle = racingCirclePrediction?.tangentDegrees
+        var steeringAngle = localAngle
+        if (modelAngle != null && localAngle != null) {
+            // Keep the proven image path in charge of startup, translation, speed and safety.
+            // A fresh model only removes tangent-measurement lag inside the same yaw law.
+            // Speed-boost eligibility additionally requires full cruise speed. Do not
+            // tie tangent prediction to that condition: ordinary offset braking remains
+            // entirely owned by the original speed planner while yaw follows the rail.
+            val safeToAugment = phase == TapeTrackingPhase.TRACKING &&
+                pathQuality == PathQuality.FULL_PATH && circularCenterlineMeasurement != null &&
+                !circularDetectionGap && curveMisalignmentSinceNanos == 0L &&
+                profileForwardSpeedMetersPerSecond > 0.0
+            val agreesWithLocalPath =
+                abs(shortestAngularDelta(localAngle, modelAngle)) <= CIRCLE_MAX_TANGENT_DISAGREEMENT_DEGREES
+            if (safeToAugment && agreesWithLocalPath) {
+                steeringAngle = modelAngle
+                circleModelDiagnostics = circleModelDiagnostics?.copy(
+                    guidanceActive = true, status = "MODEL_TANGENT",
+                )
+            } else {
+                circleModelDiagnostics = circleModelDiagnostics?.copy(
+                    guidanceActive = false,
+                    status = if (safeToAugment) "LOCAL_TANGENT_DISAGREEMENT" else "BASELINE_PATH_CONTROL",
+                )
+            }
+        }
+        return visualCurvatureYawRate(feedforwardYawRateDegreesPerSecond, steeringAngle)
     }
 
-    private fun visualCurvatureYawRate(feedforwardYawRateDegreesPerSecond: Double): Double {
-        val angle = controlledAngleDegrees ?: return 0.0
+    private fun circularMaximumYawRate(): Double =
+        if (usesCircularVisualVelocity()) {
+            CIRCULAR_VISUAL_MAX_YAW_RATE_DEGREES_PER_SECOND
+        } else {
+            CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND
+        }
+
+    private fun visualCurvatureYawRate(
+        feedforwardYawRateDegreesPerSecond: Double,
+        steeringAngleDegrees: Double?,
+    ): Double {
+        val angle = steeringAngleDegrees ?: return 0.0
         val angleFeedback =
             if (abs(angle) <= CIRCULAR_YAW_DEAD_ZONE_DEGREES) {
                 0.0
@@ -1887,8 +1961,8 @@ internal class TapeTrackingController {
             }
         return (feedforwardYawRateDegreesPerSecond + angleFeedback)
             .coerceIn(
-                -CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND,
-                CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND,
+                -circularMaximumYawRate(),
+                circularMaximumYawRate(),
             )
     }
 
@@ -2046,7 +2120,7 @@ internal class TapeTrackingController {
         }
         val yawBudgetDegreesPerSecond =
             if (mode == TapeTrackingMode.CIRCULAR) {
-                CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND
+                circularMaximumYawRate() - CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
             } else {
                 CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND -
                     CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
@@ -2109,7 +2183,9 @@ internal class TapeTrackingController {
         if (magnitude <= PURE_PURSUIT_STRAIGHT_CURVATURE_PER_METER) return targetSpeed
         return minOf(
             targetSpeed,
-            Math.toRadians(CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND) / magnitude,
+            Math.toRadians(
+                circularMaximumYawRate() - CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND,
+            ) / magnitude,
         )
     }
 
@@ -2570,6 +2646,7 @@ internal class TapeTrackingController {
             scheduledTurnRateRadiansPerSecond = scheduledTurnRateRadiansPerSecond,
             actuationCompensationActive = actuationCompensationActive,
             pathQuality = pathQuality,
+            circleModel = circleModelDiagnostics,
         )
     }
 
@@ -2667,15 +2744,13 @@ internal class TapeTrackingController {
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 30.0
         const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 2.0
         const val CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND = 65.0
+        private const val CIRCULAR_VISUAL_MAX_YAW_RATE_DEGREES_PER_SECOND = 75.0
         const val CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 6.0
-        const val CIRCULAR_FAST_YAW_SPEED_BUDGET_DEGREES_PER_SECOND =
-            CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND -
-                CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND
         /** Conservative racing response assumption; not flight-calibrated. */
         const val CIRCULAR_SPEED_SCHEDULED_RESPONSE_SECONDS = 0.25
         const val CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES = 15.0
         const val CIRCULAR_SPEED_SCHEDULED_MAX_GAIN = 1.04
-        const val CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND = 0.85
+        const val CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND = 1.00
         const val CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS = 250_000_000L
         private const val CIRCULAR_VISUAL_MAX_SAMPLE_AGE_NANOS = 250_000_000L
         private const val CIRCULAR_VISUAL_SPEED_GAIN = 0.5
@@ -2712,6 +2787,8 @@ internal class TapeTrackingController {
         const val DIRECTED_PATH_ALIGNMENT_EXIT_ANGLE_DEGREES = 8.0
         const val DIRECTED_PATH_ALIGNMENT_MAX_YAW_RATE_DEGREES_PER_SECOND = 12.0
         const val VISUAL_CURVATURE_LOOKAHEAD_METERS = 0.45
+        // Adjunct eligibility only; exceeding this leaves the original yaw feedback intact.
+        const val CIRCLE_MAX_TANGENT_DISAGREEMENT_DEGREES = 15.0
         const val SCHEME_C_PLANNED_CURVATURE_PER_METER =
             2.0 / MathematicalCircleController.DIAMETER_METERS
         const val CIRCULAR_MIN_DIRECTION_CURVATURE_PER_METER = 0.20
