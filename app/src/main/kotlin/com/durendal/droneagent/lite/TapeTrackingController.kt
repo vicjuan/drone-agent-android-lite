@@ -36,12 +36,13 @@ internal val TapeTrackingMode.detectionMode: TapeDetectionMode
 internal enum class CircularTrackingSpeed(
     val targetMetersPerSecond: Double,
     val latencyCompensatedLookahead: Boolean,
+    val maximumCommandSpeedMetersPerSecond: Double = 0.0,
 ) {
     ANGLE(0.10, latencyCompensatedLookahead = true),
     SLOW(0.50, latencyCompensatedLookahead = false),
     FAST(0.70, latencyCompensatedLookahead = true),
-    SPEED_SCHEDULED(0.75, latencyCompensatedLookahead = true),
-    SPEED_SCHEDULED_VISUAL(0.85, latencyCompensatedLookahead = true),
+    SPEED_SCHEDULED(0.75, latencyCompensatedLookahead = true, maximumCommandSpeedMetersPerSecond = 1.00),
+    SPEED_SCHEDULED_VISUAL(1.23, latencyCompensatedLookahead = true, maximumCommandSpeedMetersPerSecond = 1.40),
     ;
 
     val usesVisualVelocity: Boolean
@@ -2516,8 +2517,8 @@ internal class TapeTrackingController {
             .coerceIn(-maximumRatio, maximumRatio)
         val maximumRightSpeed = sqrt(
             (
-                CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND *
-                    CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND -
+                circularTrackingSpeed.maximumCommandSpeedMetersPerSecond *
+                    circularTrackingSpeed.maximumCommandSpeedMetersPerSecond -
                     nominalForwardSpeedMetersPerSecond * nominalForwardSpeedMetersPerSecond
                 ).coerceAtLeast(0.0),
         )
@@ -2562,8 +2563,8 @@ internal class TapeTrackingController {
             // Clamp AFTER lateral slew: its retained value may exceed the new
             // allowance when forward acceleration increases the vector magnitude.
             val maximumRight = sqrt(
-                (CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND *
-                    CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND -
+                (circularTrackingSpeed.maximumCommandSpeedMetersPerSecond *
+                    circularTrackingSpeed.maximumCommandSpeedMetersPerSecond -
                     nominalForwardSpeedMetersPerSecond * nominalForwardSpeedMetersPerSecond)
                     .coerceAtLeast(0.0),
             )
@@ -2640,7 +2641,7 @@ internal class TapeTrackingController {
             desiredAlongTrackSpeedMetersPerSecond =
                 if (usesCircularVisualVelocity()) circularTrackingSpeed.targetMetersPerSecond else null,
             maximumCommandSpeedMetersPerSecond =
-                if (usesCircularVisualVelocity()) CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND else 0.0,
+                if (usesCircularVisualVelocity()) circularTrackingSpeed.maximumCommandSpeedMetersPerSecond else 0.0,
             appliedPhaseLeadDegrees = appliedPhaseLeadDegrees,
             actuationGain = actuationGain,
             scheduledTurnRateRadiansPerSecond = scheduledTurnRateRadiansPerSecond,
@@ -2744,13 +2745,12 @@ internal class TapeTrackingController {
         const val CIRCULAR_MAX_YAW_RATE_DEGREES_PER_SECOND = 30.0
         const val CIRCULAR_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 2.0
         const val CIRCULAR_FAST_MAX_YAW_RATE_DEGREES_PER_SECOND = 65.0
-        private const val CIRCULAR_VISUAL_MAX_YAW_RATE_DEGREES_PER_SECOND = 75.0
+        private const val CIRCULAR_VISUAL_MAX_YAW_RATE_DEGREES_PER_SECOND = 100.0
         const val CIRCULAR_FAST_YAW_CONTROL_RESERVE_DEGREES_PER_SECOND = 6.0
         /** Conservative racing response assumption; not flight-calibrated. */
         const val CIRCULAR_SPEED_SCHEDULED_RESPONSE_SECONDS = 0.25
         const val CIRCULAR_SPEED_SCHEDULED_MAX_PHASE_LEAD_DEGREES = 15.0
         const val CIRCULAR_SPEED_SCHEDULED_MAX_GAIN = 1.04
-        const val CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND = 1.00
         const val CIRCULAR_VISUAL_MAX_HEADING_AGE_NANOS = 250_000_000L
         private const val CIRCULAR_VISUAL_MAX_SAMPLE_AGE_NANOS = 250_000_000L
         private const val CIRCULAR_VISUAL_SPEED_GAIN = 0.5

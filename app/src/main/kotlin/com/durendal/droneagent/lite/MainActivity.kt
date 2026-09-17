@@ -2053,7 +2053,7 @@ class MainActivity : Activity() {
                                     else desiredAlongTrackSpeed.takeIf { mode == TapeTrackingMode.FIXED_HEADING },
                                 "maximumCommandSpeedMetersPerSecond" to
                                     if (circularSpeedScheduledActuation) {
-                                        TapeTrackingController.CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND
+                                        circularTrackingSpeed.maximumCommandSpeedMetersPerSecond
                                     } else {
                                         maximumCommandSpeed.takeIf { mode == TapeTrackingMode.FIXED_HEADING }
                                     },
@@ -2108,7 +2108,7 @@ class MainActivity : Activity() {
                                     circularTrackingSpeed.targetMetersPerSecond
                                         .takeIf { circularSpeedScheduledActuation },
                                 "schemeCMaximumResultantSpeedMetersPerSecond" to
-                                    TapeTrackingController.CIRCULAR_SPEED_SCHEDULED_MAX_COMMAND_SPEED_METERS_PER_SECOND
+                                    circularTrackingSpeed.maximumCommandSpeedMetersPerSecond
                                         .takeIf { circularSpeedScheduledActuation },
                                 "schemeCLookaheadMeters" to
                                     if (mode == TapeTrackingMode.CIRCULAR) {
@@ -2682,7 +2682,7 @@ class MainActivity : Activity() {
                     circularYawControlMode == CircularYawControlMode.HEADING ->
                         "ANGLE 前視點修正版・0.10 m/s"
                     circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED_VISUAL ->
-                        "賽車・圓模型＋EKF（預設）・0.85 m/s・視覺回授"
+                        "賽車・圓模型＋EKF（預設）・1.23 m/s・視覺回授"
                     circularTrackingSpeed == CircularTrackingSpeed.SPEED_SCHEDULED ->
                         "賽車提速：0.75 m/s・動態提前＋增益"
                     else ->

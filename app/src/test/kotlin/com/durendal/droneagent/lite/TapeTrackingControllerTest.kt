@@ -454,7 +454,7 @@ class TapeTrackingControllerTest {
                 val path = racingPath(direction).copy(capturedAtNanos = now)
                 listOf(slow, fast, nominal).forEach { it.observe(path, now) }
                 slow.updateVisualVelocity(0.40, 0.0, 0.0, 0.0, now, now, null)
-                fast.updateVisualVelocity(1.10, 0.0, 0.0, 0.0, now, now, null)
+                fast.updateVisualVelocity(1.50, 0.0, 0.0, 0.0, now, now, null)
                 slowDecision = slow.tick(now)
                 fastDecision = fast.tick(now)
                 val nominalDecision = nominal.tick(now)
@@ -473,11 +473,11 @@ class TapeTrackingControllerTest {
                 assertTrue(kotlin.math.hypot(
                     slowDecision.forwardSpeedMetersPerSecond,
                     slowDecision.rightSpeedMetersPerSecond,
-                ) <= 1.00 + 1e-9)
+                ) <= 1.40 + 1e-9)
             }
-            assertEquals(0.93, slowDecision.forwardSpeedMetersPerSecond, 0.001)
-            assertEquals(0.77, fastDecision.forwardSpeedMetersPerSecond, 0.001)
-            assertEquals(0.85, checkNotNull(slowDecision.desiredAlongTrackSpeedMetersPerSecond), 0.0)
+            assertEquals(1.31, slowDecision.forwardSpeedMetersPerSecond, 0.001)
+            assertEquals(1.15, fastDecision.forwardSpeedMetersPerSecond, 0.001)
+            assertEquals(1.23, checkNotNull(slowDecision.desiredAlongTrackSpeedMetersPerSecond), 0.0)
             assertEquals(0.08, slowDecision.speedFeedbackBoostMetersPerSecond, 1e-9)
             assertEquals(-0.08, fastDecision.speedFeedbackBoostMetersPerSecond, 1e-9)
             assertTrue(slowDecision.rightSpeedMetersPerSecond * direction > 0.0)
@@ -524,15 +524,15 @@ class TapeTrackingControllerTest {
         val stationary = controller.tick(now)
         assertEquals(0.0, checkNotNull(stationary.measuredAlongTrackSpeedMetersPerSecond), 0.0)
         assertTrue(stationary.speedFeedbackActive)
-        assertEquals(0.93, stationary.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertEquals(1.31, stationary.commandTargetSpeedMetersPerSecond, 1e-9)
 
         now += 100_000_000L
         controller.updateVisualVelocity(Double.NaN, 0.0, 0.0, 0.0, now, now, null)
         val invalid = controller.tick(now)
         assertNull(invalid.measuredAlongTrackSpeedMetersPerSecond)
         assertFalse(invalid.speedFeedbackActive)
-        assertEquals(0.85, invalid.commandTargetSpeedMetersPerSecond, 1e-9)
-        assertTrue(invalid.forwardSpeedMetersPerSecond <= 0.85)
+        assertEquals(1.23, invalid.commandTargetSpeedMetersPerSecond, 1e-9)
+        assertTrue(invalid.forwardSpeedMetersPerSecond <= 1.23)
 
         now += 100_000_000L
         controller.observe(racingPath().copy(capturedAtNanos = now), now)
@@ -569,7 +569,7 @@ class TapeTrackingControllerTest {
         assertFalse(replayed.speedFeedbackActive)
         assertEquals(expired.speedFeedbackUnavailableReason, replayed.speedFeedbackUnavailableReason)
         assertEquals(sampledAt, replayed.speedFeedbackObservedAtNanos)
-        assertTrue(replayed.forwardSpeedMetersPerSecond <= 0.85)
+        assertTrue(replayed.forwardSpeedMetersPerSecond <= 1.23)
         assertTrue(replayed.actuationCompensationActive)
     }
 
@@ -625,7 +625,7 @@ class TapeTrackingControllerTest {
         controller.updateVisualVelocity(0.0, 0.0, 0.0, 0.0, now, now, null)
         val displaced = controller.tick(now)
         assertFalse(displaced.speedFeedbackActive)
-        assertTrue(displaced.commandTargetSpeedMetersPerSecond < 0.85)
+        assertTrue(displaced.commandTargetSpeedMetersPerSecond < 1.23)
         now += 50_000_000L
         controller.observe(null, now)
         assertFalse(controller.tick(now).speedFeedbackActive)
@@ -664,7 +664,7 @@ class TapeTrackingControllerTest {
         assertTrue(resumed.speedFeedbackActive)
         assertEquals(validCapturedAt, resumed.speedFeedbackSampleAtNanos)
         assertEquals(validObservedAt, resumed.speedFeedbackObservedAtNanos)
-        assertTrue(resumed.commandTargetSpeedMetersPerSecond > 0.85)
+        assertTrue(resumed.commandTargetSpeedMetersPerSecond > 1.23)
     }
 
     @Test
@@ -687,9 +687,9 @@ class TapeTrackingControllerTest {
                 assertTrue(kotlin.math.hypot(
                     decision.forwardSpeedMetersPerSecond,
                     decision.rightSpeedMetersPerSecond,
-                ) <= 1.00 + 1e-9)
-                assertTrue(kotlin.math.abs(decision.yawRateDegreesPerSecond) <= 75.0)
-                assertTrue(kotlin.math.abs(decision.appliedPhaseLeadDegrees) <= 15.0)
+                ) <= 1.40 + 1e-9)
+                assertTrue(kotlin.math.abs(decision.yawRateDegreesPerSecond) <= 100.0)
+                assertTrue(kotlin.math.abs(decision.appliedPhaseLeadDegrees) <= 15.0 + 1e-9)
                 assertTrue(decision.actuationGain <= 1.04)
             }
         }
@@ -717,7 +717,7 @@ class TapeTrackingControllerTest {
         val decision = controller.tick(now)
         assertFalse(decision.speedFeedbackActive)
         assertNull(decision.measuredAlongTrackSpeedMetersPerSecond)
-        assertEquals(0.85, decision.forwardSpeedMetersPerSecond, 1e-9)
+        assertEquals(1.23, decision.forwardSpeedMetersPerSecond, 1e-9)
     }
 
     @Test
